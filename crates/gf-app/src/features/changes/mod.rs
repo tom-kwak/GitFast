@@ -11,9 +11,11 @@ use iced::{Color, Element, Length};
 
 use crate::feature::{Cx, Feature, Update};
 use crate::features::diff_view::DiffSource;
+use crate::nav::{self, Key, Moved, Nav};
+use crate::repo_tab::LineStats;
 use crate::theme::Tokens;
 use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
-use crate::widgets::{self, colored, dim, mono};
+use crate::widgets::{self, colored, dim};
 
 /// Which group a row is listed in (a partly staged file is in two).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +65,8 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub enum Output {
     ShowDiff(DiffSource),
+    /// A conflicted file was picked: open the conflict resolver.
+    ResolveConflict(PathBuf),
     Stage(Vec<PathBuf>),
     Unstage(Vec<PathBuf>),
     /// Needs confirmation by the app before running.
@@ -85,6 +89,16 @@ fn code(kind: ChangeKind) -> char {
         ChangeKind::Copied => 'C',
         ChangeKind::Unmerged => 'U',
     }
+}
+
+/// Line counts for an entry as listed in `group`.
+fn entry_counts(lines: &LineStats, path: &std::path::Path, group: Group) -> widgets::EntryCounts {
+    let map = match group {
+        Group::Staged => &lines.staged,
+        Group::Unstaged | Group::Conflicts => &lines.unstaged,
+        Group::Untracked => &lines.untracked,
+    };
+    map.get(path).copied()
 }
 
 fn conflict_label(kind: ConflictKind) -> &'static str {
@@ -127,6 +141,32 @@ pub fn group(entries: &[StatusEntry]) -> Groups<'_> {
     }
     g
 }
+
+/// Rows as listed: `None` for a group header, then its files.
+fn flat(entries: &[StatusEntry]) -> Vec<Option<(PathBuf, Group)>> {
+    let g = group(entries);
+    let mut rows = Vec::new();
+    for (items, group) in [
+        (&g.conflicts, Group::Conflicts),
+        (&g.staged, Group::Staged),
+        (&g.unstaged, Group::Unstaged),
+        (&g.untracked, Group::Untracked),
+    ] {
+        if items.is_empty() {
+            continue;
+        }
+        rows.push(None);
+        rows.extend(items.iter().map(|e| Some((e.path().clone(), group))));
+    }
+    rows
+}
+
+fn row_height(t: &Tokens) -> f32 {
+    (t.font_size * 1.8).round()
+}
+
+/// Scrollable id of the list.
+const LIST_ID: &str = "gf-working-tree";
 
 fn diff_source(path: PathBuf, group: Group) -> DiffSource {
     match group {
@@ -174,11 +214,62 @@ impl State {
         }
     }
 
+    /// Keys for the list: arrows pick a file, Space stages or unstages
+    /// it, `d` discards it (the app confirms first).
+    pub fn nav(&self, nav: Nav, entries: &[StatusEntry], t: &Tokens) -> Option<Moved<Message>> {
+        let rows = flat(entries);
+        let files: Vec<(usize, &(PathBuf, Group))> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.as_ref().map(|f| (i, f)))
+            .collect();
+        let current = self
+            .selected
+            .as_ref()
+            .and_then(|sel| files.iter().position(|(_, f)| *f == sel));
+        let selected = current.map(|c| files[c].1.clone());
+        match nav.key {
+            Key::Space => {
+                let (path, group) = selected?;
+                return Some(Moved::message(match group {
+                    Group::Staged => Message::Unstage(path),
+                    Group::Unstaged | Group::Untracked => Message::Stage(path),
+                    Group::Conflicts => return Some(Moved::stay()),
+                }));
+            }
+            Key::Char('d') => {
+                let (path, group) = selected?;
+                return Some(match group {
+                    Group::Unstaged | Group::Untracked => {
+                        Moved::message(Message::Discard(path, group))
+                    }
+                    Group::Staged | Group::Conflicts => Moved::stay(),
+                });
+            }
+            _ => {}
+        }
+        let h = row_height(t);
+        let i = nav::step(current, files.len(), nav.key, nav::page(self.scroll, h))?;
+        if current == Some(i) {
+            return Some(Moved::stay());
+        }
+        let (row, (path, group)) = files[i];
+        Some(
+            Moved::message(Message::Select(path.clone(), *group)).with_task(nav::reveal(
+                LIST_ID,
+                self.scroll,
+                row,
+                h,
+            )),
+        )
+    }
+
     fn entry_row<'a>(
         &self,
         t: &'a Tokens,
         e: &'a StatusEntry,
         group: Group,
+        lines: &LineStats,
     ) -> Element<'a, Message> {
         let (code_text, color, detail): (String, Color, Option<String>) = match e {
             StatusEntry::Changed {
@@ -188,29 +279,23 @@ impl State {
                 ..
             } => {
                 let staged = group == Group::Staged;
-                let (k, color) = if staged {
-                    (*index, t.added())
-                } else {
-                    (*worktree, t.removed())
-                };
+                let k = if staged { *index } else { *worktree };
+                let color = widgets::change_color(t, code(k));
                 let detail = orig_path
                     .as_ref()
                     .filter(|_| staged)
                     .map(|p| format!("← {}", p.display()));
-                (format!("{} ", code(k)), color, detail)
+                (code(k).to_string(), color, detail)
             }
             StatusEntry::Conflicted { kind, .. } => {
-                ("U ".into(), t.error(), Some(conflict_label(*kind).into()))
+                ("U".into(), t.error(), Some(conflict_label(*kind).into()))
             }
-            StatusEntry::Untracked { .. } => ("? ".into(), t.dim, None),
-            StatusEntry::Ignored { .. } => ("! ".into(), t.dim, None),
+            StatusEntry::Untracked { .. } => ("?".into(), widgets::change_color(t, '?'), None),
+            StatusEntry::Ignored { .. } => ("!".into(), t.dim, None),
         };
         let path = e.path();
-        let mut line = row![
-            colored(t, code_text, color),
-            mono(t, path.display().to_string()).wrapping(Wrapping::None)
-        ]
-        .spacing(4);
+        let mut line =
+            widgets::file_entry(t, &code_text, color, path, entry_counts(lines, path, group));
         if let Some(d) = detail {
             line = line.push(dim(t, d).wrapping(Wrapping::None));
         }
@@ -275,6 +360,10 @@ impl Feature for State {
 
     fn update(&mut self, message: Message) -> Update<Message, Output> {
         match message {
+            Message::Select(path, Group::Conflicts) => {
+                self.selected = Some((path.clone(), Group::Conflicts));
+                Update::output(Output::ResolveConflict(path))
+            }
             Message::Select(path, group) => {
                 self.selected = Some((path.clone(), group));
                 Update::output(Output::ShowDiff(diff_source(path, group)))
@@ -348,28 +437,32 @@ impl Feature for State {
         );
         section("UNTRACKED", t.dim, &g.untracked, Group::Untracked, None);
 
-        let path_cols = snap
+        let cols = snap
             .status
             .entries
             .iter()
             .map(|e| {
-                let orig = match e {
+                let extra = match e {
                     StatusEntry::Changed {
                         orig_path: Some(o), ..
                     } => columns(&o.display().to_string()) + 3,
                     StatusEntry::Conflicted { .. } => 16,
                     _ => 0,
                 };
-                columns(&e.path().display().to_string()) + orig
+                // Widest of the groups the entry can appear in.
+                let counts = entry_counts(&snap.lines, e.path(), Group::Staged)
+                    .or_else(|| entry_counts(&snap.lines, e.path(), Group::Unstaged))
+                    .or_else(|| entry_counts(&snap.lines, e.path(), Group::Untracked));
+                widgets::file_entry_columns(e.path(), counts) + extra
             })
             .max()
             .unwrap_or(0);
-        // two action icons, status code, path (+ rename source) and padding.
-        let content_width = 64.0 + t.cols(3 + path_cols) + 24.0;
+        // two action icons, the entry and padding.
+        let content_width = 64.0 + t.cols(cols) + 24.0;
         let list = virtual_list(
-            "gf-working-tree",
+            LIST_ID,
             rows.len(),
-            (t.font_size * 1.8).round(),
+            row_height(t),
             content_width,
             self.scroll,
             move |i| match rows[i] {
@@ -395,7 +488,7 @@ impl Feature for State {
                         .align_y(iced::Alignment::Center)
                         .into()
                 }
-                WtRow::Entry(e, group) => self.entry_row(t, e, group),
+                WtRow::Entry(e, group) => self.entry_row(t, e, group, &snap.lines),
             },
             Message::Scrolled,
         );
@@ -453,5 +546,35 @@ mod tests {
         assert!(
             matches!(out, Some(Output::Discard { tracked, untracked }) if tracked.is_empty() && untracked.len() == 1)
         );
+    }
+
+    #[test]
+    fn arrows_skip_headers_and_space_stages() {
+        let t = crate::theme::preset("gf-dark");
+        let entries = vec![
+            changed("s", ChangeKind::Modified, ChangeKind::Unmodified),
+            changed("u", ChangeKind::Unmodified, ChangeKind::Modified),
+            StatusEntry::Untracked { path: "n".into() },
+        ];
+        let mut s = State::default();
+        let msg = |s: &State, k| s.nav(Nav::plain(k), &entries, &t).and_then(|m| m.message);
+        // Nothing selected: ↓ picks the first file, not the STAGED header.
+        assert!(
+            matches!(msg(&s, Key::Down), Some(Message::Select(p, Group::Staged)) if p.as_path() == std::path::Path::new("s"))
+        );
+        let _ = s.update(Message::Select("s".into(), Group::Staged));
+        assert!(
+            matches!(msg(&s, Key::Down), Some(Message::Select(p, Group::Unstaged)) if p.as_path() == std::path::Path::new("u"))
+        );
+        assert!(
+            matches!(msg(&s, Key::Space), Some(Message::Unstage(p)) if p.as_path() == std::path::Path::new("s"))
+        );
+        let _ = s.update(Message::Select("n".into(), Group::Untracked));
+        assert!(matches!(msg(&s, Key::Space), Some(Message::Stage(_))));
+        assert!(matches!(
+            msg(&s, Key::Char('d')),
+            Some(Message::Discard(_, Group::Untracked))
+        ));
+        assert!(msg(&s, Key::Down).is_none(), "already last: stays");
     }
 }

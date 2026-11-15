@@ -123,7 +123,10 @@ gf/
 2. **발견 가능성** — 단축키는 버튼 라벨·툴팁·상태줄 힌트에 함께 표시 (`[ Open ⌘O ]`). `:help`와 `?`로 전체 목록. 명령줄은 자동완성·히스토리(↑/↓) 제공
 3. **빈 상태를 안내로** — 저장소가 없으면 최근 저장소 목록, 폴더 열기 버튼, 드래그&드롭 안내를 보여준다. 빈 목록에는 "무엇을 하면 채워지는지" 한 줄 안내
 4. **즉각적인 피드백** — 실행 중 작업은 스피너/진행률, 완료·실패는 상태줄과 명령 로그에 즉시 표시. 오류 메시지는 git 원문 + 다음 행동 제안
-5. **안전장치** — 파괴적 작업은 확인 박스(무엇이 사라지는지 명시) + 기본 포커스는 취소. 가능한 것은 Undo 제공
+5. **안전장치 (공통 확인 다이얼로그)** — 삭제·변경 작업은 반드시 `App::confirm(Confirm::…)`로 확인한다 (`gf-app/src/app/dialogs.rs`). 새 기능도 같은 헬퍼를 재사용
+   - `Confirm::delete` (빨강 ⚠): 데이터를 지우는 작업(discard, 브랜치·태그·stash 삭제, force push). Enter로 실행 불가, 클릭 필수, 건너뛰기 불가
+   - `Confirm::change` (노랑 ?): 작업 트리·HEAD·원격을 바꾸는 작업(checkout, stash apply/pop, pull, push, 태그 push, amend). 무엇이 바뀌는지와 되돌릴 수 있는지 명시, "다시 묻지 않기" 선택 가능(`:confirm reset`으로 복원)
+   - 확인 없이 실행: stage/unstage(hunk·줄 포함)처럼 자주 쓰고 즉시 되돌릴 수 있는 작업, 사용자가 명령줄에 직접 입력한 git 명령
 6. **포커스·상태 유지** — 탭 전환·새로고침 후에도 선택, 스크롤, 접힘 상태 유지. 앱 재시작 시 열린 탭 복원
 7. **큰 클릭 영역과 hover 표시** — 행 전체 클릭 가능, hover 시 배경 강조. 밀도 높은 레이아웃이어도 오클릭이 없도록
 8. **익숙한 관례 따르기** — macOS 단축키(⌘O/⌘W/⌘1–9 등), git 용어 그대로 사용, 색 의미 일관 (초록=추가, 빨강=삭제)
@@ -220,7 +223,7 @@ trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }   // MR 화면 �
 | **M1 Git 코어** ✅ | CLI Runner + 파서 | 취소/진행률/로그 Runner, status v2·log·diff·branch 파서, gix 조회, 단위테스트 |
 | **M2 앱 셸** ✅ | 빈 앱 실행 | iced 윈도우, Feature trait, 저장소 열기/탭, 사이드바, 명령 로그 패널, 테마 |
 | **M3 일상 작업** ✅ | SourceTree 수준 기본기 | 변경사항/hunk·라인 stage, 커밋, diff 뷰, 커밋 그래프, 브랜치/태그/stash, fetch/pull/push, 파일 감시 |
-| **M4 고급 작업** | 상용툴 차별 기능 | merge/rebase/cherry-pick + 충돌 해결, 인터랙티브 리베이스, blame/파일 히스토리, Undo, submodule/worktree/LFS, bisect |
+| **M4 고급 작업** ✅ | 상용툴 차별 기능 | merge/rebase/cherry-pick + 충돌 해결, 인터랙티브 리베이스, blame/파일 히스토리, Undo, submodule/worktree/LFS, bisect |
 | **M5 전 명령 지원** | "모든 명령" 달성 | CommandSpec 전체 작성, 자동 폼, 커맨드 팔레트, 내장 터미널, 커스텀 액션 |
 | **M6 Git Flow** | Flow 지원 | init 다이얼로그, start/finish/publish, Flow 사이드바 |
 | **M7 호스팅** | Clone + GitLab MR | gf-auth, gf-hosting, GitLab 구현(repo/MR/pipeline), Clone 다이얼로그, MR 화면, GitHub repo/clone |

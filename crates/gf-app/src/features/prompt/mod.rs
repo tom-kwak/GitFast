@@ -140,7 +140,7 @@ impl Feature for State {
     fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
         let t = cx.tokens;
         let input = text_input(
-            "git command (status, log -5 …)  ·  :help  ·  ⌘O open repo",
+            "/ to type a git command (status, log -5 …)  ·  :help  ·  ⌘O open repo",
             &self.input,
         )
         .id(PROMPT_ID)

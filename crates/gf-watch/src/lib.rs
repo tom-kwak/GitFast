@@ -35,9 +35,11 @@ pub fn classify(path: &Path, workdir: Option<&Path>, git_dir: &Path) -> Option<C
         };
         return match first.to_str()? {
             "index" => Some(Change::Index),
-            "HEAD" | "ORIG_HEAD" | "FETCH_HEAD" | "MERGE_HEAD" | "packed-refs" | "refs" => {
-                Some(Change::Refs)
-            }
+            // Refs, plus the markers of an operation in progress (they
+            // decide the banner: merge, cherry-pick, revert, rebase, bisect).
+            "HEAD" | "ORIG_HEAD" | "FETCH_HEAD" | "MERGE_HEAD" | "CHERRY_PICK_HEAD"
+            | "REVERT_HEAD" | "BISECT_LOG" | "rebase-merge" | "rebase-apply" | "packed-refs"
+            | "refs" => Some(Change::Refs),
             "config" => Some(Change::Config),
             _ => None,
         };
@@ -169,6 +171,14 @@ mod tests {
             None
         );
         assert_eq!(classify(Path::new("/r/.git/index.lock"), Some(w), g), None);
+        assert_eq!(
+            classify(Path::new("/r/.git/rebase-merge/done"), Some(w), g),
+            Some(Change::Refs)
+        );
+        assert_eq!(
+            classify(Path::new("/r/.git/CHERRY_PICK_HEAD"), Some(w), g),
+            Some(Change::Refs)
+        );
         assert_eq!(classify(Path::new("/elsewhere/x"), Some(w), g), None);
         assert_eq!(classify(Path::new("/r"), Some(w), g), None);
     }

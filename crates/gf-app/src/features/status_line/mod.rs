@@ -17,11 +17,12 @@ pub struct Flash {
     pub text: String,
 }
 
-pub fn view<'a, M: 'a>(
+pub fn view<'a, M: Clone + 'a>(
     t: &'a Tokens,
     tab: Option<&'a RepoTab>,
     busy: Option<&'static str>,
     flash: Option<&'a Flash>,
+    undo: Option<(String, M)>,
 ) -> Element<'a, M> {
     let sep = || dim(t, "│");
     let mut left = Row::new().spacing(10).align_y(iced::Alignment::Center);
@@ -97,6 +98,13 @@ pub fn view<'a, M: 'a>(
             NoteKind::Error => t.error(),
         };
         right = right.push(colored(t, widgets::format::truncate(&f.text, 60), color));
+    }
+    if let Some((label, on_press)) = undo {
+        right = right.push(widgets::tip(
+            t,
+            widgets::text_button(t, &label, None, Some(on_press)),
+            "undo the last commit / merge / rebase / pull made in gf (also `:undo`)".into(),
+        ));
     }
     right = right.push(dim(t, "⌘O open · ⌘R refresh · ⌘L prompt · ⌘J log · ? help"));
 

@@ -1,0 +1,245 @@
+//! Keyboard focus: which panel the arrow keys drive, and how one key press
+//! is routed between an open menu, a dialog, a text field and the panels.
+//!
+//! - A text field with focus keeps its keys (the prompt also gets ↑/↓
+//!   history and ⇥ completion). Esc leaves it.
+//! - Otherwise keys go to the active [`Pane`]; what it does not use, the
+//!   app uses: ←/→ (and Enter) move between panels, ⇥ cycles them, `/`
+//!   goes to the prompt.
+//! - Clicking a panel makes it active.
+
+use iced::widget::{container, mouse_area, operation};
+use iced::{Border, Element, Task};
+
+use super::{App, Message, Shortcut};
+use crate::features::context_menu;
+use crate::features::diff_view::Role;
+use crate::features::prompt::PROMPT_ID;
+use crate::features::sidebar::REFS_FILTER_ID;
+use crate::nav::{Key, Moved, Nav, Pane};
+use crate::theme::Tokens;
+use crate::widgets::pointer::Field;
+
+/// One key press, as each possible receiver reads it.
+#[derive(Debug, Clone)]
+pub struct KeyInput {
+    pub shortcut: Option<Shortcut>,
+    pub menu: Option<context_menu::Key>,
+    pub nav: Option<Nav>,
+}
+
+/// Shortcuts that only make sense inside the prompt.
+fn prompt_only(s: Shortcut) -> bool {
+    matches!(
+        s,
+        Shortcut::HistoryPrev | Shortcut::HistoryNext | Shortcut::Complete
+    )
+}
+
+impl App {
+    /// Panels on screen, left to right.
+    pub(super) fn panes(&self) -> Vec<Pane> {
+        let Some(tab) = self.active_tab() else {
+            return Vec::new();
+        };
+        let mut panes = Vec::new();
+        if self.settings.appearance.show_refs {
+            panes.push(Pane::Sidebar);
+        }
+        match tab.code_view {
+            Role::Commit => {
+                panes.push(Pane::History);
+                if tab.blame.is_none() {
+                    panes.push(Pane::Files);
+                }
+            }
+            Role::Local => panes.push(Pane::Changes),
+        }
+        panes.push(Pane::Diff);
+        panes
+    }
+
+    /// The active panel; falls back to the list of the current mode when
+    /// the remembered one is not on screen.
+    pub(super) fn pane(&self) -> Pane {
+        if self.panes().contains(&self.focus) {
+            return self.focus;
+        }
+        match self.active_tab().map(|t| t.code_view) {
+            Some(Role::Local) => Pane::Changes,
+            _ => Pane::History,
+        }
+    }
+
+    pub(super) fn focus_pane(&mut self, pane: Pane) {
+        self.focus = pane;
+        self.typing = false;
+    }
+
+    /// After a dialog, menu or command: back to the prompt only if the user
+    /// was typing there (or there is nothing else to focus).
+    pub(super) fn restore_focus(&self) -> Task<Message> {
+        if self.typing || self.tabs.is_empty() {
+            operation::focus(PROMPT_ID)
+        } else {
+            Task::none()
+        }
+    }
+
+    pub(super) fn focus_prompt(&mut self) -> Task<Message> {
+        self.typing = true;
+        operation::focus(PROMPT_ID)
+    }
+
+    pub(super) fn on_key_input(&mut self, k: KeyInput) -> Task<Message> {
+        fn run(app: &mut App, s: Option<Shortcut>) -> Task<Message> {
+            s.map_or_else(Task::none, |s| app.on_shortcut(s))
+        }
+        if let Some(menu) = self.menu.as_mut() {
+            return match k.menu {
+                Some(key) => {
+                    let outcome = menu.key(key);
+                    self.on_menu_outcome(outcome)
+                }
+                None => run(self, k.shortcut),
+            };
+        }
+        if self.dialog.is_some() || self.rebase_editor.is_some() {
+            return run(self, k.shortcut);
+        }
+        let field = self.pointer.field_at_key();
+        if field != Field::None {
+            let in_prompt = field.is(PROMPT_ID);
+            // Esc leaves the field (the field itself drops focus).
+            self.typing = in_prompt && k.shortcut != Some(Shortcut::Escape);
+            if field.is(REFS_FILTER_ID) {
+                if let Some(n) = k.nav.filter(|n| {
+                    matches!(
+                        n.key,
+                        Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Enter
+                    )
+                }) {
+                    self.focus = Pane::Sidebar;
+                    return self.nav_pane(Pane::Sidebar, n).unwrap_or_else(Task::none);
+                }
+            }
+            let s = k.shortcut.filter(|s| in_prompt || !prompt_only(*s));
+            return run(self, s);
+        }
+        self.typing = false;
+        if let Some(task) = k.nav.and_then(|n| self.on_nav(n)) {
+            return task;
+        }
+        run(self, k.shortcut.filter(|s| !prompt_only(*s)))
+    }
+
+    fn on_nav(&mut self, n: Nav) -> Option<Task<Message>> {
+        if n.key == Key::Char('/') {
+            return Some(self.focus_prompt());
+        }
+        self.active_tab()?;
+        if n.key == Key::Tab {
+            return Some(self.move_pane(if n.shift { -1 } else { 1 }, true));
+        }
+        let pane = self.pane();
+        self.focus = pane;
+        if let Some(task) = self.nav_pane(pane, n) {
+            return Some(task);
+        }
+        match n.key {
+            Key::Left => Some(self.move_pane(-1, false)),
+            Key::Right | Key::Enter => Some(self.move_pane(1, false)),
+            _ => None,
+        }
+    }
+
+    fn move_pane(&mut self, by: isize, wrap: bool) -> Task<Message> {
+        let panes = self.panes();
+        let Some(i) = panes.iter().position(|p| *p == self.pane()) else {
+            return Task::none();
+        };
+        #[allow(clippy::cast_possible_wrap)]
+        let (i, n) = (i as isize, panes.len() as isize);
+        let j = if wrap {
+            (i + by).rem_euclid(n)
+        } else {
+            (i + by).clamp(0, n - 1)
+        };
+        #[allow(clippy::cast_sign_loss)]
+        let next = panes[j as usize];
+        self.focus = next;
+        Task::none()
+    }
+
+    /// Hands a key to `pane`; `None` when the pane has no use for it.
+    fn nav_pane(&mut self, pane: Pane, n: Nav) -> Option<Task<Message>> {
+        let t = &self.tokens;
+        let tab = self.tabs.get_mut(self.active)?;
+        let snap = tab.snapshot.clone();
+        let moved: Moved<Message> = match pane {
+            Pane::Sidebar => tab
+                .sidebar
+                .nav(n, snap.as_deref(), t)?
+                .map(Message::Sidebar),
+            Pane::History => tab
+                .history
+                .nav(n, snap.as_deref(), t)?
+                .map(Message::History),
+            Pane::Files => tab.commit_diff.files_nav(n, t)?.map(Message::CommitDiff),
+            Pane::Changes => tab
+                .changes
+                .nav(n, &snap?.status.entries, t)?
+                .map(Message::Changes),
+            Pane::Diff => {
+                let role = tab.code_view;
+                let covered = match role {
+                    Role::Commit => tab.blame.is_some(),
+                    Role::Local => tab.conflict.is_some(),
+                };
+                if covered {
+                    return None;
+                }
+                let wrap: fn(_) -> Message = match role {
+                    Role::Local => Message::LocalDiff,
+                    Role::Commit => Message::CommitDiff,
+                };
+                tab.diff_mut(role).diff_nav(n, t)?.map(wrap)
+            }
+        };
+        // `.` opens the actions menu; from the keyboard it is centered.
+        self.menu_by_key = n.key == Key::Char('.');
+        let Moved { message, task } = moved;
+        let follow = message.map_or_else(Task::none, |m| self.update(m));
+        self.menu_by_key = false;
+        Some(Task::batch([task, follow]))
+    }
+}
+
+/// Frames `content` as `pane`: an accent border when it is the active one,
+/// and a click anywhere in it makes it active.
+pub(super) fn pane_frame<'a>(
+    t: &Tokens,
+    pane: Pane,
+    active: Pane,
+    content: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let color = if pane == active {
+        t.accent()
+    } else {
+        iced::Color::TRANSPARENT
+    };
+    mouse_area(
+        container(content)
+            .padding(1)
+            .style(move |_| container::Style {
+                border: Border {
+                    color,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..container::Style::default()
+            }),
+    )
+    .on_press(Message::FocusPane(pane))
+    .into()
+}

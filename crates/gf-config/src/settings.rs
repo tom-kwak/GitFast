@@ -15,6 +15,7 @@ const MAX_RECENT: usize = 20;
 #[serde(default)]
 pub struct Settings {
     pub appearance: AppearanceSettings,
+    pub confirm: ConfirmSettings,
     pub git: GitSettings,
     pub repos: RepoSettings,
 }
@@ -39,6 +40,26 @@ impl Default for AppearanceSettings {
             font_size: 13,
             show_command_log: true,
             show_refs: true,
+        }
+    }
+}
+
+/// Confirmations the user chose to skip ("don't ask again"). Only
+/// change-type confirmations can be skipped; deletions always ask.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConfirmSettings {
+    pub skip: Vec<String>,
+}
+
+impl ConfirmSettings {
+    pub fn is_skipped(&self, key: &str) -> bool {
+        self.skip.iter().any(|k| k == key)
+    }
+
+    pub fn skip(&mut self, key: &str) {
+        if !self.is_skipped(key) {
+            self.skip.push(key.to_owned());
         }
     }
 }
@@ -159,5 +180,15 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn skipped_confirmations_are_unique() {
+        let mut c = ConfirmSettings::default();
+        c.skip("pull");
+        c.skip("pull");
+        assert!(c.is_skipped("pull"));
+        assert!(!c.is_skipped("push"));
+        assert_eq!(c.skip.len(), 1);
     }
 }

@@ -4,9 +4,14 @@
 
 use std::sync::Arc;
 
-use gf_core::model::{Branch, Commit, Remote, StashEntry, StatusReport, Tag};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use gf_core::model::{Branch, Commit, Oid, Remote, StashEntry, StatusEntry, StatusReport, Tag};
 use gf_git::graph::{self, GraphRow};
-use gf_git::{LogOrder, LogQuery, Repository};
+use gf_git::{
+    BisectProgress, LineCounts, LogOrder, LogQuery, RepoState, Repository, Submodule, Worktree,
+};
 use gf_watch::RepoWatcher;
 
 use crate::features::{changes, commit_box, diff_view, history, sidebar};
@@ -27,6 +32,17 @@ impl History {
     pub fn new(commits: Vec<Commit>) -> Self {
         let graph = graph::layout(&commits, LANE_COLORS);
         Self { commits, graph }
+    }
+
+    /// Commits that touched `path`, following renames.
+    pub async fn load_path(repo: &Repository, path: PathBuf) -> gf_core::Result<Self> {
+        let query = LogQuery {
+            paths: vec![path],
+            follow: true,
+            max_count: Some(HISTORY_LIMIT),
+            ..LogQuery::default()
+        };
+        Ok(Self::new(repo.log(&query).await?))
     }
 
     /// Loads the history of `revisions` (HEAD when empty) or of all refs.
@@ -55,22 +71,130 @@ pub struct Snapshot {
     pub remotes: Vec<Remote>,
     pub stashes: Vec<StashEntry>,
     pub history: History,
+    /// `+added −removed` per file for the working tree list.
+    pub lines: LineStats,
+    /// For a branch without upstream: commits no remote has yet (what a
+    /// first push would publish). `None` when the branch has an upstream.
+    pub unpublished: Option<u32>,
+    /// When the repository was last fetched (`FETCH_HEAD`'s timestamp).
+    pub last_fetch: Option<std::time::SystemTime>,
+    /// Merge / rebase / cherry-pick / revert / bisect in progress.
+    pub state: RepoState,
+    pub worktrees: Vec<Worktree>,
+    pub submodules: Vec<Submodule>,
+    /// LFS-tracked patterns; `None` when the repository does not use LFS.
+    pub lfs: Option<Vec<String>>,
+}
+
+/// Line counts per path; `None` = binary file.
+pub type Counts = HashMap<PathBuf, Option<LineCounts>>;
+
+#[derive(Debug, Clone, Default)]
+pub struct LineStats {
+    pub staged: Counts,
+    pub unstaged: Counts,
+    /// Untracked files count as all-added.
+    pub untracked: Counts,
+}
+
+/// Untracked files larger than this are not read to count lines.
+const MAX_COUNT_BYTES: u64 = 2 * 1024 * 1024;
+/// At most this many untracked files are counted per refresh.
+const MAX_COUNT_FILES: usize = 2000;
+
+/// Lines in a new file (all of them are additions). `None` for binary or
+/// unreadable/huge files.
+fn count_new_file(path: &Path) -> Option<LineCounts> {
+    if std::fs::metadata(path).ok()?.len() > MAX_COUNT_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
+    let partial = usize::from(bytes.last().is_some_and(|&b| b != b'\n'));
+    Some(LineCounts {
+        added: u32::try_from(newlines + partial).unwrap_or(u32::MAX),
+        removed: 0,
+    })
 }
 
 impl Snapshot {
     /// Loads all parts concurrently.
     pub async fn load(repo: Repository, all_branches: bool) -> Result<Arc<Self>, String> {
-        let (status, branches, tags, remotes, stashes, history) = tokio::join!(
+        let uses_lfs = std::fs::read_to_string(repo.cwd().join(".gitattributes"))
+            .is_ok_and(|a| a.contains("filter=lfs"));
+        let lfs = async {
+            if uses_lfs && repo.lfs_available().await {
+                repo.lfs_tracked().await.ok()
+            } else {
+                None
+            }
+        };
+        let (worktrees, submodules, lfs, state) =
+            tokio::join!(repo.worktrees(), repo.submodules(), lfs, repo.state());
+        let (status, branches, tags, remotes, stashes, history, staged, unstaged) = tokio::join!(
             repo.status(),
             repo.branches(),
             repo.tags(),
             repo.remotes(),
             repo.stashes(),
             History::load(&repo, Vec::new(), all_branches),
+            repo.numstat(true),
+            repo.numstat(false),
         );
         let err = |e: gf_core::GfError| e.to_string();
+        let status = status.map_err(err)?;
+
+        // Without an upstream, ahead/behind are unknown; count what a first
+        // push would publish instead.
+        let unpublished = if status.head.upstream.is_none() && status.head.branch.is_some() {
+            repo.unpushed_count().await.ok()
+        } else {
+            None
+        };
+
+        // New files have no diff to count; read them (off the UI thread).
+        let root = repo.cwd().to_path_buf();
+        let new_files: Vec<PathBuf> = status
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                StatusEntry::Untracked { path } => Some(path.clone()),
+                _ => None,
+            })
+            .take(MAX_COUNT_FILES)
+            .collect();
+        let untracked = tokio::task::spawn_blocking(move || {
+            new_files
+                .into_iter()
+                .map(|p| {
+                    let counts = count_new_file(&root.join(&p));
+                    (p, counts)
+                })
+                .collect::<Counts>()
+        })
+        .await
+        .unwrap_or_default();
+
         Ok(Arc::new(Self {
-            status: status.map_err(err)?,
+            lines: LineStats {
+                // Counts are decoration: a failure must not block the refresh.
+                staged: staged.unwrap_or_default(),
+                unstaged: unstaged.unwrap_or_default(),
+                untracked,
+            },
+            unpublished,
+            state: state.unwrap_or_default(),
+            // Optional sections: a failure only hides them.
+            worktrees: worktrees.unwrap_or_default(),
+            submodules: submodules.unwrap_or_default(),
+            lfs,
+            last_fetch: std::fs::metadata(repo.handle().git_dir.join("FETCH_HEAD"))
+                .and_then(|m| m.modified())
+                .ok(),
+            status,
             branches: branches.map_err(err)?,
             tags: tags.map_err(err)?,
             remotes: remotes.map_err(err)?,
@@ -87,6 +211,23 @@ impl Snapshot {
     pub fn staged_count(&self) -> usize {
         self.status.entries.iter().filter(|e| e.is_staged()).count()
     }
+
+    pub fn conflict_count(&self) -> usize {
+        self.status
+            .entries
+            .iter()
+            .filter(|e| matches!(e, StatusEntry::Conflicted { .. }))
+            .count()
+    }
+}
+
+/// A step that can be undone: where HEAD was before it.
+#[derive(Debug, Clone)]
+pub struct UndoEntry {
+    pub label: String,
+    pub before: Oid,
+    /// Undo keeps the undone changes staged (for commits).
+    pub soft: bool,
 }
 
 #[derive(Debug)]
@@ -113,6 +254,14 @@ pub struct RepoTab {
     /// matching diff (commit changes / local changes).
     pub code_view: diff_view::Role,
     pub commit: commit_box::State,
+    /// Blame shown instead of the commit changes while open.
+    pub blame: Option<crate::features::blame_view::State>,
+    /// Conflict resolver shown instead of the local diff while open.
+    pub conflict: Option<crate::features::conflict_view::State>,
+    /// Undoable steps, most recent last.
+    pub undo: Vec<UndoEntry>,
+    /// Latest bisect step result.
+    pub bisect: Option<BisectProgress>,
 }
 
 impl RepoTab {
@@ -131,6 +280,10 @@ impl RepoTab {
             local_diff: diff_view::State::new(diff_view::Role::Local),
             commit_diff: diff_view::State::new(diff_view::Role::Commit),
             code_view: diff_view::Role::Commit,
+            blame: None,
+            conflict: None,
+            undo: Vec::new(),
+            bisect: None,
             commit: commit_box::State::default(),
         }
     }
@@ -163,5 +316,30 @@ impl RepoTab {
             diff_view::Role::Local => &mut self.local_diff,
             diff_view::Role::Commit => &mut self.commit_diff,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_lines_of_new_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let text = dir.path().join("a.txt");
+        std::fs::write(&text, "one\ntwo\nthree").expect("write");
+        assert_eq!(
+            count_new_file(&text),
+            Some(LineCounts {
+                added: 3,
+                removed: 0
+            })
+        );
+        let empty = dir.path().join("e.txt");
+        std::fs::write(&empty, "").expect("write");
+        assert_eq!(count_new_file(&empty), Some(LineCounts::default()));
+        let bin = dir.path().join("b.bin");
+        std::fs::write(&bin, [0u8, 1, 2]).expect("write");
+        assert_eq!(count_new_file(&bin), None);
     }
 }

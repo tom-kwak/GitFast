@@ -32,6 +32,8 @@ pub struct LogQuery {
     pub first_parent: bool,
     /// Only commits touching these paths.
     pub paths: Vec<PathBuf>,
+    /// `--follow`: track a single file across renames.
+    pub follow: bool,
     /// `--author=<pattern>`.
     pub author: Option<String>,
     /// `--grep=<pattern>` on the message (case-insensitive).
@@ -80,6 +82,9 @@ impl LogQuery {
         }
         if self.first_parent {
             args.push("--first-parent".into());
+        }
+        if self.follow && self.paths.len() == 1 {
+            args.push("--follow".into());
         }
         if let Some(a) = &self.author {
             args.push(format!("--author={a}"));

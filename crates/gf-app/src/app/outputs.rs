@@ -2,11 +2,11 @@
 //! git work to run (directly, or after a confirmation dialog).
 
 use gf_core::model::{Branch, RefKind};
-use gf_git::{CommitOptions, PullMode, PushOptions, StashOptions};
+use gf_git::{CommitOptions, PullMode, StashOptions};
 use iced::Task;
 use iced::widget::operation;
 
-use super::dialogs::Purpose;
+use super::dialogs::{Confirm, Purpose};
 use super::ops::{load_diff, load_history, load_snapshot};
 use super::{App, Message, OpKind, Shortcut};
 use crate::features::command_log::NoteKind;
@@ -34,7 +34,13 @@ impl App {
 
     pub(super) fn on_changes(&mut self, out: changes::Output) -> Task<Message> {
         match out {
-            changes::Output::ShowDiff(source) => self.show_diff(source),
+            changes::Output::ShowDiff(source) => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.conflict = None;
+                }
+                self.show_diff(source)
+            }
+            changes::Output::ResolveConflict(path) => self.open_conflict(path),
             changes::Output::Stage(paths) => {
                 let label = format!("stage {}", names(&paths));
                 self.op(label, OpKind::Generic, move |r| async move {
@@ -67,15 +73,12 @@ impl App {
                     body.push(format!("Delete untracked {}?", names(&untracked)));
                 }
                 body.push("Staged changes are kept.".into());
-                self.open_dialog(
-                    crate::features::dialog::Dialog::confirm(
-                        "Discard changes",
-                        body,
-                        "Discard",
-                        Purpose::Discard { tracked, untracked },
-                    )
-                    .danger(),
-                )
+                self.confirm(Confirm::delete(
+                    "Discard changes",
+                    body,
+                    "Discard",
+                    Purpose::Discard { tracked, untracked },
+                ))
             }
         }
     }
@@ -92,19 +95,16 @@ impl App {
                 description,
             } => {
                 if action == Action::Discard {
-                    self.open_dialog(
-                        crate::features::dialog::Dialog::confirm(
-                            "Discard changes",
-                            vec![format!("{description} from the working tree?")],
-                            "Discard",
-                            Purpose::ApplyPatches {
-                                patches,
-                                action,
-                                description,
-                            },
-                        )
-                        .danger(),
-                    )
+                    self.confirm(Confirm::delete(
+                        "Discard changes",
+                        vec![format!("{description} from the working tree?")],
+                        "Discard",
+                        Purpose::ApplyPatches {
+                            patches,
+                            action,
+                            description,
+                        },
+                    ))
                 } else {
                     self.apply_patches(patches, action, description)
                 }
@@ -121,6 +121,8 @@ impl App {
                     Message::DiffHighlighted(id, source.clone(), file, spans)
                 })
             }
+            diff_view::Output::Blame { path, rev } => self.open_blame(path, rev),
+            diff_view::Output::FileHistory(path) => self.open_file_history(path),
             diff_view::Output::Reload => match self.active_tab() {
                 Some(tab) => load_diff(tab, role),
                 None => Task::none(),
@@ -134,11 +136,7 @@ impl App {
         action: Action,
         description: String,
     ) -> Task<Message> {
-        let (cached, reverse) = match action {
-            Action::Stage => (true, false),
-            Action::Unstage => (true, true),
-            Action::Discard => (false, true),
-        };
+        let (cached, reverse) = action.apply_mode();
         self.op(description, OpKind::Generic, move |r| async move {
             for p in patches {
                 r.apply_patch(p, cached, reverse).await?;
@@ -149,12 +147,36 @@ impl App {
 
     pub(super) fn on_commit(&mut self, out: commit_box::Output) -> Task<Message> {
         match out {
+            commit_box::Output::Commit {
+                message,
+                amend: true,
+            } => {
+                let head = self
+                    .active_tab()
+                    .and_then(|t| t.snapshot.as_ref())
+                    .and_then(|s| s.status.head.oid.as_ref())
+                    .map_or_else(|| "HEAD".to_owned(), |o| o.short().to_owned());
+                self.confirm(Confirm::change(
+                    "amend",
+                    "Amend last commit",
+                    vec![
+                        format!(
+                            "Replace commit {head} with a new one (message and staged changes)?"
+                        ),
+                        "If it was already pushed, the remote will need a force push.".into(),
+                    ],
+                    "Amend",
+                    Purpose::Amend { message },
+                ))
+            }
             commit_box::Output::Commit { message, amend } => {
                 let label = if amend { "amend commit" } else { "commit" };
                 let summary = message.lines().next().unwrap_or_default().to_owned();
-                self.op(
+                let undo = self.undo_point(&format!("commit: {summary}"), true);
+                self.op_with_undo(
                     format!("{label}: {summary}"),
                     OpKind::Commit,
+                    undo,
                     move |r| async move {
                         let opts = CommitOptions {
                             amend,
@@ -198,20 +220,29 @@ impl App {
             }
             history::Output::NewBranchAt(oid) => self.new_branch_dialog(Some(oid.to_string())),
             history::Output::NewTagAt(oid) => self.new_tag_dialog(Some(oid.to_string())),
-            history::Output::CheckoutDetached(oid) => {
-                self.open_dialog(crate::features::dialog::Dialog::confirm(
-                    "Check out commit",
-                    vec![
-                        format!(
-                            "Switch to {} without a branch (detached HEAD)?",
-                            oid.short()
-                        ),
-                        "Good for looking around. To keep new commits, create a branch.".into(),
-                    ],
-                    "Check out",
-                    Purpose::CheckoutDetached(oid.to_string()),
-                ))
+            history::Output::CheckoutDetached(oid) => self.confirm(Confirm::change(
+                "checkout",
+                "Check out commit",
+                vec![
+                    format!(
+                        "Switch to {} without a branch (detached HEAD)?",
+                        oid.short()
+                    ),
+                    "Your files change to that commit. Good for looking around;".into(),
+                    "to keep new commits, create a branch.".into(),
+                ],
+                "Check out",
+                Purpose::CheckoutDetached(oid.to_string()),
+            )),
+            history::Output::Act(action, oid) => self.on_commit_action(action, oid),
+            history::Output::ShowRange(commits) => self.show_range(commits),
+            history::Output::Menu { show, menu } => {
+                let show =
+                    show.map_or_else(Task::none, |oid| self.show_diff(DiffSource::Commit(oid)));
+                let open = self.open_menu(menu.map(Message::History));
+                Task::batch([show, open])
             }
+            history::Output::Batch(action, commits) => self.on_batch(action, commits),
             history::Output::CopyId(oid) => {
                 self.flash(NoteKind::Info, format!("copied {}", oid.short()));
                 iced::clipboard::write(oid.to_string())
@@ -225,6 +256,8 @@ impl App {
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
+                // A branch/tag's history is only visible in HISTORY mode.
+                tab.code_view = diff_view::Role::Commit;
                 tab.history.set_revision(rev.clone());
                 rev.map_or_else(Task::none, |r| load_history(tab, r))
             }
@@ -247,45 +280,123 @@ impl App {
             ),
             sidebar::Output::DeleteBranch(b) => self.delete_branch_dialog(&b),
             sidebar::Output::PushBranch(b) => self.push_branch(&b),
-            sidebar::Output::DeleteTag(name) => self.open_dialog(
-                crate::features::dialog::Dialog::confirm(
-                    "Delete tag",
-                    vec![
-                        format!("Delete local tag `{name}`?"),
-                        "Tags already pushed stay on the remote.".into(),
-                    ],
-                    "Delete",
-                    Purpose::DeleteTag(name),
-                )
-                .danger(),
-            ),
+            sidebar::Output::DeleteTag(name) => self.confirm(Confirm::delete(
+                "Delete tag",
+                vec![
+                    format!("Delete local tag `{name}`?"),
+                    "Tags already pushed stay on the remote.".into(),
+                ],
+                "Delete",
+                Purpose::DeleteTag(name),
+            )),
             sidebar::Output::PushTag(name) => {
                 let remote = self.default_remote();
-                self.op(
-                    format!("push tag {name}"),
-                    OpKind::Generic,
-                    move |r| async move { r.push_tag(&remote, &name).await },
-                )
+                self.confirm(Confirm::change(
+                    "push-tag",
+                    "Push tag",
+                    vec![format!(
+                        "Publish tag `{name}` to `{remote}`? Others will see it."
+                    )],
+                    "Push",
+                    Purpose::PushTag { remote, name },
+                ))
             }
-            sidebar::Output::StashApply(i) => self.op(
-                format!("apply stash@{{{i}}}"),
-                OpKind::Generic,
-                move |r| async move { r.stash_apply(i).await },
-            ),
-            sidebar::Output::StashPop(i) => self.op(
-                format!("pop stash@{{{i}}}"),
-                OpKind::Generic,
-                move |r| async move { r.stash_pop(i).await },
-            ),
-            sidebar::Output::StashDrop(i) => self.open_dialog(
-                crate::features::dialog::Dialog::confirm(
-                    "Drop stash",
-                    vec![format!("Delete stash@{{{i}}}? Its changes will be lost.")],
-                    "Drop",
-                    Purpose::StashDrop(i),
+            sidebar::Output::StashApply(i) => self.confirm(Confirm::change(
+                "stash-apply",
+                "Apply stash",
+                vec![
+                    format!("Apply stash@{{{i}}} to your working tree?"),
+                    "The stash stays in the list. Conflicting files are left for you to resolve."
+                        .into(),
+                ],
+                "Apply",
+                Purpose::StashApply(i),
+            )),
+            sidebar::Output::StashPop(i) => self.confirm(Confirm::change(
+                "stash-pop",
+                "Pop stash",
+                vec![
+                    format!(
+                        "Apply stash@{{{i}}} to your working tree and remove it from the list?"
+                    ),
+                    "If applying conflicts, the stash is kept.".into(),
+                ],
+                "Pop",
+                Purpose::StashPop(i),
+            )),
+            sidebar::Output::OpenRepo(path) => {
+                let root = self.active_tab().map(|t| t.repo.cwd().to_path_buf());
+                // Submodule paths are relative to the superproject.
+                let full = match root {
+                    Some(r) if path.is_relative() => r.join(path),
+                    _ => path,
+                };
+                self.update(Message::Open(full))
+            }
+            sidebar::Output::NewWorktree => self.new_worktree_dialog(),
+            sidebar::Output::RemoveWorktree(path) => self.confirm(
+                Confirm::delete(
+                    "Remove worktree",
+                    vec![
+                        format!(
+                            "Remove the working tree at {}?",
+                            crate::widgets::format::tilde(&path)
+                        ),
+                        "Its folder is deleted; the branch and its commits stay.".into(),
+                        "git refuses if it has uncommitted changes — tick force to remove anyway."
+                            .into(),
+                    ],
+                    "Remove",
+                    Purpose::RemoveWorktree(path),
                 )
-                .danger(),
+                .check("force (discard its uncommitted changes)", false),
             ),
+            sidebar::Output::UpdateSubmodules => self.confirm(Confirm::change(
+                "submodule-update",
+                "Update submodules",
+                vec![
+                    "Check out every submodule at the commit this repository records?".into(),
+                    "Uninitialized ones are fetched; local changes inside them may be overwritten."
+                        .into(),
+                ],
+                "Update",
+                Purpose::UpdateSubmodules,
+            )),
+            sidebar::Output::TrackLfs => self.open_dialog(
+                crate::features::dialog::Dialog::confirm(
+                    "Track with LFS",
+                    vec!["Store matching files in Git LFS (edits .gitattributes):".into()],
+                    "Track",
+                    Purpose::TrackLfs,
+                )
+                .field("pattern", "", "*.psd"),
+            ),
+            sidebar::Output::UntrackLfs(pattern) => self.confirm(Confirm::change(
+                "lfs-untrack",
+                "Stop tracking with LFS",
+                vec![
+                    format!("Stop storing `{pattern}` in LFS (edits .gitattributes)?"),
+                    "Files already committed stay in LFS history.".into(),
+                ],
+                "Untrack",
+                Purpose::UntrackLfs(pattern),
+            )),
+            sidebar::Output::LfsPull => self.confirm(Confirm::change(
+                "lfs-pull",
+                "LFS pull",
+                vec!["Download LFS file contents for the current checkout?".into()],
+                "Pull",
+                Purpose::LfsPull,
+            )),
+            sidebar::Output::Merge(branch) => self.ask_merge(branch),
+            sidebar::Output::RebaseOnto(onto) => self.ask_rebase_onto(onto),
+            sidebar::Output::Collapse => self.on_shortcut(Shortcut::ToggleRefs),
+            sidebar::Output::StashDrop(i) => self.confirm(Confirm::delete(
+                "Drop stash",
+                vec![format!("Delete stash@{{{i}}}? Its changes will be lost.")],
+                "Drop",
+                Purpose::StashDrop(i),
+            )),
         }
     }
 
@@ -308,7 +419,28 @@ impl App {
                     );
                     return Task::none();
                 }
-                self.pull(PullMode::Config)
+                let (up, branch, behind) = self
+                    .active_tab()
+                    .and_then(|t| t.snapshot.as_ref())
+                    .map(|s| {
+                        let h = &s.status.head;
+                        (
+                            h.upstream.clone().unwrap_or_default(),
+                            h.branch.clone().unwrap_or_default(),
+                            h.behind,
+                        )
+                    })
+                    .unwrap_or_default();
+                self.confirm(Confirm::change(
+                    "pull",
+                    "Pull",
+                    vec![
+                        format!("Bring {behind} commit(s) from `{up}` into `{branch}`?"),
+                        "Your files are updated; uses your pull.rebase / pull.ff setting.".into(),
+                    ],
+                    "Pull",
+                    Purpose::Pull,
+                ))
             }
             toolbar::Message::Push => {
                 let head = self
@@ -330,7 +462,6 @@ impl App {
             toolbar::Message::Stash => self.stash_dialog(),
             toolbar::Message::Refresh => self.refresh_active(),
             toolbar::Message::Cancel => self.on_shortcut(Shortcut::Escape),
-            toolbar::Message::ToggleRefs => self.on_shortcut(Shortcut::ToggleRefs),
         }
     }
 
@@ -360,27 +491,72 @@ impl App {
                 .field("remote", remote, "origin"),
             );
         }
-        let opts = PushOptions::default();
-        let label = format!("push {branch}");
-        let kind = OpKind::Push {
-            branch: Some(branch),
-        };
-        self.sync_op(label, kind, move |r, run| async move {
-            r.push(&opts, run).await
+        let (up, ahead) = b
+            .upstream
+            .as_ref()
+            .map(|u| (u.name.short().to_owned(), u.ahead))
+            .unwrap_or_default();
+        // `git push` alone pushes the checked-out branch; any other branch
+        // needs its remote and name spelled out.
+        let to = (!b.is_head).then(|| self.push_target(b)).flatten();
+        self.confirm(Confirm::change(
+            "push",
+            "Push",
+            vec![format!(
+                "Send {ahead} commit(s) from `{branch}` to `{up}`? Others will see them."
+            )],
+            "Push",
+            Purpose::Push { branch, to },
+        ))
+    }
+
+    /// Remote and refspec of `b`'s upstream, when it is on a remote.
+    fn push_target(&self, b: &Branch) -> Option<super::PushTo> {
+        let up = b.upstream.as_ref()?;
+        if up.name.kind() != RefKind::RemoteBranch {
+            return None;
+        }
+        let short = up.name.short();
+        let remotes = &self.active_tab()?.snapshot.as_ref()?.remotes;
+        // Remote names may contain `/`: match the configured ones first.
+        let (remote, branch) = remotes
+            .iter()
+            .filter_map(|r| {
+                short
+                    .strip_prefix(r.name.as_str())
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .map(|branch| (r.name.as_str(), branch))
+            })
+            .max_by_key(|(remote, _)| remote.len())
+            .or_else(|| short.split_once('/'))?;
+        Some(super::PushTo {
+            remote: remote.to_owned(),
+            refspec: format!("{}:{branch}", b.name.short()),
         })
     }
 
     fn checkout(&mut self, b: Branch) -> Task<Message> {
         let remote = b.name.kind() == RefKind::RemoteBranch;
         let name = b.name.short().to_owned();
-        let label = if remote {
-            format!("check out {name} as a tracking branch")
+        let body = if remote {
+            vec![
+                format!("Create a local branch tracking `{name}` and switch to it?"),
+                "Your files change to that branch's content.".into(),
+            ]
         } else {
-            format!("switch to {name}")
+            vec![
+                format!("Switch to `{name}`?"),
+                "Your files change to that branch. Uncommitted changes come along".into(),
+                "unless they conflict (then git refuses and nothing changes).".into(),
+            ]
         };
-        self.op(label, OpKind::Generic, move |r| async move {
-            r.switch_branch(&name, remote).await
-        })
+        self.confirm(Confirm::change(
+            "checkout",
+            "Switch branch",
+            body,
+            "Switch",
+            Purpose::Checkout { name, remote },
+        ))
     }
 
     /// First configured remote, preferring `origin`.
@@ -464,7 +640,16 @@ impl App {
                         .iter()
                         .map(|(name, help)| format!("{name:<10} {help}")),
                 );
-                lines.push("↑/↓ history · ⇥ complete · ⌘⏎ commit · Esc cancel/close".into());
+                lines.push(
+                    "prompt: ↑/↓ history · ⇥ complete · ⌘⏎ commit · Esc leave the prompt".into(),
+                );
+                lines.push(
+                    "panels: ↑/↓ PgUp/PgDn Home/End move · ←/→ ⇥ switch panel · / prompt".into(),
+                );
+                lines.push(
+                    "  history ⇧↑/↓ range · . actions · working tree Space stage · d discard · diff n/p hunk"
+                        .into(),
+                );
                 lines.push(
                     "click a ref for its history · click diff lines to stage just those".into(),
                 );
@@ -472,6 +657,32 @@ impl App {
                 self.settings.appearance.show_command_log = true;
                 operation::focus(PROMPT_ID)
             }
+            PromptCommand::Confirms { reset: true } => {
+                let n = self.settings.confirm.skip.len();
+                self.settings.confirm.skip.clear();
+                self.save_settings();
+                self.flash(
+                    NoteKind::Info,
+                    format!("all confirmations restored ({n} were skipped)"),
+                );
+                Task::none()
+            }
+            PromptCommand::Confirms { reset: false } => {
+                let lines = if self.settings.confirm.skip.is_empty() {
+                    vec!["every change asks for confirmation (nothing skipped)".into()]
+                } else {
+                    let mut l = vec![format!(
+                        "not asking before: {}",
+                        self.settings.confirm.skip.join(", ")
+                    )];
+                    l.push("`:confirm reset` to be asked again; deletions always ask".into());
+                    l
+                };
+                self.log.note(NoteKind::Info, "confirmations", lines);
+                self.settings.appearance.show_command_log = true;
+                Task::none()
+            }
+            PromptCommand::Undo => self.ask_undo(),
             PromptCommand::Pwd => {
                 let text = self.active_tab().map_or_else(
                     || "no repository open".to_owned(),

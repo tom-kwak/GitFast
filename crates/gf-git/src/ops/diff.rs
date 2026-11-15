@@ -92,3 +92,20 @@ impl Repository {
         Ok(files)
     }
 }
+
+impl Repository {
+    /// Added/removed line counts per changed file: unstaged changes, or
+    /// staged ones with `staged`. `None` per file means binary.
+    pub async fn numstat(
+        &self,
+        staged: bool,
+    ) -> Result<std::collections::HashMap<PathBuf, Option<crate::cli::parse::numstat::LineCounts>>>
+    {
+        use crate::cli::parse::numstat::{NUMSTAT_ARGS, parse_numstat};
+        let mut cmd = self.command(NUMSTAT_ARGS);
+        if staged {
+            cmd = cmd.arg("--cached");
+        }
+        parse_numstat(&self.read(cmd).await?)
+    }
+}
