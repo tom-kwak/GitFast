@@ -1,0 +1,19 @@
+[package]
+name = "gf-core"
+description = "Shared domain model, errors and event bus for gf. Has no UI or I/O dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+uuid.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+
+[lints]
+workspace = true
