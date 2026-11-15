@@ -94,6 +94,8 @@ pub enum CommitAction {
     RebaseFrom,
     /// Start bisecting with HEAD bad and this commit good.
     BisectFrom,
+    /// Move the current branch to this commit (`git reset`).
+    Reset,
 }
 
 #[derive(Debug, Clone)]
@@ -485,6 +487,12 @@ fn commit_menu(c: &Commit) -> Menu<Message> {
                 "bisect from here",
                 "find the commit that broke something: HEAD is bad, this one is good",
                 act(CommitAction::BisectFrom),
+            ),
+            Entry::caution(
+                'e',
+                "reset branch here…",
+                "move the current branch to this commit (soft, mixed or hard)",
+                act(CommitAction::Reset),
             ),
             Entry::Separator,
             Entry::item('y', "copy id", "copy the full commit id", Message::CopyId),

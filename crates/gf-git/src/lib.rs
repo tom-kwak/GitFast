@@ -29,7 +29,7 @@ pub use ops::integrate::{Integration, MergeStyle};
 pub use ops::lfs::LfsFile;
 pub use ops::log::{LogOrder, LogQuery};
 pub use ops::rebase_interactive::{TodoAction, TodoItem, melds_into_nothing};
-pub use ops::reflog::ReflogEntry;
+pub use ops::reflog::{ReflogEntry, ResetMode};
 pub use ops::stash::StashOptions;
 pub use ops::state::RepoState;
 pub use ops::submodule::{Submodule, SubmoduleStatus};

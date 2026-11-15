@@ -3,7 +3,7 @@
 //! history (or diff, for stashes) and an action bar for it; section headers
 //! have `+` buttons to create new items.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gf_core::model::{Branch, RefKind, StashEntry, Tag};
 use iced::widget::text::Wrapping;
@@ -40,27 +40,60 @@ pub enum Selection {
     LfsPattern(String),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct State {
     collapsed: HashSet<Section>,
     filter: String,
     selected: Option<Selection>,
-    /// The keyboard cursor is on this section header (instead of the
-    /// selected item).
-    header_cursor: Option<Section>,
+    /// Branch folders (`feature/`) the user closed, by section and path.
+    folded: HashSet<(Section, String)>,
+    /// The keyboard cursor is on this section header or folder (instead of
+    /// the selected item).
+    cursor: Option<Fold>,
     /// The last item clicked and when, to recognize a double click (iced
     /// cannot: the row's button consumes the press).
     last_click: Option<(Selection, std::time::Instant)>,
     scroll: ScrollPos,
 }
 
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            // Only branches are open at first; the other sections are a
+            // click (or →) away and keep the list short.
+            collapsed: HashSet::from([
+                Section::Remotes,
+                Section::Tags,
+                Section::Stashes,
+                Section::Worktrees,
+                Section::Submodules,
+                Section::Lfs,
+            ]),
+            filter: String::new(),
+            selected: None,
+            folded: HashSet::new(),
+            cursor: None,
+            last_click: None,
+            scroll: ScrollPos::default(),
+        }
+    }
+}
+
 /// Two clicks on the same item within this time are a double click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Something that opens and closes: a section or a branch folder.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Fold {
+    Section(Section),
+    /// Section and folder path (`feature`, `origin/feature`).
+    Folder(Section, String),
+}
 
 /// Rows the keyboard can stop on.
 #[derive(Debug, Clone)]
 enum Item {
-    Header(Section),
+    Fold(Fold),
     /// An item and what Enter does with it.
     Pick(Selection, Option<Action>),
 }
@@ -68,8 +101,11 @@ enum Item {
 impl Item {
     fn of(row: &SideRow<'_>) -> Option<Self> {
         Some(match row {
-            SideRow::Header(sec, ..) => Self::Header(*sec),
-            SideRow::Branch(b) => Self::Pick(
+            SideRow::Header(sec, ..) => Self::Fold(Fold::Section(*sec)),
+            SideRow::Folder { section, path, .. } => {
+                Self::Fold(Fold::Folder(*section, (*path).to_owned()))
+            }
+            SideRow::Branch(b, _) => Self::Pick(
                 Selection::Ref(b.name.as_str().to_owned()),
                 (!b.is_head).then_some(Action::Checkout),
             ),
@@ -85,6 +121,72 @@ impl Item {
             SideRow::Hint(_) => return None,
         })
     }
+}
+
+/// Nesting level of a row: sections are 0, their rows 1, and each branch
+/// folder adds one.
+fn depth(row: &SideRow<'_>) -> usize {
+    match row {
+        SideRow::Header(..) => 0,
+        SideRow::Folder { depth, .. } | SideRow::Branch(_, depth) => depth + 1,
+        _ => 1,
+    }
+}
+
+/// Branches of one section as a tree of `/` folders: `feature/a` and
+/// `feature/b` are listed under a `feature/` folder (remote branches under
+/// their remote's folder first). `folded` folders hide their contents;
+/// while filtering everything that matches is shown.
+fn branch_tree<'a>(
+    section: Section,
+    branches: &[&'a Branch],
+    folded: impl Fn(&str) -> bool,
+    filtering: bool,
+) -> Vec<SideRow<'a>> {
+    let mut sorted: Vec<&'a Branch> = branches.to_vec();
+    sorted.sort_by(|a, b| a.name.short().cmp(b.name.short()));
+    // Folder prefixes of a name: `a/b/c` → [`a`, `a/b`].
+    let prefixes = |name: &'a str| -> Vec<&'a str> {
+        name.match_indices('/')
+            .map(|(i, _)| &name[..i])
+            .filter(|p| !p.is_empty())
+            .collect()
+    };
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for b in &sorted {
+        for p in prefixes(b.name.short()) {
+            *counts.entry(p).or_default() += 1;
+        }
+    }
+    let mut rows = Vec::new();
+    // Folders currently open in the listing, outermost first.
+    let mut open: Vec<&str> = Vec::new();
+    for b in sorted {
+        let dirs = prefixes(b.name.short());
+        let mut hidden = false;
+        for (d, dir) in dirs.iter().enumerate() {
+            if open.get(d) != Some(dir) {
+                open.truncate(d);
+                open.push(dir);
+                rows.push(SideRow::Folder {
+                    section,
+                    path: dir,
+                    depth: d,
+                    count: counts.get(dir).copied().unwrap_or(0),
+                });
+            }
+            if !filtering && folded(dir) {
+                hidden = true;
+                open.truncate(d + 1);
+                break;
+            }
+        }
+        if !hidden {
+            open.truncate(dirs.len());
+            rows.push(SideRow::Branch(b, dirs.len()));
+        }
+    }
+    rows
 }
 
 /// `refs/heads/main` → `main`.
@@ -108,7 +210,15 @@ fn row_height(t: &Tokens) -> f32 {
 #[derive(Debug, Clone, Copy)]
 enum SideRow<'a> {
     Header(Section, &'static str, usize, Option<(Action, &'static str)>),
-    Branch(&'a Branch),
+    /// A `/` folder of branches: its path, nesting and branch count.
+    Folder {
+        section: Section,
+        path: &'a str,
+        depth: usize,
+        count: usize,
+    },
+    /// A branch and how many folders it is nested in.
+    Branch(&'a Branch, usize),
     Tag(&'a Tag),
     Stash(&'a StashEntry),
     Worktree(&'a gf_git::Worktree),
@@ -120,11 +230,13 @@ enum SideRow<'a> {
 #[derive(Debug, Clone)]
 pub enum Message {
     Toggle(Section),
+    /// Open/close a branch folder.
+    ToggleFolder(Section, String),
     Filter(String),
     Select(Selection),
     /// Header `+` buttons and the actions menu entries.
     Act(Action),
-    /// The `actions ▾` button (or `.`): menu for the selection.
+    /// `.` on the keyboard: menu for the selection.
     OpenActions,
     /// Right-click on an item: select it and open its menu.
     RightClick(Selection),
@@ -233,6 +345,46 @@ impl State {
         matches!(&self.selected, Some(Selection::Ref(r)) if r == full)
     }
 
+    fn tree<'a>(&self, section: Section, branches: &[&'a Branch]) -> Vec<SideRow<'a>> {
+        branch_tree(
+            section,
+            branches,
+            |p| self.folded.contains(&(section, p.to_owned())),
+            !self.filter.is_empty(),
+        )
+    }
+
+    fn is_folded(&self, fold: &Fold) -> bool {
+        match fold {
+            Fold::Section(sec) => self.collapsed.contains(sec),
+            Fold::Folder(sec, p) => self.folded.contains(&(*sec, p.clone())),
+        }
+    }
+
+    fn set_folded(&mut self, fold: &Fold, folded: bool) {
+        match (fold, folded) {
+            (Fold::Section(sec), true) => {
+                self.collapsed.insert(*sec);
+            }
+            (Fold::Section(sec), false) => {
+                self.collapsed.remove(sec);
+            }
+            (Fold::Folder(sec, p), true) => {
+                self.folded.insert((*sec, p.clone()));
+            }
+            (Fold::Folder(sec, p), false) => {
+                self.folded.remove(&(*sec, p.clone()));
+            }
+        }
+    }
+
+    fn toggle_message(fold: &Fold) -> Message {
+        match fold {
+            Fold::Section(sec) => Message::Toggle(*sec),
+            Fold::Folder(sec, p) => Message::ToggleFolder(*sec, p.clone()),
+        }
+    }
+
     /// The flattened tree as shown.
     fn rows<'a>(&self, snap: &'a Snapshot) -> Vec<SideRow<'a>> {
         let locals: Vec<_> = snap
@@ -272,7 +424,7 @@ impl State {
                     "no match"
                 }));
             }
-            rows.extend(locals.iter().map(|b| SideRow::Branch(b)));
+            rows.extend(self.tree(Section::Branches, &locals));
         }
         rows.push(SideRow::Header(
             Section::Remotes,
@@ -288,7 +440,7 @@ impl State {
                     "none fetched — try fetch"
                 }));
             }
-            rows.extend(remotes.iter().map(|b| SideRow::Branch(b)));
+            rows.extend(self.tree(Section::Remotes, &remotes));
         }
         rows.push(SideRow::Header(
             Section::Tags,
@@ -375,42 +527,46 @@ impl State {
         rows
     }
 
-    /// Keys for the tree: arrows move over headers and items (an item is
-    /// selected as the cursor reaches it), ←/→ fold and unfold sections,
-    /// Enter/Space fold a header or check out / open the item.
+    /// Keys for the tree: arrows move over headers, folders and items (an
+    /// item is selected as the cursor reaches it), ←/→ fold and unfold,
+    /// Enter/Space fold a header or folder or check out / open the item.
     pub fn nav(&mut self, nav: Nav, snap: Option<&Snapshot>, t: &Tokens) -> Option<Moved<Message>> {
         let snap = snap?;
-        let items: Vec<(usize, Item)> = self
+        let items: Vec<(usize, Item, usize)> = self
             .rows(snap)
             .iter()
             .enumerate()
-            .filter_map(|(i, r)| Item::of(r).map(|it| (i, it)))
+            .filter_map(|(i, r)| Item::of(r).map(|it| (i, it, depth(r))))
             .collect();
-        let current = items.iter().position(|(_, it)| match it {
-            Item::Header(sec) => self.header_cursor == Some(*sec),
-            Item::Pick(sel, _) => {
-                self.header_cursor.is_none() && self.selected.as_ref() == Some(sel)
-            }
+        let current = items.iter().position(|(_, it, _)| match it {
+            Item::Fold(f) => self.cursor.as_ref() == Some(f),
+            Item::Pick(sel, _) => self.cursor.is_none() && self.selected.as_ref() == Some(sel),
         });
         let here = current.map(|c| items[c].1.clone());
-        // Section of the cursor: the header itself or the nearest one above.
-        let section = current.and_then(|c| {
-            items[..=c].iter().rev().find_map(|(_, it)| match it {
-                Item::Header(sec) => Some(*sec),
-                Item::Pick(..) => None,
+        // The section or folder that contains the cursor's row.
+        let parent = current.and_then(|c| {
+            let d = items[c].2;
+            items[..c].iter().rev().find_map(|(_, it, pd)| match it {
+                Item::Fold(f) if *pd < d => Some(f.clone()),
+                _ => None,
             })
         });
         match nav.key {
             Key::Left => {
-                let sec = section?;
-                self.collapsed.insert(sec);
-                self.header_cursor = Some(sec);
+                // An open section/folder closes; otherwise the cursor moves
+                // to the one containing it, which closes.
+                let fold = match &here {
+                    Some(Item::Fold(f)) if !self.is_folded(f) => f.clone(),
+                    _ => parent?,
+                };
+                self.set_folded(&fold, true);
+                self.cursor = Some(fold);
                 return Some(Moved::stay());
             }
             Key::Right => {
                 return match here {
-                    Some(Item::Header(sec)) if self.collapsed.contains(&sec) => {
-                        self.collapsed.remove(&sec);
+                    Some(Item::Fold(f)) if self.is_folded(&f) => {
+                        self.set_folded(&f, false);
                         Some(Moved::stay())
                     }
                     _ => None,
@@ -424,7 +580,7 @@ impl State {
             }
             Key::Enter | Key::Space => {
                 return match here? {
-                    Item::Header(sec) => Some(Moved::message(Message::Toggle(sec))),
+                    Item::Fold(f) => Some(Moved::message(Self::toggle_message(&f))),
                     Item::Pick(_, Some(action)) => Some(Moved::message(Message::Act(action))),
                     Item::Pick(_, None) => None,
                 };
@@ -436,11 +592,11 @@ impl State {
         if current == Some(i) {
             return Some(Moved::stay());
         }
-        let (row, item) = items[i].clone();
+        let (row, item, _) = items[i].clone();
         let reveal = nav::reveal(LIST_ID, self.scroll, row, h);
         Some(match item {
-            Item::Header(sec) => {
-                self.header_cursor = Some(sec);
+            Item::Fold(f) => {
+                self.cursor = Some(f);
                 Moved::stay().with_task(reveal)
             }
             Item::Pick(sel, _) => Moved::message(Message::Select(sel)).with_task(reveal),
@@ -462,7 +618,10 @@ impl State {
         };
         let toggle = button(row![dim(t, arrow), dim(t, format!("{label} ({count})"))].spacing(6))
             .padding(Padding::from([1, 6]))
-            .style(style::row_button(t, self.header_cursor == Some(section)))
+            .style(style::row_button(
+                t,
+                self.cursor == Some(Fold::Section(section)),
+            ))
             .on_press(Message::Toggle(section));
         match add {
             Some((action, hint)) => row![
@@ -475,8 +634,42 @@ impl State {
         }
     }
 
-    fn branch_row<'a>(&self, t: &'a Tokens, b: &'a Branch) -> Element<'a, Message> {
+    /// `▾ feature/ (3)`: opens and closes the folder.
+    fn folder_row<'a>(
+        &self,
+        t: &'a Tokens,
+        section: Section,
+        path: &'a str,
+        depth: usize,
+        count: usize,
+    ) -> Element<'a, Message> {
+        let fold = Fold::Folder(section, path.to_owned());
+        let arrow = if self.is_folded(&fold) { "▸" } else { "▾" };
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let line = row![
+            space().width(Length::Fixed(t.cols(depth * 2))),
+            dim(t, arrow),
+            colored(t, format!("{name}/"), t.fg).wrapping(Wrapping::None),
+            dim(t, format!("({count})")),
+        ]
+        .spacing(6);
+        widgets::list_row(
+            t,
+            line,
+            self.cursor.as_ref() == Some(&fold),
+            Message::ToggleFolder(section, path.to_owned()),
+        )
+    }
+
+    fn branch_row<'a>(&self, t: &'a Tokens, b: &'a Branch, depth: usize) -> Element<'a, Message> {
         let full = b.name.as_str();
+        // Inside folders only the last part of the name is shown.
+        let short = b.name.short();
+        let leaf = if depth > 0 {
+            short.rsplit('/').next().unwrap_or(short)
+        } else {
+            short
+        };
         let (marker, marker_color) = if b.is_head {
             ("●", t.head())
         } else {
@@ -488,8 +681,9 @@ impl State {
             t.branch()
         };
         let mut line = row![
+            space().width(Length::Fixed(t.cols(depth * 2))),
             colored(t, marker, marker_color),
-            colored(t, b.name.short(), name_color).wrapping(Wrapping::None)
+            colored(t, leaf, name_color).wrapping(Wrapping::None)
         ]
         .spacing(6);
         if let Some(up) = &b.upstream {
@@ -694,8 +888,8 @@ impl State {
         }
     }
 
-    /// Actions for the current selection (the `actions ▾` button, a
-    /// right-click, or `.`). `None` when there is nothing to do with it.
+    /// Actions for the current selection (a right-click, or `.`). `None`
+    /// when there is nothing to do with it.
     fn menu(&self, snap: &Snapshot) -> Option<Menu<Message>> {
         let item = |key: char, label: &str, hint: &str, a: Action| {
             Entry::item(key, label, hint, Message::Act(a))
@@ -817,26 +1011,6 @@ impl State {
         })
     }
 
-    /// Footer: the `actions ▾` button for the selection, or a hint.
-    fn actions<'a>(&self, t: &'a Tokens, snap: &Snapshot) -> Option<Element<'a, Message>> {
-        let label = self.selection_label(snap)?;
-        let button: Element<'a, Message> = if self.menu(snap).is_some() {
-            widgets::tip(
-                t,
-                widgets::text_button(t, "actions ▾", None, Some(Message::OpenActions)),
-                "all actions for the selection · or right-click an item · or `.`".into(),
-            )
-        } else {
-            dim(t, "the main working tree").into()
-        };
-        Some(
-            row![button, colored(t, label, t.fg).wrapping(Wrapping::None)]
-                .spacing(8)
-                .align_y(iced::Alignment::Center)
-                .into(),
-        )
-    }
-
     fn output_for(&self, action: Action, snap: Option<&Snapshot>) -> Option<Output> {
         match action {
             Action::NewBranch => {
@@ -906,8 +1080,15 @@ impl State {
         snap: Option<&Snapshot>,
     ) -> Update<Message, Output> {
         match message {
+            Message::ToggleFolder(section, path) => {
+                let fold = Fold::Folder(section, path);
+                let folded = self.is_folded(&fold);
+                self.set_folded(&fold, !folded);
+                self.cursor = Some(fold);
+                Update::none()
+            }
             Message::Toggle(section) => {
-                self.header_cursor = Some(section);
+                self.cursor = Some(Fold::Section(section));
                 if !self.collapsed.remove(&section) {
                     self.collapsed.insert(section);
                 }
@@ -927,7 +1108,7 @@ impl State {
                         .is_some_and(|(s, at)| *s == sel && at.elapsed() < DOUBLE_CLICK);
                 self.last_click = (!double).then(|| (sel.clone(), std::time::Instant::now()));
                 if let (true, Some(action)) = (double, default) {
-                    self.header_cursor = None;
+                    self.cursor = None;
                     self.selected = Some(sel);
                     return self
                         .output_for(action, snap)
@@ -936,7 +1117,7 @@ impl State {
                 let shows_history = matches!(sel, Selection::Ref(_) | Selection::Stash(_));
                 // Coming back from a header (keyboard) re-picks the item
                 // instead of unselecting it.
-                let from_header = self.header_cursor.take().is_some();
+                let from_header = self.cursor.take().is_some();
                 if self.selected.as_ref() == Some(&sel) && from_header {
                     return Update::none();
                 }
@@ -971,7 +1152,7 @@ impl State {
                 // Selecting by right-click never unselects; the app shows
                 // the item's history/diff like a left click would.
                 let changed = self.selected.as_ref() != Some(&sel);
-                self.header_cursor = None;
+                self.cursor = None;
                 self.selected = Some(sel.clone());
                 match snap.and_then(|s| self.menu(s)) {
                     Some(menu) => Update::output(Output::Menu {
@@ -1002,7 +1183,7 @@ impl Feature for State {
 
     fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
         let t = cx.tokens;
-        let filter = text_input("filter refs…", &self.filter)
+        let filter = text_input("filter refs…  ·  right-click for actions", &self.filter)
             .id(REFS_FILTER_ID)
             .on_input(Message::Filter)
             .size(t.small())
@@ -1022,7 +1203,8 @@ impl Feature for State {
         let name_cols = rows
             .iter()
             .map(|r| match r {
-                SideRow::Branch(b) => columns(b.name.short()) + 12,
+                SideRow::Branch(b, d) => columns(b.name.short()) + 12 + d * 2,
+                SideRow::Folder { path, depth, .. } => columns(path) + 12 + depth * 2,
                 SideRow::Tag(tg) => columns(tg.name.short()),
                 SideRow::Stash(s) => columns(&s.message),
                 SideRow::Worktree(w) => columns(&w.path.display().to_string()) + 20,
@@ -1045,7 +1227,13 @@ impl Feature for State {
                     SideRow::Header(sec, label, count, add) => {
                         self.header(t, sec, label, count, add)
                     }
-                    SideRow::Branch(b) => self.branch_row(t, b),
+                    SideRow::Folder {
+                        section,
+                        path,
+                        depth,
+                        count,
+                    } => self.folder_row(t, section, path, depth, count),
+                    SideRow::Branch(b, depth) => self.branch_row(t, b, depth),
                     SideRow::Tag(tg) => self.tag_row(t, tg),
                     SideRow::Stash(s) => self.stash_row(t, s),
                     SideRow::Worktree(w) => self.worktree_row(t, w),
@@ -1063,18 +1251,11 @@ impl Feature for State {
             Message::Scrolled,
         );
 
-        let footer: Element<'a, Message> = self.actions(t, snap).unwrap_or_else(|| {
-            row![
-                dim(t, "select an item (or right-click it) for actions"),
-                space()
-            ]
-            .into()
-        });
         widgets::panel_with_action(
             t,
             "REFS".into(),
             widgets::icon_button(t, "«", t.accent(), "hide refs ⌘B", Message::Collapse),
-            column![filter, list, footer].spacing(4).width(Length::Fill),
+            column![filter, list].spacing(4).width(Length::Fill),
         )
     }
 }
@@ -1155,17 +1336,17 @@ mod tests {
         let key = |s: &mut State, k| s.nav(Nav::plain(k), Some(&snap), &t).map(|m| m.message);
         // ↓ from nothing: the BRANCHES header.
         assert!(matches!(key(&mut s, Key::Down), Some(None)));
-        assert_eq!(s.header_cursor, Some(Section::Branches));
+        assert_eq!(s.cursor, Some(Fold::Section(Section::Branches)));
         // Next ↓ picks the first branch.
         let Some(Some(Message::Select(sel))) = key(&mut s, Key::Down) else {
             panic!("selects the branch");
         };
         let _ = s.update_with(Message::Select(sel), Some(&snap));
-        assert!(s.header_cursor.is_none() && s.selected.is_some());
+        assert!(s.cursor.is_none() && s.selected.is_some());
         // ← folds the section and moves the cursor to its header.
         assert!(matches!(key(&mut s, Key::Left), Some(None)));
         assert!(s.collapsed.contains(&Section::Branches));
-        assert_eq!(s.header_cursor, Some(Section::Branches));
+        assert_eq!(s.cursor, Some(Fold::Section(Section::Branches)));
         // → unfolds it again; a second → is left to the app.
         assert!(matches!(key(&mut s, Key::Right), Some(None)));
         assert!(!s.collapsed.contains(&Section::Branches));
@@ -1218,7 +1399,7 @@ mod tests {
         else {
             panic!("menu expected");
         };
-        assert!(show.is_none(), "button does not change the selection");
+        assert!(show.is_none(), "`.` does not change the selection");
         assert!(
             !menu
                 .entries
@@ -1244,5 +1425,125 @@ mod tests {
         let _ = s.update_with(main(), Some(&snap));
         let out = s.update_with(main(), Some(&snap)).output;
         assert!(matches!(out, Some(Output::ShowRevision(None))));
+    }
+
+    #[test]
+    fn only_branches_start_open() {
+        let s = State::default();
+        assert!(!s.collapsed.contains(&Section::Branches));
+        for sec in [
+            Section::Remotes,
+            Section::Tags,
+            Section::Stashes,
+            Section::Worktrees,
+            Section::Submodules,
+            Section::Lfs,
+        ] {
+            assert!(s.collapsed.contains(&sec), "{sec:?} starts closed");
+        }
+    }
+
+    fn remote(name: &str) -> Branch {
+        Branch {
+            name: RefName::new(format!("refs/remotes/{name}")),
+            target: "a".repeat(40).parse().expect("oid"),
+            upstream: None,
+            is_head: false,
+        }
+    }
+
+    /// `(depth, label)` per row: `folder/` or a branch's short name.
+    fn shape(rows: &[SideRow<'_>]) -> Vec<(usize, String)> {
+        rows.iter()
+            .map(|r| match r {
+                SideRow::Folder { path, depth, .. } => (*depth, format!("{path}/")),
+                SideRow::Branch(b, d) => (*d, b.name.short().to_owned()),
+                _ => (99, String::new()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn branches_nest_under_slash_folders() {
+        let bs = [
+            branch("main", true),
+            branch("feature/dasf", false),
+            branch("feature/abc", false),
+            branch("feature/ui/x", false),
+        ];
+        let refs: Vec<&Branch> = bs.iter().collect();
+        let rows = branch_tree(Section::Branches, &refs, |_| false, false);
+        assert_eq!(
+            shape(&rows),
+            vec![
+                (0, "feature/".into()),
+                (1, "feature/abc".into()),
+                (1, "feature/dasf".into()),
+                (1, "feature/ui/".into()),
+                (2, "feature/ui/x".into()),
+                (0, "main".into()),
+            ]
+        );
+        assert!(matches!(rows[0], SideRow::Folder { count: 3, .. }));
+        // A closed folder keeps its row and hides what is inside.
+        let rows = branch_tree(Section::Branches, &refs, |p| p == "feature", false);
+        assert_eq!(
+            shape(&rows),
+            vec![(0, "feature/".into()), (0, "main".into())]
+        );
+        // While filtering, closed folders still show their matches.
+        let rows = branch_tree(Section::Branches, &refs, |p| p == "feature", true);
+        assert_eq!(rows.len(), 6);
+    }
+
+    #[test]
+    fn remote_branches_nest_under_their_remote() {
+        let bs = [remote("origin/main"), remote("origin/feature/a")];
+        let refs: Vec<&Branch> = bs.iter().collect();
+        let rows = branch_tree(Section::Remotes, &refs, |_| false, false);
+        assert_eq!(
+            shape(&rows),
+            vec![
+                (0, "origin/".into()),
+                (1, "origin/feature/".into()),
+                (2, "origin/feature/a".into()),
+                (1, "origin/main".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn keys_walk_and_fold_branch_folders() {
+        let t = crate::theme::preset("gf-dark");
+        let snap = Snapshot {
+            branches: vec![
+                branch("main", true),
+                branch("feature/abc", false),
+                branch("feature/dasf", false),
+            ],
+            ..Snapshot::default()
+        };
+        let mut s = State::default();
+        let key = |s: &mut State, k| s.nav(Nav::plain(k), Some(&snap), &t).map(|m| m.message);
+        let _ = key(&mut s, Key::Down); // BRANCHES header
+        let _ = key(&mut s, Key::Down); // feature/ folder
+        let folder = Fold::Folder(Section::Branches, "feature".into());
+        assert_eq!(s.cursor, Some(folder.clone()));
+        // ↓ onto a branch inside, then ← closes the folder around it.
+        let Some(Some(Message::Select(sel))) = key(&mut s, Key::Down) else {
+            panic!("selects feature/abc");
+        };
+        let _ = s.update_with(Message::Select(sel), Some(&snap));
+        let _ = key(&mut s, Key::Left);
+        assert_eq!(s.cursor, Some(folder.clone()));
+        assert!(s.is_folded(&folder));
+        // → opens it again; Enter toggles it.
+        let _ = key(&mut s, Key::Right);
+        assert!(!s.is_folded(&folder));
+        let Some(Some(m)) = key(&mut s, Key::Enter) else {
+            panic!("toggle");
+        };
+        let _ = s.update_with(m, Some(&snap));
+        assert!(s.is_folded(&folder));
     }
 }

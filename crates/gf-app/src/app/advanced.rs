@@ -194,6 +194,30 @@ impl App {
                 Purpose::Revert(vec![oid]),
             )),
             CommitAction::RebaseFrom => self.open_rebase_editor(oid),
+            CommitAction::Reset => {
+                let current = self.current_branch();
+                let modes = super::dialogs::RESET_MODES
+                    .iter()
+                    .map(|(_, label, danger)| ((*label).to_owned(), *danger))
+                    .collect();
+                // Always a dialog (never skipped): the mode is chosen here.
+                self.open_dialog(
+                    crate::features::dialog::Dialog::confirm(
+                        "Reset",
+                        vec![
+                            format!("Move `{current}` to {short}{summary}?"),
+                            "Commits after it leave the branch; undo brings them back.".into(),
+                        ],
+                        "Reset",
+                        Purpose::Reset {
+                            to: oid,
+                            mode: gf_git::ResetMode::Soft,
+                        },
+                    )
+                    .severity(crate::features::dialog::Severity::Change)
+                    .choice("what happens to their changes:", modes, 0),
+                )
+            }
             CommitAction::BisectFrom => self.confirm(Confirm::change(
                 "bisect",
                 "Start bisect",
