@@ -208,6 +208,28 @@ async fn commit_and_amend() {
 
     let empty = r.commit("nothing", &CommitOptions::default()).await;
     assert!(empty.is_err(), "nothing staged must fail");
+
+    // Amending with an empty message adds staged changes, keeping the message.
+    repo.write("b.txt", "b\n");
+    r.stage_all().await.unwrap();
+    r.commit(
+        "",
+        &CommitOptions {
+            amend: true,
+            ..CommitOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        r.head_message().await.unwrap().as_deref(),
+        Some("feat: first (amended)")
+    );
+    assert_eq!(repo.git(&["rev-list", "--count", "HEAD"]), "1");
+    assert!(
+        repo.git(&["ls-tree", "--name-only", "HEAD"])
+            .contains("b.txt")
+    );
 }
 
 // ---------------------------------------------------------------- branches & tags

@@ -625,7 +625,12 @@ impl App {
                 )
             }
             Purpose::Amend { message } => {
-                let summary = message.lines().next().unwrap_or_default().to_owned();
+                let summary = message
+                    .lines()
+                    .next()
+                    .filter(|l| !l.trim().is_empty())
+                    .unwrap_or("message kept")
+                    .to_owned();
                 let undo = self.undo_point(&format!("amend: {summary}"), true);
                 self.op_with_undo(
                     format!("amend commit: {summary}"),

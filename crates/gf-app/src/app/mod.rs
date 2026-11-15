@@ -624,7 +624,7 @@ impl App {
             }
             Message::AmendTextLoaded(id, message) => {
                 if let Some(tab) = self.tab_mut(id) {
-                    tab.commit.set_amend_message(message);
+                    tab.commit.set_last_message(message);
                 }
                 Task::none()
             }
@@ -859,7 +859,9 @@ impl App {
             Shortcut::HistoryPrev => self.update(Message::Prompt(prompt::Message::HistoryPrev)),
             Shortcut::HistoryNext => self.update(Message::Prompt(prompt::Message::HistoryNext)),
             Shortcut::Complete => self.update(Message::Prompt(prompt::Message::Complete)),
-            Shortcut::Commit => self.update(Message::Commit(commit_box::Message::Submit)),
+            Shortcut::Commit => self.update(Message::Commit(commit_box::Message::Submit {
+                amend: false,
+            })),
             Shortcut::Escape if self.rebase_editor.is_some() => {
                 self.rebase_editor = None;
                 Task::none()
@@ -1041,6 +1043,11 @@ impl App {
 /// There is one CHANGES view; its color (blue = a commit, yellow = your
 /// local work) and the active tab say which changes are shown. Each mode
 /// keeps its own selection and scroll position.
+/// Width of the file list column (columns of text), the same in HISTORY
+/// (commit files) and WORKING TREE (changed files), so the divider to the
+/// diff stays put when switching between them.
+const LIST_COLS: usize = 34;
+
 fn main_area<'a>(
     t: &'a Tokens,
     tab: &'a RepoTab,
@@ -1104,7 +1111,7 @@ fn main_area<'a>(
                         Pane::Files,
                         tab.commit_diff.files_view(cx).map(Message::CommitDiff)
                     ))
-                    .width(Length::Fixed(t.font_size * 20.0)),
+                    .width(Length::Fixed(t.cols(LIST_COLS))),
                     frame(
                         Pane::Diff,
                         tab.commit_diff.view(cx).map(Message::CommitDiff)
@@ -1145,8 +1152,8 @@ fn main_area<'a>(
             column![
                 tabs,
                 row![
-                    container(left).width(Length::FillPortion(2)),
-                    container(diff).width(Length::FillPortion(3)),
+                    container(left).width(Length::Fixed(t.cols(LIST_COLS))),
+                    container(diff).width(Length::Fill),
                 ]
                 .spacing(4)
                 .height(Length::Fill),

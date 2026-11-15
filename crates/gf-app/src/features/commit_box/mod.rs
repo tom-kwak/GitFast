@@ -1,5 +1,6 @@
-//! Commit message editor: summary length guide (50/72), amend toggle and
-//! ⌘⏎ to commit. The button explains why it is disabled.
+//! Commit message editor: summary length guide (50/72), and two actions —
+//! Commit (⌘⏎) and Amend — each enabled only when it can run, with the
+//! reason shown when it cannot.
 
 use iced::widget::{column, row, space, text_editor};
 use iced::{Background, Border, Element, Length};
@@ -16,29 +17,36 @@ const SUMMARY_HARD: usize = 72;
 #[derive(Debug, Default)]
 pub struct State {
     content: text_editor::Content,
-    amend: bool,
-    /// Draft kept while amend replaced the editor text, restored when amend
-    /// is switched off.
-    draft_before_amend: Option<String>,
     committing: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Edit(text_editor::Action),
-    ToggleAmend,
-    Submit,
+    /// Put the last commit's message in the editor (to amend it).
+    RecallLast,
+    /// `amend: false` commits the staged changes; `true` replaces the last
+    /// commit with the staged changes and the message (or keeps its message
+    /// when the editor is empty).
+    Submit {
+        amend: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum Output {
-    Commit {
-        message: String,
-        amend: bool,
-    },
-    /// Amend was switched on: the app loads HEAD's message and calls
-    /// [`State::set_amend_message`].
+    /// An empty `message` with `amend` keeps the last commit's message.
+    Commit { message: String, amend: bool },
+    /// The app loads HEAD's message and calls [`State::set_last_message`].
     LoadHeadMessage,
+}
+
+/// What the commit box knows about the repository.
+#[derive(Debug, Clone, Copy)]
+struct Repo {
+    staged: usize,
+    /// There is a commit to amend (not before the first commit).
+    has_head: bool,
 }
 
 impl State {
@@ -46,12 +54,12 @@ impl State {
         self.content.text()
     }
 
-    pub fn set_amend_message(&mut self, message: Option<String>) {
-        if !self.amend {
-            return;
-        }
+    fn has_message(&self) -> bool {
+        !self.message().trim().is_empty()
+    }
+
+    pub fn set_last_message(&mut self, message: Option<String>) {
         if let Some(m) = message {
-            self.draft_before_amend = Some(self.message());
             self.content = text_editor::Content::with_text(&m);
         }
     }
@@ -59,8 +67,6 @@ impl State {
     /// Called after a successful commit.
     pub fn committed(&mut self) {
         self.content = text_editor::Content::new();
-        self.amend = false;
-        self.draft_before_amend = None;
         self.committing = false;
     }
 
@@ -68,17 +74,38 @@ impl State {
         self.committing = false;
     }
 
-    /// Why committing is not possible right now, if it is not.
-    fn blocked_reason(&self, staged: usize) -> Option<&'static str> {
+    /// Why a new commit is not possible right now, if it is not.
+    fn commit_blocked(&self, repo: Repo) -> Option<&'static str> {
         if self.committing {
             Some("committing…")
-        } else if staged == 0 && !self.amend {
-            Some("stage changes to commit")
-        } else if self.message().trim().is_empty() {
+        } else if repo.staged == 0 {
+            Some("nothing staged — stage files first (Space, +, stage all)")
+        } else if !self.has_message() {
             Some("write a commit message")
         } else {
             None
         }
+    }
+
+    /// Why amending is not possible right now, if it is not. Amend works
+    /// with staged changes, a new message, or both.
+    fn amend_blocked(&self, repo: Repo) -> Option<&'static str> {
+        if self.committing {
+            Some("committing…")
+        } else if !repo.has_head {
+            Some("no commit to amend yet")
+        } else if repo.staged == 0 && !self.has_message() {
+            Some("stage changes or write a new message to amend")
+        } else {
+            None
+        }
+    }
+
+    fn repo(cx: &Cx<'_>) -> Option<Repo> {
+        cx.snapshot.map(|s| Repo {
+            staged: s.staged_count(),
+            has_head: s.status.head.oid.is_some(),
+        })
     }
 }
 
@@ -92,27 +119,17 @@ impl Feature for State {
                 self.content.perform(action);
                 Update::none()
             }
-            Message::ToggleAmend => {
-                self.amend = !self.amend;
-                if self.amend {
-                    Update::output(Output::LoadHeadMessage)
-                } else {
-                    if let Some(draft) = self.draft_before_amend.take() {
-                        self.content = text_editor::Content::with_text(&draft);
-                    }
-                    Update::none()
-                }
-            }
-            Message::Submit => {
-                // The view disables the button, but ⌘⏎ can still arrive.
-                let message = self.message();
-                if self.committing || message.trim().is_empty() {
+            Message::RecallLast => Update::output(Output::LoadHeadMessage),
+            Message::Submit { amend } => {
+                // The view disables the buttons, but ⌘⏎ can still arrive;
+                // git reports what is missing (e.g. nothing staged).
+                if self.committing || (!amend && !self.has_message()) {
                     return Update::none();
                 }
                 self.committing = true;
                 Update::output(Output::Commit {
-                    message,
-                    amend: self.amend,
+                    message: self.message(),
+                    amend,
                 })
             }
         }
@@ -120,7 +137,7 @@ impl Feature for State {
 
     fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
         let t = cx.tokens;
-        let staged = cx.snapshot.map_or(0, |s| s.staged_count());
+        let repo = Self::repo(&cx);
 
         let editor = text_editor(&self.content)
             .placeholder("summary (≤50 chars)\n\nwhy this change is needed…")
@@ -130,7 +147,9 @@ impl Feature for State {
             .key_binding(|key| {
                 use iced::keyboard::{Key, key::Named};
                 if key.modifiers.command() && matches!(key.key.as_ref(), Key::Named(Named::Enter)) {
-                    Some(text_editor::Binding::Custom(Message::Submit))
+                    Some(text_editor::Binding::Custom(Message::Submit {
+                        amend: false,
+                    }))
                 } else {
                     text_editor::Binding::from_key_press(key)
                 }
@@ -146,44 +165,82 @@ impl Feature for State {
         } else {
             t.dim
         };
-        let blocked = cx
-            .snapshot
-            .map_or(Some("loading…"), |_| self.blocked_reason(staged));
+        let loading = Some("loading…");
+        let commit_blocked = repo.map_or(loading, |r| self.commit_blocked(r));
+        let amend_blocked = repo.map_or(loading, |r| self.amend_blocked(r));
+        let has_head = repo.is_some_and(|r| r.has_head);
 
-        let amend = widgets::text_button(
-            t,
-            if self.amend {
-                "■ amend last commit"
-            } else {
-                "□ amend last commit"
-            },
-            None,
-            Some(Message::ToggleAmend),
-        );
-        let commit_label = if self.amend { "Amend" } else { "Commit" };
         let footer = row![
             colored(t, format!("{summary_len}/{SUMMARY_SOFT}"), len_color),
-            dim(t, format!("· {staged} staged")),
+            dim(t, format!("· {} staged", repo.map_or(0, |r| r.staged))),
             space().width(Length::Fill),
-            amend,
+            widgets::tip(
+                t,
+                widgets::text_button(
+                    t,
+                    "last message",
+                    None,
+                    (has_head && !self.committing).then_some(Message::RecallLast),
+                ),
+                "put the last commit's message here to edit it for an amend".into(),
+            ),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center);
-        let commit_row = row![
-            dim(t, blocked.map(|r| format!("  {r}")).unwrap_or_default()).width(Length::Fill),
-            widgets::text_button(
+
+        // The line explains the main action (commit); amend's own reason is
+        // on its tooltip.
+        let buttons = row![
+            dim(
                 t,
-                commit_label,
-                Some("⌘⏎"),
-                blocked.is_none().then_some(Message::Submit)
+                commit_blocked.map(|r| format!("  {r}")).unwrap_or_default()
+            )
+            .width(Length::Fill),
+            widgets::tip(
+                t,
+                widgets::text_button(
+                    t,
+                    "Amend",
+                    None,
+                    amend_blocked
+                        .is_none()
+                        .then_some(Message::Submit { amend: true }),
+                ),
+                amend_blocked.map_or_else(
+                    || {
+                        if self.has_message() {
+                            "replace the last commit: staged changes + this message".to_owned()
+                        } else {
+                            "add the staged changes to the last commit, keeping its message"
+                                .to_owned()
+                        }
+                    },
+                    str::to_owned,
+                ),
+            ),
+            widgets::tip(
+                t,
+                widgets::text_button(
+                    t,
+                    "Commit",
+                    Some("⌘⏎"),
+                    commit_blocked
+                        .is_none()
+                        .then_some(Message::Submit { amend: false }),
+                ),
+                commit_blocked.map_or_else(
+                    || "create a new commit from the staged changes".to_owned(),
+                    str::to_owned,
+                ),
             ),
         ]
+        .spacing(4)
         .align_y(iced::Alignment::Center);
 
         widgets::panel(
             t,
             "COMMIT".into(),
-            column![editor, footer, commit_row].spacing(4),
+            column![editor, footer, buttons].spacing(4),
         )
     }
 }
@@ -219,51 +276,62 @@ mod tests {
         }
     }
 
+    const REPO: Repo = Repo {
+        staged: 1,
+        has_head: true,
+    };
+
     #[test]
-    fn blocked_reasons() {
-        assert_eq!(
-            typed("msg").blocked_reason(0),
-            Some("stage changes to commit")
-        );
-        assert_eq!(
-            typed("  ").blocked_reason(2),
-            Some("write a commit message")
-        );
-        assert_eq!(typed("msg").blocked_reason(1), None);
-        let mut amend = typed("msg");
-        amend.amend = true;
-        assert_eq!(
-            amend.blocked_reason(0),
-            None,
-            "amend may only change the message"
-        );
+    fn commit_needs_staged_changes_and_a_message() {
+        let nothing = Repo { staged: 0, ..REPO };
+        assert!(typed("msg").commit_blocked(nothing).is_some());
+        assert!(typed("  ").commit_blocked(REPO).is_some());
+        assert_eq!(typed("msg").commit_blocked(REPO), None);
+    }
+
+    #[test]
+    fn amend_needs_a_commit_and_something_to_change() {
+        let nothing = Repo { staged: 0, ..REPO };
+        // Message only, staged changes only, or both.
+        assert_eq!(typed("new msg").amend_blocked(nothing), None);
+        assert_eq!(typed("").amend_blocked(REPO), None);
+        assert!(typed("").amend_blocked(nothing).is_some());
+        let unborn = Repo {
+            has_head: false,
+            ..REPO
+        };
+        assert!(typed("msg").amend_blocked(unborn).is_some());
     }
 
     #[test]
     fn submit_emits_once_until_done() {
         let mut s = typed("feat: x");
         assert!(matches!(
-            s.update(Message::Submit).output,
-            Some(Output::Commit { .. })
+            s.update(Message::Submit { amend: false }).output,
+            Some(Output::Commit { amend: false, .. })
         ));
         assert!(
-            s.update(Message::Submit).output.is_none(),
+            s.update(Message::Submit { amend: true }).output.is_none(),
             "no double commit"
         );
         s.committed();
         assert!(s.message().trim().is_empty());
+        // An empty editor amends keeping the last message; it never commits.
+        assert!(s.update(Message::Submit { amend: false }).output.is_none());
+        assert!(matches!(
+            s.update(Message::Submit { amend: true }).output,
+            Some(Output::Commit { amend: true, ref message }) if message.trim().is_empty()
+        ));
     }
 
     #[test]
-    fn amend_toggle_restores_draft() {
-        let mut s = typed("my draft");
+    fn last_message_fills_the_editor() {
+        let mut s = typed("draft");
         assert!(matches!(
-            s.update(Message::ToggleAmend).output,
+            s.update(Message::RecallLast).output,
             Some(Output::LoadHeadMessage)
         ));
-        s.set_amend_message(Some("previous message".into()));
+        s.set_last_message(Some("previous message".into()));
         assert!(s.message().starts_with("previous message"));
-        let _ = s.update(Message::ToggleAmend);
-        assert!(s.message().starts_with("my draft"));
     }
 }
