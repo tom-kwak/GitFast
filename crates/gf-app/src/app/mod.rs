@@ -986,27 +986,34 @@ impl App {
             (None, Some(e)) => Some(e.view(t).map(Message::RebaseEditor)),
             (None, None) => None,
         };
-        let screen: Element<'_, Message> = match modal {
-            None => base.into(),
+        // The layer structure never changes: switching the root between
+        // `base` and `stack![base, …]` would rebuild the widget tree and
+        // reset every scroll position (lists jumped to the top whenever a
+        // menu or dialog opened). Empty layers are plain spaces.
+        let empty = || -> Element<'_, Message> { iced::widget::space().into() };
+        let modal_layer: Element<'_, Message> = match modal {
+            None => empty(),
             Some(modal) => {
                 let shade = Color {
                     a: 0.55,
                     ..Color::BLACK
                 };
-                let overlay = container(center(modal))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .style(move |_| container::Style {
-                        background: Some(Background::Color(shade)),
-                        ..container::Style::default()
-                    });
-                stack![base, opaque(overlay)].into()
+                opaque(
+                    container(center(modal))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(move |_| container::Style {
+                            background: Some(Background::Color(shade)),
+                            ..container::Style::default()
+                        }),
+                )
             }
         };
-        let screen = match &self.menu {
-            Some(menu) => stack![screen, opaque(menu.view(t).map(Message::Menu))].into(),
-            None => screen,
+        let menu_layer: Element<'_, Message> = match &self.menu {
+            Some(menu) => opaque(menu.view(t).map(Message::Menu)),
+            None => empty(),
         };
+        let screen: Element<'_, Message> = stack![base, modal_layer, menu_layer].into();
         self.pointer.track(screen)
     }
 
@@ -1137,9 +1144,8 @@ fn main_area<'a>(
                     Pane::Changes,
                     tab.changes.view(cx).map(Message::Changes)
                 ))
-                .height(Length::Fill),
-                container(tab.commit.view(cx).map(Message::Commit))
-                    .height(Length::Fixed(t.font_size * 15.0)),
+                .height(Length::FillPortion(3)),
+                container(tab.commit.view(cx).map(Message::Commit)).height(Length::FillPortion(2)),
             ]
             .spacing(4);
             let diff = frame(

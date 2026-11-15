@@ -311,3 +311,36 @@ async fn revert_and_cherry_pick_several() {
     assert_eq!(r.revert_many(&picked).await.unwrap(), Integration::Done);
     assert!(!repo.path().join("b.txt").exists() && !repo.path().join("c.txt").exists());
 }
+
+#[tokio::test]
+async fn reset_modes_treat_changes_differently() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "one\n");
+    let base = repo.commit_all("base");
+    repo.write("a.txt", "two\n");
+    repo.commit_all("second");
+    let r = open(&repo).await;
+    let base: gf_core::model::Oid = base.parse().expect("oid");
+
+    // Soft: the second commit's change stays staged.
+    let top = repo.head();
+    r.reset(&base, gf_git::ResetMode::Soft).await.expect("soft");
+    assert_eq!(repo.head(), base.as_str());
+    assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "a.txt");
+
+    // Mixed: unstaged, still in the file.
+    repo.git(&["reset", "--hard", &top]);
+    r.reset(&base, gf_git::ResetMode::Mixed)
+        .await
+        .expect("mixed");
+    assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "");
+    assert_eq!(repo.git(&["diff", "--name-only"]), "a.txt");
+
+    // Hard: the file is back to the target.
+    r.reset(&base, gf_git::ResetMode::Hard).await.expect("hard");
+    assert_eq!(repo.git(&["status", "--porcelain"]), "");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("a.txt")).expect("read"),
+        "one\n"
+    );
+}

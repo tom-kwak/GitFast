@@ -71,12 +71,22 @@ pub struct Check {
     pub value: bool,
 }
 
+/// One of several options (radio buttons). An option marked dangerous
+/// turns the dialog into a deletion while it is selected.
+#[derive(Debug, Clone)]
+pub struct Choice {
+    pub label: String,
+    pub options: Vec<(String, bool)>,
+    pub selected: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct Dialog<P> {
     pub title: String,
     pub body: Vec<String>,
     pub fields: Vec<Field>,
     pub checks: Vec<Check>,
+    pub choice: Option<Choice>,
     pub confirm_label: String,
     pub severity: Severity,
     pub purpose: P,
@@ -91,6 +101,7 @@ pub struct Dialog<P> {
 pub enum Message {
     Field(usize, String),
     Check(usize),
+    Choose(usize),
     DontAsk,
     Submit,
     Cancel,
@@ -103,6 +114,8 @@ pub enum Outcome<P> {
         purpose: P,
         values: Vec<String>,
         checks: Vec<bool>,
+        /// Selected option of the choice, if the dialog has one.
+        choice: Option<usize>,
         /// Set when "don't ask again" was ticked: the confirmation key.
         dont_ask_again: Option<String>,
     },
@@ -123,6 +136,7 @@ impl<P: Clone> Dialog<P> {
             body,
             fields: Vec::new(),
             checks: Vec::new(),
+            choice: None,
             confirm_label: confirm_label.into(),
             severity: Severity::Normal,
             purpose,
@@ -167,6 +181,35 @@ impl<P: Clone> Dialog<P> {
         self
     }
 
+    /// Radio options; `(label, dangerous)` each, `selected` first.
+    pub fn choice(
+        mut self,
+        label: impl Into<String>,
+        options: Vec<(String, bool)>,
+        selected: usize,
+    ) -> Self {
+        self.choice = Some(Choice {
+            label: label.into(),
+            options,
+            selected,
+        });
+        self
+    }
+
+    /// The severity in effect: a dangerous option makes it a deletion.
+    fn effective_severity(&self) -> Severity {
+        let dangerous = self
+            .choice
+            .as_ref()
+            .and_then(|c| c.options.get(c.selected))
+            .is_some_and(|(_, d)| *d);
+        if dangerous {
+            Severity::Delete
+        } else {
+            self.severity
+        }
+    }
+
     pub fn has_fields(&self) -> bool {
         !self.fields.is_empty()
     }
@@ -187,6 +230,12 @@ impl<P: Clone> Dialog<P> {
                 }
                 None
             }
+            Message::Choose(i) => {
+                if let Some(c) = self.choice.as_mut().filter(|c| i < c.options.len()) {
+                    c.selected = i;
+                }
+                None
+            }
             Message::DontAsk => {
                 self.dont_ask = !self.dont_ask;
                 None
@@ -199,6 +248,7 @@ impl<P: Clone> Dialog<P> {
                     .map(|f| f.value.trim().to_owned())
                     .collect(),
                 checks: self.checks.iter().map(|c| c.value).collect(),
+                choice: self.choice.as_ref().map(|c| c.selected),
                 dont_ask_again: self.remember.clone().filter(|_| self.dont_ask),
             }),
             Message::Cancel => Some(Outcome::Cancelled {
@@ -209,7 +259,7 @@ impl<P: Clone> Dialog<P> {
 
     /// Submit triggered by Enter: ignored for deletions.
     pub fn enter(&mut self) -> Option<Outcome<P>> {
-        if self.severity == Severity::Delete {
+        if self.effective_severity() == Severity::Delete {
             None
         } else {
             self.update(Message::Submit)
@@ -217,11 +267,12 @@ impl<P: Clone> Dialog<P> {
     }
 
     pub fn view<'a>(&'a self, t: &'a Tokens) -> Element<'a, Message> {
-        let danger = self.severity == Severity::Delete;
-        let accent = self.severity.accent(t);
+        let severity = self.effective_severity();
+        let danger = severity == Severity::Delete;
+        let accent = severity.accent(t);
         let mut col = Column::new().spacing(6).push(colored(
             t,
-            format!("┌─ {}{} ", self.severity.glyph(), self.title),
+            format!("┌─ {}{} ", severity.glyph(), self.title),
             accent,
         ));
         for line in &self.body {
@@ -240,6 +291,18 @@ impl<P: Clone> Dialog<P> {
                 input = input.on_submit(Message::Submit);
             }
             col = col.push(column![dim(t, format!("│ {}", f.label)), input].spacing(2));
+        }
+        if let Some(choice) = &self.choice {
+            col = col.push(dim(t, format!("│ {}", choice.label)));
+            for (i, (label, dangerous)) in choice.options.iter().enumerate() {
+                let picked = i == choice.selected;
+                let text = format!("{} {label}", if picked { "(•)" } else { "( )" });
+                col = col.push(if *dangerous && picked {
+                    widgets::danger_button(t, &text, Some(Message::Choose(i)))
+                } else {
+                    widgets::text_button(t, &text, None, Some(Message::Choose(i)))
+                });
+            }
         }
         for (i, c) in self.checks.iter().enumerate() {
             let label = format!("{} {}", if c.value { "■" } else { "□" }, c.label);
@@ -319,6 +382,7 @@ mod tests {
                 values,
                 checks,
                 dont_ask_again,
+                ..
             }) => {
                 assert_eq!(purpose, 7);
                 assert_eq!(values, ["feat/x"]);
@@ -352,6 +416,34 @@ mod tests {
             d.update(Message::Submit),
             Some(Outcome::Submitted { dont_ask_again: Some(k), .. }) if k == "pull"
         ));
+    }
+
+    #[test]
+    fn dangerous_choice_turns_the_dialog_into_a_deletion() {
+        let mut d = Dialog::confirm("Reset", vec![], "Reset", ())
+            .severity(Severity::Change)
+            .choice(
+                "mode",
+                vec![("soft".into(), false), ("hard".into(), true)],
+                0,
+            );
+        assert_eq!(d.effective_severity(), Severity::Change);
+        let _ = d.update(Message::Choose(1));
+        assert_eq!(d.effective_severity(), Severity::Delete);
+        assert!(d.enter().is_none(), "Enter never runs the dangerous option");
+        assert!(matches!(
+            d.update(Message::Submit),
+            Some(Outcome::Submitted {
+                choice: Some(1),
+                ..
+            })
+        ));
+        let _ = d.update(Message::Choose(9));
+        assert_eq!(
+            d.choice.as_ref().map(|c| c.selected),
+            Some(1),
+            "out of range ignored"
+        );
     }
 
     #[test]

@@ -106,6 +106,12 @@ pub enum Purpose {
     BisectStart {
         good: gf_core::model::Oid,
     },
+    /// Move the current branch to `to`; the mode comes from the dialog's
+    /// choice (see [`RESET_MODES`]).
+    Reset {
+        to: gf_core::model::Oid,
+        mode: gf_git::ResetMode,
+    },
     BisectReset,
     SkipOperation,
     AbortOperation,
@@ -342,8 +348,21 @@ impl App {
                 purpose,
                 values,
                 checks,
+                choice,
                 dont_ask_again,
-            } => (purpose, values, checks, dont_ask_again),
+            } => {
+                // The reset mode is the dialog's choice.
+                let purpose = match purpose {
+                    Purpose::Reset { to, mode } => Purpose::Reset {
+                        to,
+                        mode: choice
+                            .and_then(|i| RESET_MODES.get(i))
+                            .map_or(mode, |(m, _, _)| *m),
+                    },
+                    other => other,
+                };
+                (purpose, values, checks, dont_ask_again)
+            }
             Outcome::Cancelled { purpose } => {
                 self.dialog = None;
                 // The commit box waits for the amend to run; release it.
@@ -560,6 +579,23 @@ impl App {
                 r.abort_operation().await
             }),
             Purpose::Undo(entry) => self.run_undo(entry),
+            Purpose::Reset { to, mode } => {
+                let label = format!(
+                    "reset {} to {}",
+                    match mode {
+                        gf_git::ResetMode::Soft => "--soft",
+                        gf_git::ResetMode::Mixed => "--mixed",
+                        gf_git::ResetMode::Hard => "--hard",
+                    },
+                    to.short()
+                );
+                // Undo moves the branch back; after a soft reset the undone
+                // commits' changes are still staged, so it keeps them.
+                let undo = self.undo_point(&label, mode == gf_git::ResetMode::Soft);
+                self.op_with_undo(label, OpKind::Generic, undo, move |r| async move {
+                    r.reset(&to, mode).await
+                })
+            }
             Purpose::AddWorktree => {
                 let folder = crate::widgets::format::expand_tilde(&value(0));
                 let branch = value(1);
@@ -657,6 +693,26 @@ fn push_options(to: Option<&super::PushTo>) -> PushOptions {
         ..PushOptions::default()
     }
 }
+
+/// Reset modes offered by the reset dialog, in order (soft first, the
+/// default): mode, label, whether it destroys uncommitted work.
+pub(super) const RESET_MODES: &[(gf_git::ResetMode, &str, bool)] = &[
+    (
+        gf_git::ResetMode::Soft,
+        "soft — keep the changes, staged",
+        false,
+    ),
+    (
+        gf_git::ResetMode::Mixed,
+        "mixed — keep the changes, unstaged",
+        false,
+    ),
+    (
+        gf_git::ResetMode::Hard,
+        "hard — throw away all uncommitted changes",
+        true,
+    ),
+];
 
 /// Input checks that don't need git; branch names are fully validated by
 /// git itself when the command runs.

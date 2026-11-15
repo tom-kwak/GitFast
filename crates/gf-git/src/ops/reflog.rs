@@ -7,6 +7,18 @@ use gf_core::{GfError, Result};
 
 use crate::Repository;
 
+/// How `git reset` treats the index and the working tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResetMode {
+    /// Changes of the commits left behind stay staged.
+    #[default]
+    Soft,
+    /// They stay in the working tree, unstaged.
+    Mixed,
+    /// Index and working tree match the target: uncommitted work is lost.
+    Hard,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReflogEntry {
     pub id: Oid,
@@ -56,6 +68,19 @@ impl Repository {
         }
         let out = self.read(self.command(["rev-parse", "HEAD"])).await?;
         String::from_utf8_lossy(&out).trim().parse().map(Some)
+    }
+
+    /// `git reset --soft|--mixed|--hard <to>`: moves the current branch
+    /// (or a detached HEAD) to `to`.
+    pub async fn reset(&self, to: &Oid, mode: ResetMode) -> Result<()> {
+        let flag = match mode {
+            ResetMode::Soft => "--soft",
+            ResetMode::Mixed => "--mixed",
+            ResetMode::Hard => "--hard",
+        };
+        self.exec(self.command(["reset", flag, "--end-of-options", to.as_str()]))
+            .await?;
+        Ok(())
     }
 
     /// Moves the current branch back to `to`.
