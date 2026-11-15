@@ -127,6 +127,7 @@ impl GitRunner {
                 argv: std::iter::once("git".to_owned())
                     .chain(cmd.args.iter().map(|a| a.to_string_lossy().into_owned()))
                     .collect(),
+                read_only: cmd.read_only,
             },
         );
         tracing::debug!(id, cmd = %cmd.display(), "git start");

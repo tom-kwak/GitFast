@@ -12,7 +12,7 @@ publish = false
 [workspace.dependencies]
 # internal (commented entries are enabled once a crate depends on them)
 gf-core = { path = "crates/gf-core" }
-# gf-git = { path = "crates/gf-git" }
+gf-git = { path = "crates/gf-git" }
 # gf-commands = { path = "crates/gf-commands" }
 # gf-flow = { path = "crates/gf-flow" }
 # gf-hosting = { path = "crates/gf-hosting" }
@@ -35,6 +35,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 tempfile = "3"
+iced = "0.14"
+rfd = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+tokio-stream = { version = "0.1", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

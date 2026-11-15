@@ -14,10 +14,18 @@ path = "src/main.rs"
 [dependencies]
 gf-core.workspace = true
 gf-config.workspace = true
+gf-git.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+iced = { workspace = true, features = ["tokio"] }
+rfd.workspace = true
+tokio = { workspace = true, features = ["sync", "macros"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+gf-test-support.workspace = true
 
 [lints]
 workspace = true

@@ -10,6 +10,11 @@ publish.workspace = true
 [dependencies]
 gf-core.workspace = true
 directories.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
