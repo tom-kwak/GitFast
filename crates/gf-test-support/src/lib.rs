@@ -16,6 +16,7 @@
 // Test helpers fail fast: a broken fixture should abort the test immediately.
 #![allow(clippy::unwrap_used)]
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -65,6 +66,13 @@ impl TestRepo {
     /// A `git` command preconfigured to run in this repository in isolation.
     pub fn command(&self) -> Command {
         isolated_git(self.path(), self.clock.load(Ordering::SeqCst))
+    }
+
+    /// The complete environment this repository's git commands run with.
+    /// Code under test that spawns git itself should clear its environment
+    /// and use exactly these variables to get the same isolation.
+    pub fn env(&self) -> Vec<(String, OsString)> {
+        isolated_env(self.path(), self.clock.load(Ordering::SeqCst))
     }
 
     /// Runs git and returns stdout (trimmed). Panics with stderr on failure.
@@ -123,23 +131,30 @@ impl Default for TestRepo {
 }
 
 fn isolated_git(cwd: &Path, tick: u32) -> Command {
-    let date = format!("@{} +0000", BASE_EPOCH + tick * 60);
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd)
         .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("HOME", cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", null_device())
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_AUTHOR_NAME", "Test Author")
-        .env("GIT_AUTHOR_EMAIL", "author@example.com")
-        .env("GIT_AUTHOR_DATE", &date)
-        .env("GIT_COMMITTER_NAME", "Test Committer")
-        .env("GIT_COMMITTER_EMAIL", "committer@example.com")
-        .env("GIT_COMMITTER_DATE", &date)
-        .env("LC_ALL", "C");
+        .envs(isolated_env(cwd, tick));
     cmd
+}
+
+fn isolated_env(home: &Path, tick: u32) -> Vec<(String, OsString)> {
+    let date = OsString::from(format!("@{} +0000", BASE_EPOCH + tick * 60));
+    let s = |v: &str| OsString::from(v);
+    vec![
+        ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
+        ("HOME".into(), home.as_os_str().to_owned()),
+        ("GIT_CONFIG_NOSYSTEM".into(), s("1")),
+        ("GIT_CONFIG_GLOBAL".into(), s(null_device())),
+        ("GIT_TERMINAL_PROMPT".into(), s("0")),
+        ("GIT_AUTHOR_NAME".into(), s("Test Author")),
+        ("GIT_AUTHOR_EMAIL".into(), s("author@example.com")),
+        ("GIT_AUTHOR_DATE".into(), date.clone()),
+        ("GIT_COMMITTER_NAME".into(), s("Test Committer")),
+        ("GIT_COMMITTER_EMAIL".into(), s("committer@example.com")),
+        ("GIT_COMMITTER_DATE".into(), date),
+        ("LC_ALL".into(), s("C")),
+    ]
 }
 
 fn null_device() -> &'static str {

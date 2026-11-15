@@ -7,8 +7,23 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["gix"]
+# Fast in-process reads (log walking) via gitoxide. Without it every read
+# goes through the git CLI.
+gix = ["dep:gix"]
+
 [dependencies]
-# gf-core is added when this crate gets its first implementation.
+gf-core.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "rt", "sync", "macros", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+gix = { workspace = true, optional = true, features = ["revision", "sha1", "parallel", "pack-cache-lru-static"] }
+
+[dev-dependencies]
+gf-test-support.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "rt", "rt-multi-thread", "sync", "macros", "time"] }
 
 [lints]
 workspace = true

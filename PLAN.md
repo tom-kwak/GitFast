@@ -102,6 +102,21 @@ gf/
 
 ---
 
+## 4-1. 디자인 방향: 터미널 스타일
+
+앱 전체를 **터미널처럼 보이고 느껴지게** 만든다 (M2 테마/위젯 단계에서 적용).
+
+- **폰트**: 전 화면 고정폭(monospace) 단일 폰트 (예: JetBrains Mono, SF Mono 폴백). 크기 단계 최소화
+- **색상**: 기본 다크 테마, ANSI 16색 기반 팔레트 (추가=green, 삭제=red, 브랜치=cyan, 태그=yellow, HEAD=magenta). 테마는 터미널 컬러 스킴처럼 교체 가능(Dracula, Solarized 등 프리셋)
+- **레이아웃**: 둥근 모서리·그림자·그라디언트 없음. 패널 구분은 1px 선 또는 박스 문자(`│ ─ ┌ ┐`) 느낌. 여백 최소, 정보 밀도 높게
+- **커밋 그래프**: `● │ ├─ ╮ ╯` 같은 문자 기반 그래프 스타일
+- **입력**: 하단 프롬프트형 명령줄(`gf ❯ `)을 기본 UI로 두고, 커맨드 팔레트·내장 터미널과 통합. 키보드 우선(vim 스타일 j/k 이동 옵션)
+- **상태 표시**: 상단/하단 status line (브랜치, ahead/behind, 진행 중 작업) — tmux/powerline 느낌
+- **버튼/다이얼로그**: `[ OK ]` `[ Cancel ]` 같은 텍스트형 버튼, 확인 다이얼로그도 TUI 박스 스타일
+- 구현: `gf-app/src/theme/`에 색상·폰트 토큰을 모으고, 모든 위젯은 토큰만 참조 → 스타일 변경이 한 곳에서 끝나도록
+
+---
+
 ## 5. 상용 툴에서 가져올 기능 (SourceTree / GitKraken / Fork / Tower / Sublime Merge / SmartGit 참고)
 
 **보기·탐색**
@@ -187,8 +202,8 @@ trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }   // MR 화면 �
 
 | 단계 | 목표 | 주요 산출물 |
 |---|---|---|
-| **M0 기반** | 워크스페이스·CI 골격 | rustup, workspace, gf-core, tracing, 테스트 fixture, GitHub Actions(macOS) |
-| **M1 Git 코어** | CLI Runner + 파서 | 취소/진행률/로그 Runner, status v2·log·diff·branch 파서, gix 조회, 단위테스트 |
+| **M0 기반** ✅ | 워크스페이스·CI 골격 | rustup, workspace, gf-core, tracing, 테스트 fixture, GitHub Actions(macOS) |
+| **M1 Git 코어** ✅ | CLI Runner + 파서 | 취소/진행률/로그 Runner, status v2·log·diff·branch 파서, gix 조회, 단위테스트 |
 | **M2 앱 셸** | 빈 앱 실행 | iced 윈도우, Feature trait, 저장소 열기/탭, 사이드바, 명령 로그 패널, 테마 |
 | **M3 일상 작업** | SourceTree 수준 기본기 | 변경사항/hunk·라인 stage, 커밋, diff 뷰, 커밋 그래프, 브랜치/태그/stash, fetch/pull/push, 파일 감시 |
 | **M4 고급 작업** | 상용툴 차별 기능 | merge/rebase/cherry-pick + 충돌 해결, 인터랙티브 리베이스, blame/파일 히스토리, Undo, submodule/worktree/LFS, bisect |
