@@ -83,6 +83,40 @@ impl Tokens {
         self.ansi.cyan
     }
 
+    /// Color for a syntax highlighting tone.
+    pub fn tone(&self, tone: crate::highlight::Tone) -> Color {
+        use crate::highlight::Tone;
+        let a = &self.ansi;
+        match tone {
+            Tone::Plain | Tone::Variable => self.fg,
+            Tone::Comment => self.dim,
+            Tone::String => a.green,
+            Tone::Number | Tone::Attribute => a.yellow,
+            Tone::Keyword => a.magenta,
+            Tone::Function => a.blue,
+            Tone::Type => a.cyan,
+            Tone::Tag | Tone::Invalid => a.red,
+        }
+    }
+
+    /// Color of graph lane `i` (cycles through `LANE_COLORS` hues).
+    pub fn lane(&self, i: usize) -> Color {
+        let a = &self.ansi;
+        [a.cyan, a.magenta, a.yellow, a.green, a.blue, a.red][i % 6]
+    }
+
+    /// Width of one monospace column at the base font size.
+    pub fn char_width(&self) -> f32 {
+        self.font_size * 0.61
+    }
+
+    /// Width of `n` monospace columns.
+    pub fn cols(&self, n: usize) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let n = n as f32;
+        n * self.char_width()
+    }
+
     /// Font size for secondary text.
     pub fn small(&self) -> f32 {
         (self.font_size - 1.0).max(9.0)

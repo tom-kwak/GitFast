@@ -17,7 +17,7 @@
 | 자격증명 저장 | keyring | macOS Keychain / Windows Credential Manager / Linux Secret Service 공통 추상화 |
 | 파일 감시 | notify | 작업 트리 변경 시 status 자동 갱신 |
 | 설정 저장 | serde + toml, directories | OS별 표준 설정 경로 |
-| Diff 하이라이트 | syntect | 언어별 구문 강조 |
+| Diff 하이라이트 | syntect(Oniguruma) + two-face | VS Code와 같은 TextMate 문법·정규식 엔진. 내장 문법 200여 종 + `<config>/syntaxes/`에 VS Code `*.tmLanguage.json`/`*.sublime-syntax`를 넣으면 자동 로드(tmLanguage는 자체 변환기로 sublime-syntax 모델로 변환) |
 | 내장 터미널 | alacritty_terminal (+ 자체 렌더) | 구조화 UI로 표현 못 하는 명령의 최종 폴백 |
 | 패키징 | cargo-packager | .app/.dmg 생성, 이후 .msi/.deb/AppImage까지 동일 도구로 확장 |
 | 로깅 | tracing | 실행된 git 명령/출력 전부를 "명령 로그" 패널에 표시 |
@@ -219,7 +219,7 @@ trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }   // MR 화면 �
 | **M0 기반** ✅ | 워크스페이스·CI 골격 | rustup, workspace, gf-core, tracing, 테스트 fixture, GitHub Actions(macOS) |
 | **M1 Git 코어** ✅ | CLI Runner + 파서 | 취소/진행률/로그 Runner, status v2·log·diff·branch 파서, gix 조회, 단위테스트 |
 | **M2 앱 셸** ✅ | 빈 앱 실행 | iced 윈도우, Feature trait, 저장소 열기/탭, 사이드바, 명령 로그 패널, 테마 |
-| **M3 일상 작업** | SourceTree 수준 기본기 | 변경사항/hunk·라인 stage, 커밋, diff 뷰, 커밋 그래프, 브랜치/태그/stash, fetch/pull/push, 파일 감시 |
+| **M3 일상 작업** ✅ | SourceTree 수준 기본기 | 변경사항/hunk·라인 stage, 커밋, diff 뷰, 커밋 그래프, 브랜치/태그/stash, fetch/pull/push, 파일 감시 |
 | **M4 고급 작업** | 상용툴 차별 기능 | merge/rebase/cherry-pick + 충돌 해결, 인터랙티브 리베이스, blame/파일 히스토리, Undo, submodule/worktree/LFS, bisect |
 | **M5 전 명령 지원** | "모든 명령" 달성 | CommandSpec 전체 작성, 자동 폼, 커맨드 팔레트, 내장 터미널, 커스텀 액션 |
 | **M6 Git Flow** | Flow 지원 | init 다이얼로그, start/finish/publish, Flow 사이드바 |

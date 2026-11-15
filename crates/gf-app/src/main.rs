@@ -4,6 +4,7 @@ mod app;
 mod feature;
 mod features;
 mod git_actions;
+mod highlight;
 mod logging;
 mod repo_tab;
 mod theme;
@@ -26,6 +27,16 @@ fn main() -> anyhow::Result<()> {
         tracing::warn!(error = %e, "invalid settings file; using defaults");
         Settings::default()
     });
+    // Grammars load in the background; user grammars live in
+    // <config>/syntaxes (VS Code *.tmLanguage.json or *.sublime-syntax).
+    let syntaxes = paths.config_dir().join("syntaxes");
+    let _ = std::fs::create_dir_all(&syntaxes);
+    std::thread::spawn(move || {
+        for warning in highlight::init(Some(&syntaxes)) {
+            tracing::warn!(%warning, "grammar not loaded");
+        }
+    });
+
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         config = %paths.config_dir().display(),

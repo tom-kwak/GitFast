@@ -22,6 +22,8 @@ pub struct Cx<'a> {
     pub tokens: &'a Tokens,
     /// Data of the active repository, if one is open and loaded.
     pub snapshot: Option<&'a Snapshot>,
+    /// Whether the active repository's history shows every branch.
+    pub all_branches: bool,
 }
 
 /// Result of handling a message: async follow-up work for the feature

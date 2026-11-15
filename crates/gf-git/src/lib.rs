@@ -12,11 +12,16 @@
 pub mod cli;
 #[cfg(feature = "gix")]
 mod gix_reader;
+pub mod graph;
 pub mod ops;
+pub mod patch;
 mod repository;
 
 pub use cli::{GitCommand, GitOutput, GitRunner, Progress, RunOptions};
+pub use ops::commit::CommitOptions;
 pub use ops::diff::{DiffOptions, DiffTarget};
 pub use ops::log::{LogOrder, LogQuery};
+pub use ops::stash::StashOptions;
+pub use ops::sync::{PullMode, PushOptions};
 pub use repository::Repository;
 pub use tokio_util::sync::CancellationToken;

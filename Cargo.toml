@@ -20,7 +20,7 @@ gf-git = { path = "crates/gf-git" }
 # gf-hosting-github = { path = "crates/gf-hosting-github" }
 # gf-auth = { path = "crates/gf-auth" }
 gf-config = { path = "crates/gf-config" }
-# gf-watch = { path = "crates/gf-watch" }
+gf-watch = { path = "crates/gf-watch" }
 gf-test-support = { path = "crates/gf-test-support" }
 
 # external
@@ -35,7 +35,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 tempfile = "3"
-iced = "0.14"
+notify = "8"
+syntect = { version = "5.3", default-features = false, features = ["default-onig"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
+serde_json = "1"
+notify-debouncer-mini = "0.7"
+iced = { version = "0.14", features = ["canvas"] }
 rfd = "0.18"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
@@ -55,3 +60,11 @@ unwrap_used = "warn"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Debug builds: optimize dependencies (iced, wgpu, syntect, gix…) so the UI
+# is responsive under `cargo run`, while gf's own crates stay debuggable.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

@@ -2,6 +2,7 @@
 //! borders, no shadows — a terminal look — while keeping clear hover and
 //! pressed states so every clickable thing visibly reacts (PLAN.md §4-2).
 
+use gf_core::model::LineKind;
 use iced::widget::{button, container, text_input};
 use iced::{Background, Border, Color, Theme};
 
@@ -30,6 +31,17 @@ pub fn panel(t: &Tokens) -> impl Fn(&Theme) -> container::Style + '_ {
         text_color: Some(t.fg),
         background: Some(Background::Color(t.bg)),
         border: square(t.border, 1.0),
+        ..container::Style::default()
+    }
+}
+
+/// A panel with a colored border, for views that must be told apart at a
+/// glance (local changes vs commit changes).
+pub fn accent_panel(t: &Tokens, accent: Color) -> impl Fn(&Theme) -> container::Style + '_ {
+    move |_| container::Style {
+        text_color: Some(t.fg),
+        background: Some(Background::Color(t.bg)),
+        border: square(tint(t.border, accent, 0.7), 1.0),
         ..container::Style::default()
     }
 }
@@ -117,6 +129,30 @@ pub fn tab(t: &Tokens, active: bool) -> impl Fn(&Theme, button::Status) -> butto
     }
 }
 
+/// A tab of the code view (LOCAL / COMMIT): filled with the view's accent
+/// when active, accent-colored text otherwise.
+pub fn code_tab(
+    t: &Tokens,
+    accent: Color,
+    active: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + '_ {
+    move |_, status| {
+        let (background, text_color) = match (active, status) {
+            (true, _) => (Some(Background::Color(accent)), t.bg),
+            (false, button::Status::Hovered | button::Status::Pressed) => {
+                (Some(Background::Color(tint(t.bg, accent, 0.25))), t.fg)
+            }
+            (false, _) => (None, tint(t.dim, accent, 0.5)),
+        };
+        button::Style {
+            background,
+            text_color,
+            border: square(Color::TRANSPARENT, 0.0),
+            ..button::Style::default()
+        }
+    }
+}
+
 /// The `gf ❯` command line: no box, just text on the background.
 pub fn prompt_input(t: &Tokens) -> impl Fn(&Theme, text_input::Status) -> text_input::Style + '_ {
     move |_, _| text_input::Style {
@@ -145,5 +181,57 @@ pub fn field_input(t: &Tokens) -> impl Fn(&Theme, text_input::Status) -> text_in
         placeholder: t.dim,
         value: t.fg,
         selection: t.selection,
+    }
+}
+
+/// `base` blended towards `over` by `amount` (0–1).
+pub fn tint(base: Color, over: Color, amount: f32) -> Color {
+    Color {
+        r: base.r + (over.r - base.r) * amount,
+        g: base.g + (over.g - base.g) * amount,
+        b: base.b + (over.b - base.b) * amount,
+        a: 1.0,
+    }
+}
+
+/// Background of a diff line: faint green/red for added/removed lines, so
+/// changes stay visible when the text itself is syntax-colored.
+fn diff_line_bg(t: &Tokens, kind: LineKind) -> Option<Background> {
+    let amount = if t.dark { 0.14 } else { 0.12 };
+    match kind {
+        LineKind::Context => None,
+        LineKind::Added => Some(Background::Color(tint(t.bg, t.added(), amount))),
+        LineKind::Removed => Some(Background::Color(tint(t.bg, t.removed(), amount))),
+    }
+}
+
+pub fn diff_line(t: &Tokens, kind: LineKind) -> impl Fn(&Theme) -> container::Style + '_ {
+    move |_| container::Style {
+        background: diff_line_bg(t, kind),
+        ..container::Style::default()
+    }
+}
+
+/// A selectable diff line: tinted like [`diff_line`], highlighted when
+/// selected or hovered.
+pub fn diff_line_button(
+    t: &Tokens,
+    kind: LineKind,
+    selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + '_ {
+    move |_, status| {
+        let background = if selected {
+            Some(Background::Color(t.selection))
+        } else if matches!(status, button::Status::Hovered) {
+            Some(Background::Color(tint(t.bg, t.accent(), 0.18)))
+        } else {
+            diff_line_bg(t, kind)
+        };
+        button::Style {
+            background,
+            text_color: t.fg,
+            border: square(Color::TRANSPARENT, 0.0),
+            ..button::Style::default()
+        }
     }
 }
