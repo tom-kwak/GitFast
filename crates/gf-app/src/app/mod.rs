@@ -1094,10 +1094,10 @@ fn main_area<'a>(
     .spacing(2)
     .align_y(iced::Alignment::Center);
 
-    let (top, changes): (Element<'a, Message>, Element<'a, Message>) = match tab.code_view {
-        Role::Commit => (
-            frame(Pane::History, tab.history.view(cx).map(Message::History)),
-            match &tab.blame {
+    match tab.code_view {
+        Role::Commit => {
+            let top = frame(Pane::History, tab.history.view(cx).map(Message::History));
+            let changes: Element<'a, Message> = match &tab.blame {
                 Some(b) => frame(Pane::Diff, b.view(t).map(Message::Blame)),
                 None => row![
                     container(frame(
@@ -1112,33 +1112,50 @@ fn main_area<'a>(
                 ]
                 .spacing(4)
                 .into(),
-            },
-        ),
-        Role::Local => (
-            row![
-                frame(Pane::Changes, tab.changes.view(cx).map(Message::Changes)),
-                container(tab.commit.view(cx).map(Message::Commit))
-                    .width(Length::Fixed(t.font_size * 34.0)),
+            };
+            column![
+                tabs,
+                container(top).height(Length::FillPortion(2)),
+                container(changes).height(Length::FillPortion(3)),
             ]
             .spacing(4)
-            .into(),
-            frame(
+            .width(Length::Fill)
+            .into()
+        }
+        // WORKING TREE: changed files over the commit box on the left, the
+        // selected file's changes on the right.
+        Role::Local => {
+            let left = column![
+                container(frame(
+                    Pane::Changes,
+                    tab.changes.view(cx).map(Message::Changes)
+                ))
+                .height(Length::Fill),
+                container(tab.commit.view(cx).map(Message::Commit))
+                    .height(Length::Fixed(t.font_size * 15.0)),
+            ]
+            .spacing(4);
+            let diff = frame(
                 Pane::Diff,
                 match &tab.conflict {
                     Some(c) => c.view(t).map(Message::Conflict),
                     None => tab.local_diff.view(cx).map(Message::LocalDiff),
                 },
-            ),
-        ),
-    };
-    column![
-        tabs,
-        container(top).height(Length::FillPortion(2)),
-        container(changes).height(Length::FillPortion(3)),
-    ]
-    .spacing(4)
-    .width(Length::Fill)
-    .into()
+            );
+            column![
+                tabs,
+                row![
+                    container(left).width(Length::FillPortion(2)),
+                    container(diff).width(Length::FillPortion(3)),
+                ]
+                .spacing(4)
+                .height(Length::Fill),
+            ]
+            .spacing(4)
+            .width(Length::Fill)
+            .into()
+        }
+    }
 }
 
 /// Identity for the event-bus subscription (there is only one bus).
