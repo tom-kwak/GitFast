@@ -17,20 +17,25 @@ pub struct CommitOptions {
 
 impl Repository {
     /// Commits the index with `message` (passed on stdin, so any text is
-    /// safe). Returns the new commit id. Hooks run as usual.
+    /// safe). Returns the new commit id. Hooks run as usual. With `amend`, an
+    /// empty message keeps the last commit's message.
     pub async fn commit(&self, message: &str, opts: &CommitOptions) -> Result<Oid> {
-        // `whitespace` cleanup keeps lines starting with `#` (issue numbers).
-        let mut cmd = self.command(["commit", "--cleanup=whitespace", "-F", "-"]);
-        if opts.amend {
-            cmd = cmd.arg("--amend");
-        }
+        let keep_message = opts.amend && message.trim().is_empty();
+        let mut cmd = if keep_message {
+            self.command(["commit", "--amend", "--no-edit"])
+        } else {
+            // `whitespace` cleanup keeps lines starting with `#` (issue numbers).
+            let cmd = self.command(["commit", "--cleanup=whitespace", "-F", "-"]);
+            let cmd = cmd.stdin(message.as_bytes().to_vec());
+            if opts.amend { cmd.arg("--amend") } else { cmd }
+        };
         if opts.sign_off {
             cmd = cmd.arg("--signoff");
         }
         if opts.allow_empty {
             cmd = cmd.arg("--allow-empty");
         }
-        self.exec(cmd.stdin(message.as_bytes().to_vec())).await?;
+        self.exec(cmd).await?;
         let head = self.read(self.command(["rev-parse", "HEAD"])).await?;
         String::from_utf8_lossy(&head).trim().parse()
     }

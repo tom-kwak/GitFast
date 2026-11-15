@@ -156,33 +156,33 @@ impl App {
                     .and_then(|t| t.snapshot.as_ref())
                     .and_then(|s| s.status.head.oid.as_ref())
                     .map_or_else(|| "HEAD".to_owned(), |o| o.short().to_owned());
+                let what = if message.trim().is_empty() {
+                    "with the staged changes added (message kept)"
+                } else {
+                    "with the staged changes and this message"
+                };
                 self.confirm(Confirm::change(
                     "amend",
                     "Amend last commit",
                     vec![
-                        format!(
-                            "Replace commit {head} with a new one (message and staged changes)?"
-                        ),
+                        format!("Replace commit {head} with a new one {what}?"),
                         "If it was already pushed, the remote will need a force push.".into(),
                     ],
                     "Amend",
                     Purpose::Amend { message },
                 ))
             }
-            commit_box::Output::Commit { message, amend } => {
-                let label = if amend { "amend commit" } else { "commit" };
+            commit_box::Output::Commit { message, .. } => {
                 let summary = message.lines().next().unwrap_or_default().to_owned();
                 let undo = self.undo_point(&format!("commit: {summary}"), true);
                 self.op_with_undo(
-                    format!("{label}: {summary}"),
+                    format!("commit: {summary}"),
                     OpKind::Commit,
                     undo,
                     move |r| async move {
-                        let opts = CommitOptions {
-                            amend,
-                            ..CommitOptions::default()
-                        };
-                        r.commit(&message, &opts).await.map(|_| ())
+                        r.commit(&message, &CommitOptions::default())
+                            .await
+                            .map(|_| ())
                     },
                 )
             }
@@ -265,6 +265,26 @@ impl App {
                 index: s.index,
                 id: s.id,
             }),
+            sidebar::Output::Menu { show, menu } => {
+                // A right-clicked item gets its history/diff like a click.
+                let shown = match show {
+                    Some(sidebar::Selection::Ref(r)) => {
+                        self.on_sidebar(sidebar::Output::ShowRevision(Some(r)))
+                    }
+                    Some(sidebar::Selection::Stash(i)) => {
+                        let stash = self
+                            .active_tab()
+                            .and_then(|t| t.snapshot.as_ref())
+                            .and_then(|s| s.stashes.iter().find(|s| s.index == i).cloned());
+                        stash.map_or_else(Task::none, |s| {
+                            self.on_sidebar(sidebar::Output::ShowStash(s))
+                        })
+                    }
+                    _ => Task::none(),
+                };
+                let open = self.open_menu(menu.map(Message::Sidebar));
+                Task::batch([shown, open])
+            }
             sidebar::Output::NewBranch { from } => self.new_branch_dialog(from),
             sidebar::Output::NewTag => self.new_tag_dialog(None),
             sidebar::Output::NewStash => self.stash_dialog(),

@@ -7,10 +7,11 @@ use std::collections::HashSet;
 
 use gf_core::model::{Branch, RefKind, StashEntry, Tag};
 use iced::widget::text::Wrapping;
-use iced::widget::{Row, button, column, row, space, text_input};
+use iced::widget::{button, column, row, space, text_input};
 use iced::{Element, Length, Padding};
 
 use crate::feature::{Cx, Feature, Update};
+use crate::features::context_menu::{Entry, Menu};
 use crate::nav::{self, Key, Moved, Nav};
 use crate::repo_tab::Snapshot;
 use crate::theme::{Tokens, style};
@@ -47,8 +48,14 @@ pub struct State {
     /// The keyboard cursor is on this section header (instead of the
     /// selected item).
     header_cursor: Option<Section>,
+    /// The last item clicked and when, to recognize a double click (iced
+    /// cannot: the row's button consumes the press).
+    last_click: Option<(Selection, std::time::Instant)>,
     scroll: ScrollPos,
 }
+
+/// Two clicks on the same item within this time are a double click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Rows the keyboard can stop on.
 #[derive(Debug, Clone)]
@@ -80,6 +87,14 @@ impl Item {
     }
 }
 
+/// `refs/heads/main` → `main`.
+fn short_name(full: &str) -> &str {
+    ["refs/heads/", "refs/remotes/", "refs/tags/"]
+        .iter()
+        .find_map(|p| full.strip_prefix(p))
+        .unwrap_or(full)
+}
+
 /// The filter field (↑/↓ in it walk the filtered tree).
 pub const REFS_FILTER_ID: &str = "gf-refs-filter";
 /// Scrollable id of the tree.
@@ -107,8 +122,12 @@ pub enum Message {
     Toggle(Section),
     Filter(String),
     Select(Selection),
-    /// Action bar / header buttons.
+    /// Header `+` buttons and the actions menu entries.
     Act(Action),
+    /// The `actions ▾` button (or `.`): menu for the selection.
+    OpenActions,
+    /// Right-click on an item: select it and open its menu.
+    RightClick(Selection),
     Scrolled(ScrollPos),
     /// The section's `«` button: hide the sidebar.
     Collapse,
@@ -171,6 +190,12 @@ pub enum Output {
     StashDrop(usize),
     /// Hide the sidebar (the app keeps a strip to bring it back).
     Collapse,
+    /// Open the actions menu; `show` is a newly selected item whose
+    /// history/diff the app should show first.
+    Menu {
+        show: Option<Selection>,
+        menu: Menu<Message>,
+    },
 }
 
 impl State {
@@ -390,6 +415,12 @@ impl State {
                     }
                     _ => None,
                 };
+            }
+            Key::Char('.') => {
+                return self
+                    .selected
+                    .as_ref()
+                    .map(|_| Moved::message(Message::OpenActions));
             }
             Key::Enter | Key::Space => {
                 return match here? {
@@ -632,62 +663,178 @@ impl State {
         )
     }
 
-    /// Action bar for the current selection.
-    fn actions<'a>(&self, t: &'a Tokens, snap: &Snapshot) -> Option<Element<'a, Message>> {
-        let btn =
-            |label: &str, a: Action| widgets::text_button(t, label, None, Some(Message::Act(a)));
-        let danger =
-            |label: &str, a: Action| widgets::danger_button(t, label, Some(Message::Act(a)));
-        let bar: Row<'a, Message> = match self.selected.as_ref()? {
+    /// Label of what is selected, for the actions button and menu title.
+    fn selection_label(&self, snap: &Snapshot) -> Option<String> {
+        Some(match self.selected.as_ref()? {
+            Selection::Ref(r) => short_name(r).to_owned(),
+            Selection::Stash(i) => snap.stashes.iter().find(|s| s.index == *i).map_or_else(
+                || format!("stash@{{{i}}}"),
+                |s| format::truncate(&s.message, 30),
+            ),
+            Selection::Worktree(p) | Selection::Submodule(p) => p.file_name().map_or_else(
+                || p.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            Selection::LfsPattern(pat) => pat.clone(),
+        })
+    }
+
+    /// What Enter (and a double click) does with `sel`: check a branch out,
+    /// open a worktree or submodule. `None` for items with no default action.
+    fn default_action(sel: &Selection, snap: &Snapshot) -> Option<Action> {
+        match sel {
+            Selection::Ref(r) => snap
+                .branches
+                .iter()
+                .find(|b| b.name.as_str() == r)
+                .filter(|b| !b.is_head)
+                .map(|_| Action::Checkout),
+            Selection::Worktree(_) | Selection::Submodule(_) => Some(Action::Open),
+            Selection::Stash(_) | Selection::LfsPattern(_) => None,
+        }
+    }
+
+    /// Actions for the current selection (the `actions ▾` button, a
+    /// right-click, or `.`). `None` when there is nothing to do with it.
+    fn menu(&self, snap: &Snapshot) -> Option<Menu<Message>> {
+        let item = |key: char, label: &str, hint: &str, a: Action| {
+            Entry::item(key, label, hint, Message::Act(a))
+        };
+        let danger = |key: char, label: &str, hint: &str, a: Action| {
+            Entry::caution(key, label, hint, Message::Act(a))
+        };
+        let checkout = || item('o', "checkout", "switch your files to it", Action::Checkout);
+        let merge = || {
+            item(
+                'm',
+                "merge into current",
+                "bring its commits into the checked-out branch",
+                Action::Merge,
+            )
+        };
+        let rebase = || {
+            item(
+                'e',
+                "rebase current onto",
+                "replay the checked-out branch on top of it",
+                Action::RebaseOnto,
+            )
+        };
+        let branch_here = || {
+            item(
+                'b',
+                "branch from here…",
+                "create a branch starting at it",
+                Action::NewBranch,
+            )
+        };
+        let entries = match self.selected.as_ref()? {
             Selection::Ref(r) => match snap.branches.iter().find(|b| b.name.as_str() == r) {
-                Some(b) if b.name.kind() == RefKind::LocalBranch && b.is_head => row![
-                    btn("branch from here", Action::NewBranch),
-                    btn("rename", Action::Rename),
-                    btn("push", Action::Push),
+                Some(b) if b.name.kind() == RefKind::LocalBranch && b.is_head => vec![
+                    branch_here(),
+                    item('r', "rename…", "change the branch name", Action::Rename),
+                    item('p', "push", "send its commits to the remote", Action::Push),
                 ],
-                Some(b) if b.name.kind() == RefKind::LocalBranch => row![
-                    btn("checkout", Action::Checkout),
-                    btn("merge into current", Action::Merge),
-                    btn("rebase current onto", Action::RebaseOnto),
-                    btn("rename", Action::Rename),
-                    btn("push", Action::Push),
-                    danger("delete", Action::Delete),
+                Some(b) if b.name.kind() == RefKind::LocalBranch => vec![
+                    checkout(),
+                    merge(),
+                    rebase(),
+                    Entry::Separator,
+                    item('r', "rename…", "change the branch name", Action::Rename),
+                    item('p', "push", "send its commits to the remote", Action::Push),
+                    Entry::Separator,
+                    danger('d', "delete…", "remove the branch", Action::Delete),
                 ],
-                Some(_) => row![
-                    btn("checkout", Action::Checkout),
-                    btn("merge into current", Action::Merge),
-                    btn("rebase current onto", Action::RebaseOnto),
-                    btn("branch from here", Action::NewBranch),
-                    danger("delete", Action::Delete),
+                Some(_) => vec![
+                    checkout(),
+                    merge(),
+                    rebase(),
+                    branch_here(),
+                    Entry::Separator,
+                    danger('d', "delete…", "remove it on the remote", Action::Delete),
                 ],
-                None => row![btn("push", Action::Push), danger("delete", Action::Delete)],
+                None => vec![
+                    item('p', "push", "publish the tag to the remote", Action::Push),
+                    Entry::Separator,
+                    danger('d', "delete…", "remove the local tag", Action::Delete),
+                ],
             },
-            Selection::Stash(_) => row![
-                btn("apply", Action::StashApply),
-                btn("pop", Action::StashPop),
-                danger("drop", Action::Delete),
+            Selection::Stash(_) => vec![
+                item(
+                    'a',
+                    "apply",
+                    "put its changes back; keeps the stash",
+                    Action::StashApply,
+                ),
+                item(
+                    'p',
+                    "pop",
+                    "apply and remove it from the list",
+                    Action::StashPop,
+                ),
+                Entry::Separator,
+                danger('d', "drop…", "delete the stash", Action::Delete),
             ],
             Selection::Worktree(p) => {
-                let is_main = snap.worktrees.first().is_some_and(|w| &w.path == p);
-                if is_main {
-                    row![dim(t, "the main working tree")]
-                } else {
-                    row![
-                        btn("open in tab", Action::Open),
-                        danger("remove", Action::Delete)
-                    ]
+                // The main working tree is the repository itself.
+                if snap.worktrees.first().is_some_and(|w| &w.path == p) {
+                    return None;
                 }
+                vec![
+                    item('o', "open in tab", "open this working tree", Action::Open),
+                    Entry::Separator,
+                    danger(
+                        'd',
+                        "remove…",
+                        "delete the working tree folder",
+                        Action::Delete,
+                    ),
+                ]
             }
-            Selection::Submodule(_) => row![
-                btn("open in tab", Action::Open),
-                btn("update all", Action::UpdateSubmodules)
+            Selection::Submodule(_) => vec![
+                item('o', "open in tab", "open the submodule", Action::Open),
+                item(
+                    'u',
+                    "update all",
+                    "check out the recorded commits",
+                    Action::UpdateSubmodules,
+                ),
             ],
-            Selection::LfsPattern(_) => row![
-                btn("lfs pull", Action::LfsPull),
-                danger("untrack", Action::Delete)
+            Selection::LfsPattern(_) => vec![
+                item(
+                    'p',
+                    "lfs pull",
+                    "download the file contents",
+                    Action::LfsPull,
+                ),
+                Entry::Separator,
+                danger('d', "untrack…", "stop storing it in LFS", Action::Delete),
             ],
         };
-        Some(bar.spacing(2).wrap().into())
+        Some(Menu {
+            title: self.selection_label(snap)?,
+            entries,
+        })
+    }
+
+    /// Footer: the `actions ▾` button for the selection, or a hint.
+    fn actions<'a>(&self, t: &'a Tokens, snap: &Snapshot) -> Option<Element<'a, Message>> {
+        let label = self.selection_label(snap)?;
+        let button: Element<'a, Message> = if self.menu(snap).is_some() {
+            widgets::tip(
+                t,
+                widgets::text_button(t, "actions ▾", None, Some(Message::OpenActions)),
+                "all actions for the selection · or right-click an item · or `.`".into(),
+            )
+        } else {
+            dim(t, "the main working tree").into()
+        };
+        Some(
+            row![button, colored(t, label, t.fg).wrapping(Wrapping::None)]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .into(),
+        )
     }
 
     fn output_for(&self, action: Action, snap: Option<&Snapshot>) -> Option<Output> {
@@ -771,6 +918,21 @@ impl State {
                 Update::none()
             }
             Message::Select(sel) => {
+                // A double click does what Enter does (checkout, open …).
+                let default = snap.and_then(|s| Self::default_action(&sel, s));
+                let double = default.is_some()
+                    && self
+                        .last_click
+                        .as_ref()
+                        .is_some_and(|(s, at)| *s == sel && at.elapsed() < DOUBLE_CLICK);
+                self.last_click = (!double).then(|| (sel.clone(), std::time::Instant::now()));
+                if let (true, Some(action)) = (double, default) {
+                    self.header_cursor = None;
+                    self.selected = Some(sel);
+                    return self
+                        .output_for(action, snap)
+                        .map_or_else(Update::none, Update::output);
+                }
                 let shows_history = matches!(sel, Selection::Ref(_) | Selection::Stash(_));
                 // Coming back from a header (keyboard) re-picks the item
                 // instead of unselecting it.
@@ -801,6 +963,24 @@ impl State {
                 }
             }
             Message::Collapse => Update::output(Output::Collapse),
+            Message::OpenActions => match snap.and_then(|s| self.menu(s)) {
+                Some(menu) => Update::output(Output::Menu { show: None, menu }),
+                None => Update::none(),
+            },
+            Message::RightClick(sel) => {
+                // Selecting by right-click never unselects; the app shows
+                // the item's history/diff like a left click would.
+                let changed = self.selected.as_ref() != Some(&sel);
+                self.header_cursor = None;
+                self.selected = Some(sel.clone());
+                match snap.and_then(|s| self.menu(s)) {
+                    Some(menu) => Update::output(Output::Menu {
+                        show: changed.then_some(sel),
+                        menu,
+                    }),
+                    None => Update::none(),
+                }
+            }
             Message::Act(action) => self
                 .output_for(action, snap)
                 .map_or_else(Update::none, Update::output),
@@ -860,22 +1040,36 @@ impl Feature for State {
             row_height(t),
             content_width,
             self.scroll,
-            move |i| match rows[i] {
-                SideRow::Header(sec, label, count, add) => self.header(t, sec, label, count, add),
-                SideRow::Branch(b) => self.branch_row(t, b),
-                SideRow::Tag(tg) => self.tag_row(t, tg),
-                SideRow::Stash(s) => self.stash_row(t, s),
-                SideRow::Worktree(w) => self.worktree_row(t, w),
-                SideRow::Submodule(m) => self.submodule_row(t, m),
-                SideRow::Lfs(p) => self.lfs_row(t, p),
-                SideRow::Hint(h) => widgets::empty_hint(t, h),
+            move |i| {
+                let el: Element<'a, Message> = match rows[i] {
+                    SideRow::Header(sec, label, count, add) => {
+                        self.header(t, sec, label, count, add)
+                    }
+                    SideRow::Branch(b) => self.branch_row(t, b),
+                    SideRow::Tag(tg) => self.tag_row(t, tg),
+                    SideRow::Stash(s) => self.stash_row(t, s),
+                    SideRow::Worktree(w) => self.worktree_row(t, w),
+                    SideRow::Submodule(m) => self.submodule_row(t, m),
+                    SideRow::Lfs(p) => self.lfs_row(t, p),
+                    SideRow::Hint(h) => widgets::empty_hint(t, h),
+                };
+                match Item::of(&rows[i]) {
+                    Some(Item::Pick(sel, _)) => iced::widget::mouse_area(el)
+                        .on_right_press(Message::RightClick(sel))
+                        .into(),
+                    _ => el,
+                }
             },
             Message::Scrolled,
         );
 
-        let footer: Element<'a, Message> = self
-            .actions(t, snap)
-            .unwrap_or_else(|| row![dim(t, "select an item for actions"), space()].into());
+        let footer: Element<'a, Message> = self.actions(t, snap).unwrap_or_else(|| {
+            row![
+                dim(t, "select an item (or right-click it) for actions"),
+                space()
+            ]
+            .into()
+        });
         widgets::panel_with_action(
             t,
             "REFS".into(),
@@ -981,5 +1175,74 @@ mod tests {
             key(&mut s, Key::Enter),
             Some(Some(Message::Toggle(Section::Branches)))
         ));
+    }
+
+    #[test]
+    fn menu_lists_actions_per_selection_and_right_click_selects() {
+        let snap = snap();
+        let mut s = State::default();
+        // Nothing selected: no menu.
+        assert!(
+            s.update_with(Message::OpenActions, Some(&snap))
+                .output
+                .is_none()
+        );
+        // Right-click on another branch selects it and offers checkout/merge/delete.
+        let out = s
+            .update_with(
+                Message::RightClick(Selection::Ref("refs/heads/dev".into())),
+                Some(&snap),
+            )
+            .output;
+        let Some(Output::Menu { show, menu }) = out else {
+            panic!("menu expected");
+        };
+        assert!(matches!(show, Some(Selection::Ref(ref r)) if r == "refs/heads/dev"));
+        assert_eq!(menu.title, "dev");
+        let keys: Vec<char> = menu
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Item { key, .. } => Some(*key),
+                Entry::Separator => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!['o', 'm', 'e', 'r', 'p', 'd']);
+        // The checked-out branch cannot be merged into itself.
+        let _ = s.update_with(
+            Message::RightClick(Selection::Ref("refs/heads/main".into())),
+            Some(&snap),
+        );
+        let Some(Output::Menu { show, menu }) =
+            s.update_with(Message::OpenActions, Some(&snap)).output
+        else {
+            panic!("menu expected");
+        };
+        assert!(show.is_none(), "button does not change the selection");
+        assert!(
+            !menu
+                .entries
+                .iter()
+                .any(|e| matches!(e, Entry::Item { key: 'm', .. }))
+        );
+    }
+
+    #[test]
+    fn double_click_checks_a_branch_out_like_enter() {
+        let snap = snap();
+        let dev = || Message::Select(Selection::Ref("refs/heads/dev".into()));
+        let mut s = State::default();
+        // First click selects and shows history.
+        let out = s.update_with(dev(), Some(&snap)).output;
+        assert!(matches!(out, Some(Output::ShowRevision(Some(_)))));
+        // Second click right after: checkout, selection kept.
+        let out = s.update_with(dev(), Some(&snap)).output;
+        assert!(matches!(out, Some(Output::Checkout(ref b)) if b.name.short() == "dev"));
+        assert!(s.selected.is_some());
+        // The checked-out branch has no default action: two clicks still toggle.
+        let main = || Message::Select(Selection::Ref("refs/heads/main".into()));
+        let _ = s.update_with(main(), Some(&snap));
+        let out = s.update_with(main(), Some(&snap)).output;
+        assert!(matches!(out, Some(Output::ShowRevision(None))));
     }
 }
