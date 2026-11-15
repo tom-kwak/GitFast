@@ -40,12 +40,12 @@ pub struct CommandEvent {
 pub enum CommandPhase {
     Started {
         argv: Vec<String>,
+        /// Background read issued by gf itself (status refresh, log...)
+        /// rather than a user action. UIs may show these less prominently.
+        read_only: bool,
     },
     /// One line of stdout/stderr, forwarded for live progress display.
-    Output {
-        line: String,
-        is_stderr: bool,
-    },
+    Output { line: String, is_stderr: bool },
     Finished {
         exit_code: Option<i32>,
         duration: Duration,

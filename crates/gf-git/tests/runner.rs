@@ -70,7 +70,9 @@ async fn publishes_command_events() {
     let ours: Vec<_> = phases.iter().filter(|e| e.repo == Some(r.id())).collect();
     let id = ours[0].id;
     assert!(ours.iter().all(|e| e.id == id));
-    assert!(matches!(&ours[0].phase, CommandPhase::Started { argv } if argv[1] == "status"));
+    assert!(
+        matches!(&ours[0].phase, CommandPhase::Started { argv, read_only: false } if argv[1] == "status")
+    );
     assert!(
         ours.iter()
             .any(|e| matches!(&e.phase, CommandPhase::Output { line, is_stderr: false } if line.contains("main")))
