@@ -15,7 +15,7 @@ gix = ["dep:gix"]
 
 [dependencies]
 gf-core.workspace = true
-tokio = { workspace = true, features = ["process", "io-util", "rt", "sync", "macros", "time"] }
+tokio = { workspace = true, features = ["process", "io-util", "rt", "sync", "macros", "time", "fs"] }
 tokio-util.workspace = true
 tracing.workspace = true
 gix = { workspace = true, optional = true, features = ["revision", "sha1", "parallel", "pack-cache-lru-static"] }

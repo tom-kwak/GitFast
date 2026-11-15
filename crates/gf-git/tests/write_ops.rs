@@ -414,3 +414,53 @@ async fn graph_of_real_history() {
     assert!(rows.iter().any(|r| r.text().contains('╯')));
     assert_eq!(rows.last().unwrap().text(), "●");
 }
+
+#[tokio::test]
+async fn numstat_for_worktree_and_index() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "1\n2\n3\n");
+    repo.commit_all("init");
+    repo.write("a.txt", "1\nTWO\n3\n4\n");
+    repo.write("b.txt", "new\n");
+    repo.git(&["add", "b.txt"]);
+    let r = open(&repo).await;
+
+    let wt = r.numstat(false).await.unwrap();
+    assert_eq!(
+        wt[Path::new("a.txt")],
+        Some(gf_git::LineCounts {
+            added: 2,
+            removed: 1
+        })
+    );
+    assert!(!wt.contains_key(Path::new("b.txt")));
+    let staged = r.numstat(true).await.unwrap();
+    assert_eq!(
+        staged[Path::new("b.txt")],
+        Some(gf_git::LineCounts {
+            added: 1,
+            removed: 0
+        })
+    );
+}
+
+#[tokio::test]
+async fn unpushed_commits_of_an_unpublished_branch() {
+    let remote = TestRepo::new_bare();
+    let a = TestRepo::new();
+    a.write("f.txt", "1\n");
+    a.commit_all("one");
+    a.git(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    a.git(&["push", "-q", "origin", "main"]);
+    a.git(&["switch", "-q", "-c", "topic"]);
+    a.write("f.txt", "2\n");
+    a.commit_all("two");
+    a.write("f.txt", "3\n");
+    a.commit_all("three");
+    let r = open(&a).await;
+    assert_eq!(r.unpushed_count().await.unwrap(), 2);
+    assert_eq!(
+        open(&TestRepo::new()).await.unpushed_count().await.unwrap(),
+        0
+    );
+}

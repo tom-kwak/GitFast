@@ -24,6 +24,12 @@ pub enum PromptCommand {
     Quit,
     /// `pwd`: show the active repository's path.
     Pwd,
+    /// `:undo`: undo the last undoable step.
+    Undo,
+    /// `:confirm` lists skipped confirmations; `:confirm reset` asks again.
+    Confirms {
+        reset: bool,
+    },
 }
 
 /// Shell commands people type out of terminal habit that are not git
@@ -47,6 +53,14 @@ pub const BUILTINS: &[(&str, &str)] = &[
     (":theme", ":theme [gf-dark|gf-light|dracula]"),
     (":log", "show/hide the command log                    ⌘J"),
     (":refs", "show/hide the refs sidebar                   ⌘B"),
+    (
+        ":confirm",
+        ":confirm [reset] — confirmations you chose to skip",
+    ),
+    (
+        ":undo",
+        "undo the last commit / merge / rebase / pull made in gf",
+    ),
     (":local", "open/close the working tree (else history)    ⌘E"),
     (":clear", "clear the command log"),
     (":help", "show this help                                ?"),
@@ -121,6 +135,14 @@ pub fn parse(line: &str) -> Result<Option<PromptCommand>, String> {
             "theme" => PromptCommand::Theme(arg),
             "log" => PromptCommand::ToggleLog,
             "refs" => PromptCommand::ToggleRefs,
+            "undo" | "u" => PromptCommand::Undo,
+            "confirm" => match arg.as_deref() {
+                None => PromptCommand::Confirms { reset: false },
+                Some("reset") => PromptCommand::Confirms { reset: true },
+                Some(other) => {
+                    return Err(format!("unknown option `{other}` — use `:confirm reset`"));
+                }
+            },
             "local" => PromptCommand::ToggleLocal,
             "clear" => PromptCommand::ClearLog,
             "help" | "h" => PromptCommand::Help,
@@ -366,5 +388,18 @@ mod tests {
         );
         // git subcommands that share a name with shell commands still run.
         assert_eq!(parse("rm --cached a"), Ok(git(&["rm", "--cached", "a"])));
+    }
+
+    #[test]
+    fn confirm_builtin() {
+        assert_eq!(
+            parse(":confirm"),
+            Ok(Some(PromptCommand::Confirms { reset: false }))
+        );
+        assert_eq!(
+            parse(":confirm reset"),
+            Ok(Some(PromptCommand::Confirms { reset: true }))
+        );
+        assert!(parse(":confirm nope").is_err());
     }
 }

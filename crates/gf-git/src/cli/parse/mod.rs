@@ -7,6 +7,7 @@
 
 pub mod diff;
 pub mod log;
+pub mod numstat;
 pub mod refs;
 pub mod remote;
 pub mod status;

@@ -4,4 +4,4 @@ mod paths;
 mod settings;
 
 pub use paths::{APP_NAME, APP_ORGANIZATION, APP_QUALIFIER, AppPaths};
-pub use settings::{AppearanceSettings, GitSettings, RepoSettings, Settings};
+pub use settings::{AppearanceSettings, ConfirmSettings, GitSettings, RepoSettings, Settings};

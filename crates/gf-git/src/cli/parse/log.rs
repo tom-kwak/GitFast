@@ -74,7 +74,7 @@ pub fn parse_raw_date(raw: &str) -> Result<Timestamp> {
         Some(b'+') => (1, &tz[1..]),
         _ => return Err(bad()),
     };
-    if digits.len() != 4 {
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(bad());
     }
     let hours: i32 = digits[..2].parse().map_err(|_| bad())?;

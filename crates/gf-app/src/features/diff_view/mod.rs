@@ -18,15 +18,18 @@ use std::sync::Arc;
 use gf_core::model::{FileChange, FileDiff, LineKind, Oid};
 use gf_git::{DiffOptions, DiffTarget, Repository, patch};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, rich_text, row, span};
-use iced::{Color, Element, Length, Padding};
+use iced::widget::{button, column, container, row};
+use iced::{Color, Element, Length, Padding, Task};
 
 use crate::feature::{Cx, Update};
 use crate::highlight::{self, Spans};
+use crate::nav::{self, Key, Moved, Nav};
 use crate::theme::{Tokens, style};
 use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
 use crate::widgets::{self, colored, dim, mono};
 
+/// Scrollable id of the commit's file list.
+const FILES_ID: &str = "gf-commit-files";
 /// Files larger than this (in diff lines) are shown without highlighting.
 const MAX_HIGHLIGHT_LINES: usize = 20_000;
 
@@ -65,8 +68,23 @@ pub enum DiffSource {
     Staged(PathBuf),
     Untracked(PathBuf),
     Commit(Oid),
-    Stash { index: usize, id: Oid },
+    Stash {
+        index: usize,
+        id: Oid,
+    },
+    /// Combined changes of several commits: `from` (the oldest one's parent,
+    /// or the empty tree) to `to` (the newest). `contiguous` is false when
+    /// the selection skips commits, whose changes are then included too.
+    Range {
+        from: String,
+        to: Oid,
+        count: usize,
+        contiguous: bool,
+    },
 }
+
+/// `git hash-object -t tree /dev/null`: the parent of a root commit.
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 impl DiffSource {
     /// Work tree sources belong in the local view, commits/stashes in the
@@ -74,7 +92,7 @@ impl DiffSource {
     pub fn role(&self) -> Role {
         match self {
             Self::WorkTree(_) | Self::Staged(_) | Self::Untracked(_) => Role::Local,
-            Self::Commit(_) | Self::Stash { .. } => Role::Commit,
+            Self::Commit(_) | Self::Stash { .. } | Self::Range { .. } => Role::Commit,
         }
     }
 
@@ -91,6 +109,13 @@ impl DiffSource {
                 },
                 Vec::new(),
             ),
+            Self::Range { from, to, .. } => (
+                DiffTarget::Range {
+                    from: from.clone(),
+                    to: to.to_string(),
+                },
+                Vec::new(),
+            ),
         }
     }
 
@@ -101,6 +126,16 @@ impl DiffSource {
             Self::Untracked(p) => format!("{} · new file", p.display()),
             Self::Commit(oid) => format!("commit {}", oid.short()),
             Self::Stash { index, .. } => format!("stash@{{{index}}}"),
+            Self::Range {
+                count, contiguous, ..
+            } => {
+                let note = if *contiguous {
+                    ""
+                } else {
+                    " · includes commits in between"
+                };
+                format!("{count} commits combined{note}")
+            }
         }
     }
 
@@ -131,7 +166,7 @@ impl Action {
     }
 
     /// `(cached, reverse)` for `git apply` — see `gf_git::patch`.
-    fn apply_mode(self) -> (bool, bool) {
+    pub fn apply_mode(self) -> (bool, bool) {
         match self {
             Self::Stage => (true, false),
             Self::Unstage => (true, true),
@@ -258,10 +293,16 @@ pub enum Message {
     FilesScrolled(ScrollPos),
     ToggleWhitespace,
     Close,
+    Blame,
+    FileHistory,
 }
 
 #[derive(Debug, Clone)]
 pub enum Output {
+    /// Blame the shown file at `rev` (`None` = working tree).
+    Blame { path: PathBuf, rev: Option<String> },
+    /// Show the commits that touched the shown file.
+    FileHistory(PathBuf),
     /// Apply these patches in order. Discards must be confirmed first.
     Apply {
         patches: Vec<String>,
@@ -303,7 +344,24 @@ impl State {
         self.source.as_ref() == Some(source)
             && (self.loading
                 || (self.error.is_none()
-                    && matches!(source, DiffSource::Commit(_) | DiffSource::Stash { .. })))
+                    && matches!(
+                        source,
+                        DiffSource::Commit(_) | DiffSource::Stash { .. } | DiffSource::Range { .. }
+                    )))
+    }
+
+    /// Path of the file being shown (new side, or old side if deleted).
+    pub fn current_path(&self) -> Option<PathBuf> {
+        match &self.source {
+            Some(DiffSource::WorkTree(p) | DiffSource::Staged(p) | DiffSource::Untracked(p)) => {
+                Some(p.clone())
+            }
+            _ => self
+                .diff
+                .files
+                .get(self.file)
+                .and_then(|f| f.display_path().cloned()),
+        }
     }
 
     pub fn ignore_whitespace(&self) -> bool {
@@ -521,17 +579,7 @@ impl State {
                     .and_then(|s| s.get(hi))
                     .and_then(|h| h.get(li));
                 let content: Element<'a, Message> = match spans {
-                    Some(Some(spans)) => rich_text(
-                        spans
-                            .iter()
-                            .map(|(tone, s)| {
-                                span::<(), iced::Font>(s.replace('\t', "    ")).color(t.tone(*tone))
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                    .size(t.font_size)
-                    .wrapping(Wrapping::None)
-                    .into(),
+                    Some(Some(spans)) => widgets::highlighted_line(t, spans),
                     _ => {
                         let color = match line.kind {
                             LineKind::Context => t.fg,
@@ -576,6 +624,69 @@ impl State {
 
     fn row_height(t: &Tokens) -> f32 {
         (t.font_size * 1.6).round()
+    }
+
+    fn files_row_height(t: &Tokens) -> f32 {
+        (t.font_size * 1.7).round()
+    }
+
+    /// Keys for the commit's file list: arrows pick the file.
+    pub fn files_nav(&self, nav: Nav, t: &Tokens) -> Option<Moved<Message>> {
+        let h = Self::files_row_height(t);
+        let len = self.diff.files.len();
+        let i = nav::step(
+            Some(self.file),
+            len,
+            nav.key,
+            nav::page(self.files_scroll, h),
+        )?;
+        if i == self.file {
+            return Some(Moved::stay());
+        }
+        Some(
+            Moved::message(Message::SelectFile(i)).with_task(nav::reveal(
+                FILES_ID,
+                self.files_scroll,
+                i,
+                h,
+            )),
+        )
+    }
+
+    /// Keys for the diff itself: arrows and PgUp/PgDn scroll, Home/End
+    /// jump, `n`/`p` go to the next/previous hunk.
+    pub fn diff_nav(&self, nav: Nav, t: &Tokens) -> Option<Moved<Message>> {
+        let id = self.role.list_id();
+        let h = Self::row_height(t);
+        let page = (self.scroll.height - h).max(h);
+        let task = match nav.key {
+            Key::Up => nav::scroll_by(id, -h),
+            Key::Down => nav::scroll_by(id, h),
+            Key::PageUp => nav::scroll_by(id, -page),
+            Key::PageDown => nav::scroll_by(id, page),
+            Key::Home => nav::scroll_y(id, 0.0),
+            Key::End => iced::widget::operation::snap_to_end(id),
+            Key::Char(c @ ('n' | 'p')) => {
+                let f = self.diff.files.get(self.file)?;
+                let tops = Self::rows(f).into_iter().enumerate().filter_map(|(i, r)| {
+                    #[allow(clippy::cast_precision_loss)]
+                    matches!(r, DiffRow::Hunk(_)).then_some(i as f32 * h)
+                });
+                // A little slack so the hunk at the top counts as "here".
+                let here = self.scroll.offset;
+                let target = if c == 'n' {
+                    tops.into_iter().find(|y| *y > here + 1.0)
+                } else {
+                    tops.into_iter().rfind(|y| *y < here - 1.0)
+                };
+                match target {
+                    Some(y) => nav::scroll_y(id, y),
+                    None => Task::none(),
+                }
+            }
+            _ => return None,
+        };
+        Some(Moved::stay().with_task(task))
     }
 
     pub fn update(&mut self, message: Message) -> Update<Message, Output> {
@@ -647,6 +758,21 @@ impl State {
                 self.close();
                 Update::none()
             }
+            Message::Blame | Message::FileHistory => {
+                let Some(path) = self.current_path() else {
+                    return Update::none();
+                };
+                if matches!(message, Message::FileHistory) {
+                    return Update::output(Output::FileHistory(path));
+                }
+                let rev = match &self.source {
+                    Some(DiffSource::Commit(oid)) => Some(oid.to_string()),
+                    Some(DiffSource::Stash { id, .. }) => Some(id.to_string()),
+                    Some(DiffSource::Range { to, .. }) => Some(to.to_string()),
+                    _ => None,
+                };
+                Update::output(Output::Blame { path, rev })
+            }
         }
     }
 
@@ -672,38 +798,53 @@ impl State {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default()
             };
-            let path_cols = files
+            let counts_of = |f: &FileDiff| -> widgets::EntryCounts {
+                let (added, removed) = f.line_stats();
+                Some((!f.is_binary).then(|| gf_git::LineCounts {
+                    added: u32::try_from(added).unwrap_or(u32::MAX),
+                    removed: u32::try_from(removed).unwrap_or(u32::MAX),
+                }))
+            };
+            let cols = files
                 .iter()
-                .map(|f| columns(&path_of(f)))
+                .map(|f| {
+                    widgets::file_entry_columns(
+                        f.display_path()
+                            .map(PathBuf::as_path)
+                            .unwrap_or(std::path::Path::new("")),
+                        counts_of(f),
+                    )
+                })
                 .max()
                 .unwrap_or(0);
-            // code, path, +N −N and gaps.
-            let content_width = t.cols(2 + path_cols + 14) + 30.0;
+            let content_width = t.cols(cols) + 30.0;
             let current = self.file;
             virtual_list(
-                "gf-commit-files",
+                FILES_ID,
                 files.len(),
-                (t.font_size * 1.7).round(),
+                Self::files_row_height(t),
                 content_width,
                 self.files_scroll,
                 move |i| {
                     let f = &files[i];
-                    let (code, color) = match f.change {
-                        FileChange::Added => ("A", t.added()),
-                        FileChange::Deleted => ("D", t.removed()),
-                        FileChange::Modified => ("M", t.warning()),
-                        FileChange::Renamed { .. } => ("R", t.accent()),
-                        FileChange::Copied { .. } => ("C", t.accent()),
+                    let code = match f.change {
+                        FileChange::Added => "A",
+                        FileChange::Deleted => "D",
+                        FileChange::Modified => "M",
+                        FileChange::Renamed { .. } => "R",
+                        FileChange::Copied { .. } => "C",
                     };
-                    let (a, r) = f.line_stats();
-                    let line = row![
-                        colored(t, code, color),
-                        colored(t, format!("+{a}"), t.added()).wrapping(Wrapping::None),
-                        colored(t, format!("−{r}"), t.removed()).wrapping(Wrapping::None),
-                        mono(t, path_of(f)).wrapping(Wrapping::None),
-                    ]
-                    .spacing(6);
-                    widgets::list_row(t, line, i == current, Message::SelectFile(i))
+                    let color = widgets::change_color(t, code.chars().next().unwrap_or(' '));
+                    let path = f
+                        .display_path()
+                        .map(PathBuf::as_path)
+                        .unwrap_or(std::path::Path::new(""));
+                    let line = widgets::file_entry(t, code, color, path, counts_of(f));
+                    widgets::tip(
+                        t,
+                        widgets::list_row(t, line, i == current, Message::SelectFile(i)),
+                        path_of(f),
+                    )
                 },
                 Message::FilesScrolled,
             )
@@ -759,6 +900,19 @@ impl State {
                     t.accent(),
                     "next file",
                     Message::SelectFile(self.file + 1),
+                ));
+        }
+        if self.current_path().is_some() {
+            header = header
+                .push(widgets::tip(
+                    t,
+                    widgets::text_button(t, "blame", None, Some(Message::Blame)),
+                    "who last changed each line of this file".into(),
+                ))
+                .push(widgets::tip(
+                    t,
+                    widgets::text_button(t, "file history", None, Some(Message::FileHistory)),
+                    "commits that touched this file (follows renames)".into(),
                 ));
         }
         header = header

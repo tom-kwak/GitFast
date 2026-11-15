@@ -10,10 +10,9 @@ use gf_git::{CancellationToken, GitCommand, Repository, RunOptions};
 use iced::Task;
 use iced::futures::SinkExt;
 
-use super::dialogs::Purpose;
+use super::dialogs::{Confirm, Purpose};
 use super::{App, Message, OpKind};
 use crate::features::command_log::NoteKind;
-use crate::features::dialog::Dialog;
 use crate::features::diff_view::{self, DiffSource};
 use crate::features::toolbar;
 use crate::git_actions;
@@ -38,10 +37,12 @@ pub fn load_history(tab: &RepoTab, revision: String) -> Task<Message> {
         {
             let revision = revision.clone();
             async move {
-                History::load(&repo, vec![revision], false)
-                    .await
-                    .map(Arc::new)
-                    .map_err(|e| e.to_string())
+                // `file: <path>` is a file history (see `open_file_history`).
+                let history = match revision.strip_prefix("file: ") {
+                    Some(path) => History::load_path(&repo, path.into()).await,
+                    None => History::load(&repo, vec![revision], false).await,
+                };
+                history.map(Arc::new).map_err(|e| e.to_string())
             }
         },
         move |result| Message::HistoryLoaded(id, revision.clone(), result),
@@ -102,6 +103,31 @@ impl App {
                 if let Some(source) = tab.changes.follow(&snap.status.entries) {
                     tab.local_diff.show(source);
                 }
+                // Keep an open conflict resolver in sync: reload it while the
+                // file is still conflicted, close it once resolved.
+                let conflict_path = tab.conflict.as_ref().map(|c| c.path.clone());
+                if let Some(path) = conflict_path {
+                    let still = snap.status.entries.iter().any(|e| {
+                        matches!(e, gf_core::model::StatusEntry::Conflicted { path: p, .. } if *p == path)
+                    });
+                    if still {
+                        let repo = tab.repo.clone();
+                        let rid = repo.id();
+                        tasks.push(Task::perform(
+                            {
+                                let path = path.clone();
+                                async move {
+                                    repo.conflict_segments(&path)
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                }
+                            },
+                            move |result| Message::ConflictLoaded(rid, path.clone(), result),
+                        ));
+                    } else {
+                        tab.conflict = None;
+                    }
+                }
                 tab.snapshot = Some(snap);
                 tab.error = None;
                 if let Some(rev) = tab.history.revision().map(str::to_owned) {
@@ -142,6 +168,21 @@ impl App {
         F: FnOnce(Repository) -> Fut,
         Fut: Future<Output = gf_core::Result<()>> + Send + 'static,
     {
+        self.op_with_undo(label, kind, None, f)
+    }
+
+    /// [`Self::op`] that records an undo point when it succeeds.
+    pub(super) fn op_with_undo<F, Fut>(
+        &mut self,
+        label: impl Into<String>,
+        kind: OpKind,
+        undo: Option<crate::repo_tab::UndoEntry>,
+        f: F,
+    ) -> Task<Message>
+    where
+        F: FnOnce(Repository) -> Fut,
+        Fut: Future<Output = gf_core::Result<()>> + Send + 'static,
+    {
         let Some(tab) = self.active_tab() else {
             return Task::none();
         };
@@ -156,6 +197,7 @@ impl App {
                 label: label.clone(),
                 kind: kind.clone(),
                 result,
+                undo: undo.clone(),
             },
         )
     }
@@ -181,6 +223,12 @@ impl App {
         let repo = tab.repo.clone();
         let id = repo.id();
         let label = label.into();
+        // A pull moves the branch; let it be undone.
+        let undo = if kind == OpKind::Pull {
+            self.undo_point("pull", false)
+        } else {
+            None
+        };
         let token = CancellationToken::new();
         self.sync = Some((
             toolbar::Sync {
@@ -216,6 +264,7 @@ impl App {
                         label,
                         kind,
                         result: result.map_err(|e| e.to_string()),
+                        undo,
                     })
                     .await;
             },
@@ -237,9 +286,15 @@ impl App {
         match result {
             Ok(()) => {
                 self.flash(NoteKind::Info, format!("✓ {}", truncate(&label, 60)));
-                if kind == OpKind::Commit {
-                    if let Some(tab) = self.tab_mut(id) {
-                        tab.commit.committed();
+                if let Some(tab) = self.tab_mut(id) {
+                    match kind {
+                        OpKind::Commit => tab.commit.committed(),
+                        // Only now is the step really undone; a failed undo
+                        // (e.g. git refusing to overwrite work) can be retried.
+                        OpKind::Undo => {
+                            tab.undo.pop();
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -255,32 +310,32 @@ impl App {
                 }
                 // Offer the next step for common push/pull failures.
                 match &kind {
-                    OpKind::Push { branch }
+                    OpKind::Push { branch, to }
                         if e.contains("non-fast-forward")
                             || e.contains("fetch first")
                             || e.contains("[rejected]") =>
                     {
-                        self.dialog = Some(
-                            Dialog::confirm(
-                                "Push rejected",
-                                vec![
-                                    "The remote branch has commits you don't have.".into(),
-                                    "Usually: pull first, then push again.".into(),
-                                    "Force-with-lease overwrites the remote branch, but only if"
-                                        .into(),
-                                    "nobody pushed since your last fetch.".into(),
-                                ],
-                                "Force push (with lease)",
-                                Purpose::ForcePush {
-                                    branch: branch.clone(),
-                                },
-                            )
-                            .danger(),
-                        );
+                        // Overwrites commits on the remote: a deletion.
+                        let ask = self.confirm(Confirm::delete(
+                            "Push rejected",
+                            vec![
+                                "The remote branch has commits you don't have.".into(),
+                                "Usually: pull first, then push again.".into(),
+                                "Force-with-lease overwrites the remote branch, but only if".into(),
+                                "nobody pushed since your last fetch.".into(),
+                            ],
+                            "Force push (with lease)",
+                            Purpose::ForcePush {
+                                branch: branch.clone(),
+                                to: to.clone(),
+                            },
+                        ));
+                        tasks.push(ask);
                     }
                     OpKind::Pull if e.contains("divergent") || e.contains("reconcile") => {
-                        self.dialog = Some(
-                            Dialog::confirm(
+                        let ask = self.confirm(
+                            Confirm::change(
+                                "pull-strategy",
                                 "Branches have diverged",
                                 vec![
                                     "Your branch and its upstream both have new commits.".into(),
@@ -289,11 +344,13 @@ impl App {
                                 "Pull",
                                 Purpose::PullStrategy,
                             )
+                            .always()
                             .check(
                                 "rebase my commits on top (instead of a merge commit)",
                                 false,
                             ),
                         );
+                        tasks.push(ask);
                     }
                     _ => {}
                 }
@@ -310,9 +367,7 @@ impl App {
                 self.settings.appearance.show_command_log = true;
             }
         }
-        tasks.push(iced::widget::operation::focus(
-            crate::features::prompt::PROMPT_ID,
-        ));
+        tasks.push(self.restore_focus());
         Task::batch(tasks)
     }
 
@@ -334,10 +389,12 @@ impl App {
             None => (home_dir(), None),
         };
         if tab.is_none() && !git_actions::creates_repository(&args) && !is_global_command(&args) {
+            // Without a repository the command would run in the home folder.
             self.flash(
                 NoteKind::Error,
                 "no repository open — ⌘O to open one, or `clone <url>`",
             );
+            return Task::none();
         }
         let open_after = git_actions::created_repository(&args, &cwd);
         let mut cmd = GitCommand::new(&args).current_dir(&cwd).echo_stdout();

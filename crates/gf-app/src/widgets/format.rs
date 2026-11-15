@@ -37,6 +37,19 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     )
 }
 
+/// Compact age for labels: `now`, `45s`, `5m`, `3h`, `2d`, `6w`.
+pub fn age(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..10 => "now".into(),
+        10..60 => format!("{s}s"),
+        60..3_600 => format!("{}m", s / 60),
+        3_600..86_400 => format!("{}h", s / 3_600),
+        86_400..1_209_600 => format!("{}d", s / 86_400),
+        _ => format!("{}w", s / 604_800),
+    }
+}
+
 /// `12ms`, `1.4s`, `2m03s`.
 pub fn duration(d: Duration) -> String {
     let ms = d.as_millis();
@@ -108,6 +121,16 @@ mod tests {
             offset_minutes: 0,
         };
         assert_eq!(datetime(leap), "2024-02-29 00:00");
+    }
+
+    #[test]
+    fn formats_ages() {
+        assert_eq!(age(Duration::from_secs(3)), "now");
+        assert_eq!(age(Duration::from_secs(42)), "42s");
+        assert_eq!(age(Duration::from_secs(300)), "5m");
+        assert_eq!(age(Duration::from_secs(7_200)), "2h");
+        assert_eq!(age(Duration::from_secs(3 * 86_400)), "3d");
+        assert_eq!(age(Duration::from_secs(30 * 86_400)), "4w");
     }
 
     #[test]

@@ -16,7 +16,9 @@
 //! Split by concern: `ops` runs git work, `outputs` reacts to feature
 //! outputs, `dialogs` owns confirmation/input dialogs.
 
+mod advanced;
 mod dialogs;
+mod focus;
 mod ops;
 mod outputs;
 
@@ -38,6 +40,7 @@ use iced::{
 use self::dialogs::Purpose;
 use crate::feature::{Cx, Feature, Update};
 use crate::features::command_log::NoteKind;
+use crate::features::context_menu;
 use crate::features::dialog::{self, Dialog};
 use crate::features::diff_view::DiffSource;
 use crate::features::prompt::PROMPT_ID;
@@ -46,6 +49,7 @@ use crate::features::{
     changes, command_log, commit_box, diff_view, history, prompt, sidebar, status_line, tabs,
     toolbar, welcome,
 };
+use crate::nav::{Key, Nav, Pane};
 use crate::repo_tab::{History, RepoTab, Snapshot};
 use crate::theme::{self, Tokens, style};
 use crate::widgets;
@@ -77,8 +81,22 @@ pub enum OpKind {
     Generic,
     Commit,
     Fetch,
-    Push { branch: Option<String> },
+    Push {
+        branch: Option<String>,
+        /// Explicit destination; `None` pushes the current branch.
+        to: Option<PushTo>,
+    },
     Pull,
+    /// Undoing a step: its undo entry is removed once this succeeds.
+    Undo,
+}
+
+/// Where to push a branch that is not the current one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushTo {
+    pub remote: String,
+    /// `<local branch>:<branch on the remote>`.
+    pub refspec: String,
 }
 
 #[derive(Debug, Clone)]
@@ -100,12 +118,18 @@ pub enum Message {
 
     Core(CoreEvent),
     Key(Shortcut),
+    /// A key press from the keyboard (see `focus` for who gets it).
+    KeyInput(focus::KeyInput),
+    /// A panel was clicked: it takes the arrow keys.
+    FocusPane(Pane),
+    Menu(context_menu::Message),
     Tick,
     FileHovered,
     FileHoverLeft,
     FileDropped(PathBuf),
     /// ⌘ (Ctrl elsewhere) pressed or released.
-    CommandHeld(bool),
+    /// Keyboard modifiers changed (shift/⌘ change what clicks do).
+    Modifiers(keyboard::Modifiers),
 
     Open(PathBuf),
     Opened(PathBuf, Result<Box<Repository>, String>),
@@ -127,7 +151,34 @@ pub enum Message {
         label: String,
         kind: OpKind,
         result: Result<(), String>,
+        undo: Option<crate::repo_tab::UndoEntry>,
     },
+    IntegrateDone {
+        repo: RepoId,
+        label: String,
+        result: Result<gf_git::Integration, String>,
+        undo: Option<crate::repo_tab::UndoEntry>,
+    },
+    Banner(crate::features::op_banner::Message),
+    Conflict(crate::features::conflict_view::Message),
+    Blame(crate::features::blame_view::Message),
+    BlameLoaded(RepoId, PathBuf, Result<Vec<gf_git::BlameLine>, String>),
+    BlameHighlighted(RepoId, PathBuf, Option<Arc<Vec<crate::highlight::Spans>>>),
+    ConflictLoaded(
+        RepoId,
+        PathBuf,
+        Result<Option<Vec<gf_git::conflict::Segment>>, String>,
+    ),
+    BisectDone(RepoId, Result<gf_git::BisectProgress, String>),
+    /// Plan for the rebase editor; the ids, when given, are preset to squash.
+    RebasePlanLoaded(
+        gf_core::model::Oid,
+        Result<Vec<gf_git::TodoItem>, String>,
+        Option<Vec<gf_core::model::Oid>>,
+    ),
+    RebaseEditor(crate::features::rebase_editor::Message),
+    /// Ask to undo the latest undoable step of the active tab.
+    Undo,
     GitFinished {
         repo: Option<RepoId>,
         args: Vec<String>,
@@ -148,6 +199,12 @@ pub struct App {
     prompt: prompt::State,
     log: command_log::State,
     dialog: Option<Dialog<Purpose>>,
+    /// Open action menu (right-click / `actions ▾`).
+    menu: Option<context_menu::State<Message>>,
+    /// Where the mouse was last pressed: menus open there.
+    pointer: crate::widgets::pointer::Pointer,
+    /// Interactive rebase plan being edited (modal).
+    rebase_editor: Option<crate::features::rebase_editor::State>,
     /// Running fetch/pull/push and its cancel handle.
     sync: Option<(toolbar::Sync, CancellationToken)>,
     flash: Option<Flash>,
@@ -155,9 +212,17 @@ pub struct App {
     drop_hover: bool,
     /// While ⌘ is held, characters a text field inserts are shortcut keys,
     /// not typing (see `Message::Prompt`).
-    command_held: bool,
+    /// Currently held modifiers.
+    modifiers: keyboard::Modifiers,
     /// Repositories being opened (for the busy indicator).
     opening: usize,
+    /// Panel the arrow keys drive while no text field has focus.
+    focus: Pane,
+    /// The user is typing in the prompt: give it focus back after a
+    /// dialog, menu or command.
+    typing: bool,
+    /// The menu being opened was asked for from the keyboard.
+    menu_by_key: bool,
 }
 
 impl App {
@@ -176,6 +241,7 @@ impl App {
 
         // Restore tabs from last session, in their original order.
         let to_restore = settings.repos.open.clone();
+        let no_tabs = to_restore.is_empty();
         let active = settings.repos.active;
         let restore = if to_restore.is_empty() {
             Task::none()
@@ -209,14 +275,25 @@ impl App {
             prompt: prompt::State::default(),
             log: command_log::State::default(),
             dialog: None,
+            menu: None,
+            pointer: crate::widgets::pointer::Pointer::default(),
+            rebase_editor: None,
             sync: None,
             flash: None,
             tick: 0,
             drop_hover: false,
-            command_held: false,
+            modifiers: keyboard::Modifiers::empty(),
             opening: 0,
+            focus: Pane::default(),
+            typing: no_tabs,
+            menu_by_key: false,
         };
-        (app, Task::batch([restore, operation::focus(PROMPT_ID)]))
+        let focus = if no_tabs {
+            operation::focus(PROMPT_ID)
+        } else {
+            Task::none()
+        };
+        (app, Task::batch([restore, focus]))
     }
 
     pub fn title(&self) -> String {
@@ -289,13 +366,18 @@ impl App {
                 welcome::Message::OpenRecent(p) => self.update(Message::Open(p)),
                 welcome::Message::PickFolder => self.update(Message::PickFolder),
             },
-            Message::CommandHeld(held) => {
-                self.command_held = held;
+            Message::Modifiers(m) => {
+                self.modifiers = m;
                 Task::none()
             }
+            // Keys belong to an open menu.
+            Message::Prompt(_) if self.menu.is_some() => Task::none(),
             // ⌘O must open a folder, not type "o" into the prompt.
-            Message::Prompt(prompt::Message::Input(_)) if self.command_held => Task::none(),
+            Message::Prompt(prompt::Message::Input(_)) if self.modifiers.command() => Task::none(),
             Message::Prompt(m) => {
+                if matches!(m, prompt::Message::Input(_) | prompt::Message::Submit) {
+                    self.typing = true;
+                }
                 let Update { task, output } = self.prompt.update(m);
                 let task = task.map(Message::Prompt);
                 match output {
@@ -325,6 +407,9 @@ impl App {
                 Task::none()
             }
             Message::Sidebar(m) => {
+                if matches!(m, sidebar::Message::Select(_) | sidebar::Message::Toggle(_)) {
+                    self.focus_pane(Pane::Sidebar);
+                }
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
@@ -337,6 +422,9 @@ impl App {
                 }
             }
             Message::Changes(m) => {
+                if matches!(m, changes::Message::Select(..)) {
+                    self.focus_pane(Pane::Changes);
+                }
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
@@ -348,10 +436,30 @@ impl App {
                 }
             }
             Message::History(m) => {
+                // Shift-click selects a range, ⌘-click adds/removes one.
+                let m = match m {
+                    history::Message::Select(oid) if self.modifiers.shift() => {
+                        history::Message::SelectRange(oid)
+                    }
+                    history::Message::Select(oid) if self.modifiers.command() => {
+                        history::Message::ToggleMark(oid)
+                    }
+                    other => other,
+                };
+                if matches!(
+                    m,
+                    history::Message::Select(_)
+                        | history::Message::SelectRange(_)
+                        | history::Message::ToggleMark(_)
+                        | history::Message::RightClick(_)
+                ) {
+                    self.focus_pane(Pane::History);
+                }
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
-                let Update { task, output } = tab.history.update(m);
+                let snap = tab.snapshot.clone();
+                let Update { task, output } = tab.history.update_with(m, snap.as_deref());
                 let task = task.map(Message::History);
                 match output {
                     Some(o) => Task::batch([task, self.on_history(o)]),
@@ -399,6 +507,18 @@ impl App {
             ) => self.request_refresh(repo),
             Message::Core(_) => Task::none(),
             Message::Key(k) => self.on_shortcut(k),
+            Message::KeyInput(k) => self.on_key_input(k),
+            Message::FocusPane(pane) => {
+                self.focus_pane(pane);
+                Task::none()
+            }
+            Message::Menu(m) => match self.menu.as_mut() {
+                Some(menu) => {
+                    let outcome = menu.update(m);
+                    self.on_menu_outcome(outcome)
+                }
+                None => Task::none(),
+            },
             Message::Tick => {
                 self.tick = self.tick.wrapping_add(1);
                 self.log.tick();
@@ -473,7 +593,7 @@ impl App {
                 Message::Picked,
             ),
             Message::Picked(Some(path)) => self.update(Message::Open(path)),
-            Message::Picked(None) => operation::focus(PROMPT_ID),
+            Message::Picked(None) => self.restore_focus(),
             Message::Loaded(id, result) => self.on_loaded(id, result),
             Message::HistoryLoaded(id, rev, result) => {
                 let Some(tab) = self.tab_mut(id) else {
@@ -519,7 +639,57 @@ impl App {
                 label,
                 kind,
                 result,
-            } => self.on_op_done(repo, label, kind, result),
+                undo,
+            } => {
+                if result.is_ok() {
+                    self.push_undo(repo, undo);
+                }
+                self.on_op_done(repo, label, kind, result)
+            }
+            Message::IntegrateDone {
+                repo,
+                label,
+                result,
+                undo,
+            } => self.on_integrate_done(repo, label, result, undo),
+            Message::Banner(m) => self.on_banner(m),
+            Message::Conflict(m) => self.on_conflict_message(m),
+            Message::Blame(m) => self.on_blame_message(m),
+            Message::BlameLoaded(id, path, result) => {
+                let Some(b) = self.tab_mut(id).and_then(|t| t.blame.as_mut()) else {
+                    return Task::none();
+                };
+                b.loaded(&path, result);
+                // Show the lines right away, colors follow when ready.
+                let Some(lines) = b.lines().filter(|_| b.path == path) else {
+                    return Task::none();
+                };
+                let text: Vec<String> = lines.iter().map(|l| l.content.clone()).collect();
+                Task::perform(
+                    crate::features::blame_view::highlight(path.clone(), text),
+                    move |spans| Message::BlameHighlighted(id, path.clone(), spans),
+                )
+            }
+            Message::BlameHighlighted(id, path, spans) => {
+                if let (Some(b), Some(spans)) =
+                    (self.tab_mut(id).and_then(|t| t.blame.as_mut()), spans)
+                {
+                    b.highlighted(&path, spans);
+                }
+                Task::none()
+            }
+            Message::ConflictLoaded(id, path, result) => {
+                if let Some(c) = self.tab_mut(id).and_then(|t| t.conflict.as_mut()) {
+                    c.loaded(&path, result);
+                }
+                Task::none()
+            }
+            Message::BisectDone(id, result) => self.on_bisect_done(id, result),
+            Message::RebasePlanLoaded(base, plan, squash) => {
+                self.on_rebase_plan(base, plan, squash)
+            }
+            Message::RebaseEditor(m) => self.on_rebase_editor(m),
+            Message::Undo => self.ask_undo(),
             Message::GitFinished {
                 repo,
                 args,
@@ -530,6 +700,11 @@ impl App {
     }
 
     fn on_diff_message(&mut self, role: diff_view::Role, m: diff_view::Message) -> Task<Message> {
+        match m {
+            diff_view::Message::SelectFile(_) => self.focus_pane(Pane::Files),
+            diff_view::Message::ToggleLine(_) => self.focus_pane(Pane::Diff),
+            _ => {}
+        }
         let Some(tab) = self.active_tab_mut() else {
             return Task::none();
         };
@@ -580,7 +755,8 @@ impl App {
             NoteKind::Info,
             format!("opened {}", widgets::format::tilde(&cwd)),
         );
-        Task::batch([load, operation::focus(PROMPT_ID)])
+        self.focus_pane(Pane::History);
+        load
     }
 
     fn select_tab(&mut self, i: usize) -> Task<Message> {
@@ -604,10 +780,44 @@ impl App {
             format!("closed {} — reopen from Recent or ⌘O", closed.name()),
         );
         self.save_settings();
-        operation::focus(PROMPT_ID)
+        self.restore_focus()
+    }
+
+    /// Opens an action menu where the mouse was last pressed. The prompt
+    /// gives up focus so the menu's letter keys are not typed into it.
+    pub(super) fn open_menu(&mut self, menu: context_menu::Menu<Message>) -> Task<Message> {
+        self.menu = Some(if self.menu_by_key {
+            context_menu::State::centered(menu)
+        } else {
+            context_menu::State::open(self.pointer.last_press(), menu)
+        });
+        iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
+    }
+
+    fn close_menu(&mut self) -> Task<Message> {
+        self.menu = None;
+        self.restore_focus()
+    }
+
+    fn on_menu_outcome(&mut self, outcome: context_menu::Outcome<Message>) -> Task<Message> {
+        match outcome {
+            context_menu::Outcome::None => Task::none(),
+            context_menu::Outcome::Close => self.close_menu(),
+            context_menu::Outcome::Run(m) => {
+                let refocus = self.close_menu();
+                Task::batch([refocus, self.update(m)])
+            }
+        }
     }
 
     fn on_shortcut(&mut self, k: Shortcut) -> Task<Message> {
+        if self.menu.is_some() {
+            return match k {
+                Shortcut::Escape => self.close_menu(),
+                // Everything else waits until the menu is closed.
+                _ => Task::none(),
+            };
+        }
         // While a dialog is open only its keys apply.
         if self.dialog.is_some() {
             return match k {
@@ -624,7 +834,7 @@ impl App {
             Shortcut::CloseTab => self.close_tab(self.active),
             Shortcut::Refresh => self.refresh_active(),
             Shortcut::SelectTab(i) => self.select_tab(i),
-            Shortcut::FocusPrompt => operation::focus(PROMPT_ID),
+            Shortcut::FocusPrompt => self.focus_prompt(),
             Shortcut::ToggleRefs => {
                 self.settings.appearance.show_refs = !self.settings.appearance.show_refs;
                 self.save_settings();
@@ -650,6 +860,10 @@ impl App {
             Shortcut::HistoryNext => self.update(Message::Prompt(prompt::Message::HistoryNext)),
             Shortcut::Complete => self.update(Message::Prompt(prompt::Message::Complete)),
             Shortcut::Commit => self.update(Message::Commit(commit_box::Message::Submit)),
+            Shortcut::Escape if self.rebase_editor.is_some() => {
+                self.rebase_editor = None;
+                Task::none()
+            }
             Shortcut::Escape => {
                 if let Some((_, token)) = &self.sync {
                     token.cancel();
@@ -681,24 +895,41 @@ impl App {
             }
             Some(tab) => {
                 let appearance = &self.settings.appearance;
-                let toggle = |m: toolbar::Message| Message::Toolbar(m);
+                let active = self.pane();
                 let left: Element<'_, Message> = if appearance.show_refs {
-                    container(tab.sidebar.view(cx).map(Message::Sidebar))
-                        .width(Length::Fixed(t.font_size * 22.0))
-                        .into()
+                    container(focus::pane_frame(
+                        t,
+                        Pane::Sidebar,
+                        active,
+                        tab.sidebar.view(cx).map(Message::Sidebar),
+                    ))
+                    .width(Length::Fixed(t.font_size * 22.0))
+                    .into()
                 } else {
                     widgets::collapsed_strip(
                         t,
                         "»",
                         "REFS",
                         "show refs ⌘B".into(),
-                        toggle(toolbar::Message::ToggleRefs),
+                        Message::Key(Shortcut::ToggleRefs),
                     )
                 };
-                row![left, main_area(t, tab, cx)]
-                    .spacing(4)
-                    .height(Length::Fill)
-                    .into()
+                let main: Element<'_, Message> = match cx.snapshot.and_then(|s| {
+                    crate::features::op_banner::view(
+                        t,
+                        &s.state,
+                        s.conflict_count(),
+                        tab.bisect.as_ref(),
+                    )
+                }) {
+                    Some(banner) => {
+                        column![banner.map(Message::Banner), main_area(t, tab, cx, active)]
+                            .spacing(4)
+                            .into()
+                    }
+                    None => main_area(t, tab, cx, active),
+                };
+                row![left, main].spacing(4).height(Length::Fill).into()
             }
         };
 
@@ -708,16 +939,8 @@ impl App {
         }
         if let Some(tab) = tab {
             layout = layout.push(
-                toolbar::view(
-                    t,
-                    tab,
-                    self.sync.as_ref().map(|(s, _)| s),
-                    spinner,
-                    toolbar::Panels {
-                        refs: self.settings.appearance.show_refs,
-                    },
-                )
-                .map(Message::Toolbar),
+                toolbar::view(t, tab, self.sync.as_ref().map(|(s, _)| s), spinner)
+                    .map(Message::Toolbar),
             );
         }
         layout = layout.push(
@@ -742,6 +965,12 @@ impl App {
                 tab,
                 self.busy().then_some(spinner),
                 self.flash.as_ref(),
+                tab.and_then(|tab| tab.undo.last()).map(|u| {
+                    (
+                        format!("↶ undo {}", widgets::format::truncate(&u.label, 30)),
+                        Message::Undo,
+                    )
+                }),
             ));
 
         let base = container(layout)
@@ -749,14 +978,20 @@ impl App {
             .height(Length::Fill)
             .style(style::app(t));
 
-        match &self.dialog {
+        // A confirmation sits above the rebase editor that asked for it.
+        let modal: Option<Element<'_, Message>> = match (&self.dialog, &self.rebase_editor) {
+            (Some(d), _) => Some(d.view(t).map(Message::Dialog)),
+            (None, Some(e)) => Some(e.view(t).map(Message::RebaseEditor)),
+            (None, None) => None,
+        };
+        let screen: Element<'_, Message> = match modal {
             None => base.into(),
-            Some(d) => {
+            Some(modal) => {
                 let shade = Color {
                     a: 0.55,
                     ..Color::BLACK
                 };
-                let overlay = container(center(d.view(t).map(Message::Dialog)))
+                let overlay = container(center(modal))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(move |_| container::Style {
@@ -765,7 +1000,12 @@ impl App {
                     });
                 stack![base, opaque(overlay)].into()
             }
-        }
+        };
+        let screen = match &self.menu {
+            Some(menu) => stack![screen, opaque(menu.view(t).map(Message::Menu))].into(),
+            None => screen,
+        };
+        self.pointer.track(screen)
     }
 
     // ------------------------------------------------------- subscriptions
@@ -781,6 +1021,9 @@ impl App {
         ];
         if self.busy() {
             subs.push(iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick));
+        } else if !self.tabs.is_empty() {
+            // Keeps relative times (e.g. `⟳ fetch (5m)`) current while idle.
+            subs.push(iced::time::every(Duration::from_secs(30)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
     }
@@ -798,7 +1041,14 @@ impl App {
 /// There is one CHANGES view; its color (blue = a commit, yellow = your
 /// local work) and the active tab say which changes are shown. Each mode
 /// keeps its own selection and scroll position.
-fn main_area<'a>(t: &'a Tokens, tab: &'a RepoTab, cx: Cx<'a>) -> Element<'a, Message> {
+fn main_area<'a>(
+    t: &'a Tokens,
+    tab: &'a RepoTab,
+    cx: Cx<'a>,
+    active: Pane,
+) -> Element<'a, Message> {
+    let frame =
+        |pane: Pane, content: Element<'a, Message>| focus::pane_frame(t, pane, active, content);
     use diff_view::Role;
     let changed = cx.snapshot.map_or(0, |s| {
         s.status
@@ -846,24 +1096,39 @@ fn main_area<'a>(t: &'a Tokens, tab: &'a RepoTab, cx: Cx<'a>) -> Element<'a, Mes
 
     let (top, changes): (Element<'a, Message>, Element<'a, Message>) = match tab.code_view {
         Role::Commit => (
-            tab.history.view(cx).map(Message::History),
-            row![
-                container(tab.commit_diff.files_view(cx).map(Message::CommitDiff))
+            frame(Pane::History, tab.history.view(cx).map(Message::History)),
+            match &tab.blame {
+                Some(b) => frame(Pane::Diff, b.view(t).map(Message::Blame)),
+                None => row![
+                    container(frame(
+                        Pane::Files,
+                        tab.commit_diff.files_view(cx).map(Message::CommitDiff)
+                    ))
                     .width(Length::Fixed(t.font_size * 20.0)),
-                tab.commit_diff.view(cx).map(Message::CommitDiff),
-            ]
-            .spacing(4)
-            .into(),
+                    frame(
+                        Pane::Diff,
+                        tab.commit_diff.view(cx).map(Message::CommitDiff)
+                    ),
+                ]
+                .spacing(4)
+                .into(),
+            },
         ),
         Role::Local => (
             row![
-                tab.changes.view(cx).map(Message::Changes),
+                frame(Pane::Changes, tab.changes.view(cx).map(Message::Changes)),
                 container(tab.commit.view(cx).map(Message::Commit))
                     .width(Length::Fixed(t.font_size * 34.0)),
             ]
             .spacing(4)
             .into(),
-            tab.local_diff.view(cx).map(Message::LocalDiff),
+            frame(
+                Pane::Diff,
+                match &tab.conflict {
+                    Some(c) => c.view(t).map(Message::Conflict),
+                    None => tab.local_diff.view(cx).map(Message::LocalDiff),
+                },
+            ),
         ),
     };
     column![
@@ -890,24 +1155,86 @@ impl Hash for BusSubscription {
 /// key — the prompt is focused most of the time.
 fn global_event(event: iced::Event, status: event::Status, _id: window::Id) -> Option<Message> {
     match event {
-        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
-            Some(Message::CommandHeld(m.command()))
-        }
+        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
         iced::Event::Keyboard(keyboard::Event::KeyPressed {
             key,
             modifiers,
             physical_key,
             ..
-        }) => shortcut(&key, modifiers, physical_key, status).map(Message::Key),
+        }) => {
+            let input = focus::KeyInput {
+                shortcut: shortcut(&key, modifiers, physical_key, status),
+                menu: menu_key(&key, modifiers, physical_key),
+                nav: nav_key(&key, modifiers, physical_key),
+            };
+            (input.shortcut.is_some() || input.menu.is_some() || input.nav.is_some())
+                .then_some(Message::KeyInput(input))
+        }
         // Native dialogs can swallow the key-up of ⌘; never keep it stuck.
         iced::Event::Window(window::Event::Focused | window::Event::Unfocused) => {
-            Some(Message::CommandHeld(false))
+            Some(Message::Modifiers(keyboard::Modifiers::empty()))
         }
         iced::Event::Window(window::Event::FileHovered(_)) => Some(Message::FileHovered),
         iced::Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FileHoverLeft),
         iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
         _ => None,
     }
+}
+
+/// Keys an open menu understands: letters (by physical key, so the Korean
+/// input method works too), ↑/↓ and Enter, without modifiers.
+fn menu_key(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+    physical: keyboard::key::Physical,
+) -> Option<context_menu::Key> {
+    use keyboard::key::{Key, Named};
+    if !modifiers.is_empty() {
+        return None;
+    }
+    match key.as_ref() {
+        Key::Named(Named::ArrowUp) => Some(context_menu::Key::Up),
+        Key::Named(Named::ArrowDown) => Some(context_menu::Key::Down),
+        Key::Named(Named::Enter) => Some(context_menu::Key::Enter),
+        _ => key
+            .to_latin(physical)
+            .filter(char::is_ascii_alphabetic)
+            .map(context_menu::Key::Char),
+    }
+}
+
+/// Keys that move around panels: arrows, paging, Enter, Space, ⇥ (with
+/// or without Shift) and plain symbols/letters (by physical key).
+fn nav_key(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+    physical: keyboard::key::Physical,
+) -> Option<Nav> {
+    use keyboard::key::{Key as K, Named};
+    let shift = modifiers.shift();
+    if modifiers.command() || modifiers.alt() || modifiers.control() {
+        return None;
+    }
+    let key = match key.as_ref() {
+        K::Named(Named::ArrowUp) => Key::Up,
+        K::Named(Named::ArrowDown) => Key::Down,
+        K::Named(Named::ArrowLeft) => Key::Left,
+        K::Named(Named::ArrowRight) => Key::Right,
+        K::Named(Named::PageUp) => Key::PageUp,
+        K::Named(Named::PageDown) => Key::PageDown,
+        K::Named(Named::Home) => Key::Home,
+        K::Named(Named::End) => Key::End,
+        K::Named(Named::Enter) => Key::Enter,
+        K::Named(Named::Space) => Key::Space,
+        K::Named(Named::Tab) => Key::Tab,
+        _ if shift => return None,
+        _ => match key.to_latin(physical)? {
+            ' ' => Key::Space,
+            c if c.is_ascii_graphic() => Key::Char(c.to_ascii_lowercase()),
+            _ => return None,
+        },
+    };
+    Some(Nav { key, shift })
 }
 
 fn shortcut(
@@ -1036,6 +1363,80 @@ mod tests {
                 Code::KeyO,
                 none,
                 event::Status::Ignored
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn menu_keys_are_plain_letters_arrows_and_enter() {
+        let none = keyboard::Modifiers::empty();
+        let k = |key: Key, code: Code, m| menu_key(&key, m, keyboard::key::Physical::Code(code));
+        assert_eq!(
+            k(Key::Character("p".into()), Code::KeyP, none),
+            Some(context_menu::Key::Char('p'))
+        );
+        // Korean input method: physical key decides.
+        assert_eq!(
+            k(Key::Character("ㅔ".into()), Code::KeyP, none),
+            Some(context_menu::Key::Char('p'))
+        );
+        assert_eq!(
+            k(Key::Named(Named::ArrowDown), Code::ArrowDown, none),
+            Some(context_menu::Key::Down)
+        );
+        assert_eq!(
+            k(
+                Key::Character("p".into()),
+                Code::KeyP,
+                keyboard::Modifiers::COMMAND
+            ),
+            None
+        );
+        assert_eq!(k(Key::Character("1".into()), Code::Digit1, none), None);
+    }
+
+    #[test]
+    fn nav_keys_are_arrows_paging_and_plain_symbols() {
+        let none = keyboard::Modifiers::empty();
+        let k = |key: Key, code: Code, m| nav_key(&key, m, keyboard::key::Physical::Code(code));
+        assert_eq!(
+            k(
+                Key::Named(Named::ArrowDown),
+                Code::ArrowDown,
+                keyboard::Modifiers::SHIFT
+            ),
+            Some(Nav {
+                key: crate::nav::Key::Down,
+                shift: true
+            })
+        );
+        // Korean input method: `ㅇ` is the D key.
+        assert_eq!(
+            k(Key::Character("ㅇ".into()), Code::KeyD, none),
+            Some(Nav {
+                key: crate::nav::Key::Char('d'),
+                shift: false
+            })
+        );
+        assert_eq!(
+            k(Key::Character("/".into()), Code::Slash, none).map(|n| n.key),
+            Some(crate::nav::Key::Char('/'))
+        );
+        // ⌘ keys are shortcuts, never navigation.
+        assert_eq!(
+            k(
+                Key::Named(Named::ArrowDown),
+                Code::ArrowDown,
+                keyboard::Modifiers::COMMAND
+            ),
+            None
+        );
+        assert_eq!(
+            k(
+                Key::Character("D".into()),
+                Code::KeyD,
+                keyboard::Modifiers::SHIFT
             ),
             None
         );

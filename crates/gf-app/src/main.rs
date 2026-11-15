@@ -6,6 +6,7 @@ mod features;
 mod git_actions;
 mod highlight;
 mod logging;
+mod nav;
 mod repo_tab;
 mod theme;
 mod widgets;

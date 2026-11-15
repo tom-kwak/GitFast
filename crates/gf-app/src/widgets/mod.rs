@@ -3,6 +3,7 @@
 
 pub mod format;
 pub mod graph_canvas;
+pub mod pointer;
 pub mod virtual_list;
 
 use iced::widget::{Text, button, column, container, row, scrollable, text, tooltip};
@@ -109,6 +110,26 @@ pub fn list_row<'a, M: Clone + 'a>(
         .into()
 }
 
+/// Like [`tip`], shown to the right (menus, where below would cover the next entry).
+pub fn tip_right<'a, M: 'a>(
+    t: &'a Tokens,
+    content: impl Into<Element<'a, M>>,
+    hint: String,
+) -> Element<'a, M> {
+    if hint.is_empty() {
+        return content.into();
+    }
+    tooltip(
+        content,
+        container(dim(t, hint))
+            .padding(Padding::from([2, 6]))
+            .style(style::tooltip(t)),
+        tooltip::Position::Right,
+    )
+    .gap(6)
+    .into()
+}
+
 /// Wraps an element with a hover tooltip.
 pub fn tip<'a, M: 'a>(
     t: &'a Tokens,
@@ -133,6 +154,27 @@ pub fn panel<'a, M: 'a>(
     content: impl Into<Element<'a, M>>,
 ) -> Element<'a, M> {
     container(column![dim(t, format!("─ {title} ")), content.into()].spacing(4))
+        .padding(Padding::from([4, 6]))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::panel(t))
+        .into()
+}
+
+/// [`panel`] with a control at the right end of its title line (e.g. the
+/// section's own collapse button).
+pub fn panel_with_action<'a, M: 'a>(
+    t: &'a Tokens,
+    title: String,
+    action: impl Into<Element<'a, M>>,
+    content: impl Into<Element<'a, M>>,
+) -> Element<'a, M> {
+    let header = row![
+        dim(t, format!("─ {title} ")).width(Length::Fill),
+        action.into()
+    ]
+    .align_y(iced::Alignment::Center);
+    container(column![header, content.into()].spacing(4))
         .padding(Padding::from([4, 6]))
         .width(Length::Fill)
         .height(Length::Fill)
@@ -224,4 +266,132 @@ pub fn segment<'a, M: 'a>(
     row![dim(t, icon), colored(t, value, color)]
         .spacing(4)
         .into()
+}
+
+/// Line counts for [`file_entry`]: `None` = unknown (nothing shown),
+/// `Some(None)` = binary, `Some(Some(c))` = `+added -removed`.
+pub type EntryCounts = Option<Option<gf_git::LineCounts>>;
+
+fn counts_text(counts: EntryCounts) -> Option<(String, String)> {
+    match counts? {
+        Some(c) => Some((format!("+{}", c.added), format!("-{}", c.removed))),
+        None => Some(("bin".into(), String::new())),
+    }
+}
+
+/// One file in a list, the same everywhere (commit files, working tree):
+/// `M  main.rs  +3 -1  src/app` — status code, file name, line counts,
+/// then the folder dimmed.
+/// Color of a one-letter change code (`A`, `M`, `D`, ...), the same in
+/// the working tree and in commit file lists.
+pub fn change_color(t: &Tokens, code: char) -> Color {
+    match code {
+        'A' | '?' => t.added(),
+        'D' => t.removed(),
+        'M' | 'T' => t.warning(),
+        'R' | 'C' => t.accent(),
+        'U' => t.error(),
+        _ => t.dim,
+    }
+}
+
+pub fn file_entry<'a, M: 'a>(
+    t: &Tokens,
+    code: &str,
+    code_color: Color,
+    path: &std::path::Path,
+    counts: EntryCounts,
+) -> iced::widget::Row<'a, M> {
+    use iced::widget::text::Wrapping;
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let mut line = row![
+        colored(t, code.to_owned(), code_color),
+        mono(t, name).wrapping(Wrapping::None),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center);
+    match counts_text(counts) {
+        Some((added, removed)) if removed.is_empty() => {
+            line = line.push(dim(t, added).wrapping(Wrapping::None));
+        }
+        Some((added, removed)) => {
+            line = line.push(
+                row![
+                    colored(t, added, t.added()).wrapping(Wrapping::None),
+                    colored(t, removed, t.removed()).wrapping(Wrapping::None),
+                ]
+                .spacing(4),
+            );
+        }
+        None => {}
+    }
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        line = line.push(dim(t, dir.display().to_string()).wrapping(Wrapping::None));
+    }
+    line
+}
+
+/// Monospace columns [`file_entry`] needs (for horizontal scrolling).
+pub fn file_entry_columns(path: &std::path::Path, counts: EntryCounts) -> usize {
+    let stats = counts_text(counts).map_or(0, |(a, r)| a.len() + r.len() + 2);
+    // code + gaps + name + stats + folder
+    2 + 2 + virtual_list::columns(&path.display().to_string()) + stats + 2
+}
+
+/// One syntax-highlighted line (tabs shown as four spaces), not wrapped.
+pub fn highlighted_line<'a, M: 'a>(
+    t: &'a Tokens,
+    spans: &'a crate::highlight::Spans,
+) -> Element<'a, M> {
+    iced::widget::rich_text(
+        spans
+            .iter()
+            .map(|(tone, s)| {
+                iced::widget::span::<(), iced::Font>(s.replace('\t', "    ")).color(t.tone(*tone))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .size(t.font_size)
+    .wrapping(iced::widget::text::Wrapping::None)
+    .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_counts_text() {
+        let c = |a, r| {
+            Some(Some(gf_git::LineCounts {
+                added: a,
+                removed: r,
+            }))
+        };
+        assert_eq!(counts_text(c(3, 1)), Some(("+3".into(), "-1".into())));
+        assert_eq!(counts_text(Some(None)), Some(("bin".into(), String::new())));
+        assert_eq!(counts_text(None), None);
+    }
+
+    #[test]
+    fn entry_width_counts_name_stats_and_folder() {
+        let p = std::path::Path::new("src/app/main.rs");
+        assert!(
+            file_entry_columns(
+                p,
+                Some(Some(gf_git::LineCounts {
+                    added: 12,
+                    removed: 3
+                }))
+            ) > file_entry_columns(p, None)
+        );
+        // Hangul file names are double width.
+        assert!(
+            file_entry_columns(std::path::Path::new("문서.md"), None)
+                > file_entry_columns(std::path::Path::new("ab.md"), None)
+        );
+    }
 }
