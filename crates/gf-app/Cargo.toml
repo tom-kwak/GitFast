@@ -1,0 +1,23 @@
+[package]
+name = "gf-app"
+description = "gf desktop application (iced UI). Composes the core crates into features."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gf"
+path = "src/main.rs"
+
+[dependencies]
+gf-core.workspace = true
+gf-config.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+
+[lints]
+workspace = true
