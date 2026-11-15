@@ -17,10 +17,22 @@ pub enum PromptCommand {
     /// `:theme [name]` — no name cycles through presets.
     Theme(Option<String>),
     ToggleLog,
+    ToggleRefs,
+    ToggleLocal,
     ClearLog,
     Help,
     Quit,
+    /// `pwd`: show the active repository's path.
+    Pwd,
 }
+
+/// Shell commands people type out of terminal habit that are not git
+/// subcommands (`rm`/`mv` are, so they are not listed).
+const SHELL_ONLY: &[&str] = &[
+    "ls", "ll", "cat", "less", "echo", "mkdir", "touch", "cp", "vim", "vi", "nano", "code", "open",
+    "npm", "yarn", "pnpm", "cargo", "make", "python", "node", "sudo", "brew", "chmod", "find",
+    "head", "tail",
+];
 
 /// Built-in `:` commands with one-line descriptions, used by `:help`,
 /// completion and the suggestion line.
@@ -34,6 +46,8 @@ pub const BUILTINS: &[(&str, &str)] = &[
     (":refresh", "reload the current repository               ⌘R"),
     (":theme", ":theme [gf-dark|gf-light|dracula]"),
     (":log", "show/hide the command log                    ⌘J"),
+    (":refs", "show/hide the refs sidebar                   ⌘B"),
+    (":local", "open/close the working tree (else history)    ⌘E"),
     (":clear", "clear the command log"),
     (":help", "show this help                                ?"),
     (":quit", "quit gf                                       ⌘Q"),
@@ -106,6 +120,8 @@ pub fn parse(line: &str) -> Result<Option<PromptCommand>, String> {
             "refresh" | "r" => PromptCommand::Refresh,
             "theme" => PromptCommand::Theme(arg),
             "log" => PromptCommand::ToggleLog,
+            "refs" => PromptCommand::ToggleRefs,
+            "local" => PromptCommand::ToggleLocal,
             "clear" => PromptCommand::ClearLog,
             "help" | "h" => PromptCommand::Help,
             "quit" | "q" => PromptCommand::Quit,
@@ -116,6 +132,26 @@ pub fn parse(line: &str) -> Result<Option<PromptCommand>, String> {
             }
         };
         return Ok(Some(parsed));
+    }
+
+    // Terminal habits: handle the few shell commands that map to gf
+    // actions, and explain the rest instead of failing as `git ls`.
+    match words.first().map(String::as_str) {
+        Some("pwd") => return Ok(Some(PromptCommand::Pwd)),
+        Some("clear" | "cls") => return Ok(Some(PromptCommand::ClearLog)),
+        Some("exit") => return Ok(Some(PromptCommand::Quit)),
+        Some("cd") => {
+            return match words.get(1) {
+                Some(dir) => Ok(Some(PromptCommand::Open(Some(expand_tilde(dir))))),
+                None => Err("cd needs a folder — `cd ~/work/repo` opens that repository".into()),
+            };
+        }
+        Some(cmd) if SHELL_ONLY.contains(&cmd) => {
+            return Err(format!(
+                "`{cmd}` is a shell command — this prompt runs git commands (a built-in terminal is planned)"
+            ));
+        }
+        _ => {}
     }
 
     if words.first().map(String::as_str) == Some("git") {
@@ -312,5 +348,23 @@ mod tests {
         assert_eq!(complete("che"), None, "checkout/cherry-pick add nothing");
         assert_eq!(complete("status -"), None);
         assert!(candidates("").is_empty());
+    }
+
+    #[test]
+    fn handles_shell_habits() {
+        assert_eq!(parse("pwd"), Ok(Some(PromptCommand::Pwd)));
+        assert_eq!(parse("clear"), Ok(Some(PromptCommand::ClearLog)));
+        assert_eq!(
+            parse("cd /tmp/repo"),
+            Ok(Some(PromptCommand::Open(Some("/tmp/repo".into()))))
+        );
+        assert!(parse("cd").is_err());
+        assert!(
+            parse("ls -la")
+                .expect_err("shell only")
+                .contains("shell command")
+        );
+        // git subcommands that share a name with shell commands still run.
+        assert_eq!(parse("rm --cached a"), Ok(git(&["rm", "--cached", "a"])));
     }
 }

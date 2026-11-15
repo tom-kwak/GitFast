@@ -68,7 +68,7 @@ pub fn view<'a>(t: &'a Tokens, recent: &'a [PathBuf], drop_hover: bool) -> Eleme
         .align_y(iced::Alignment::Center),
         dim(t, "type `:open ~/path/to/repo` or any git command (e.g. `clone <url>`) at the prompt below"),
         mono(t, ""),
-        dim(t, "─ RECENT "),
+        row![dim(t, "─ RECENT "), dim(t, "· click, or type its number + ⏎ at the prompt")].spacing(6),
         recent_list,
         mono(t, ""),
         dim(t, "─ SHORTCUTS "),

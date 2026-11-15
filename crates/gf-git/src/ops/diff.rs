@@ -17,6 +17,8 @@ pub enum DiffTarget {
     Commit(Oid),
     /// Any two revisions (`git diff <from> <to>`).
     Range { from: String, to: String },
+    /// An untracked file shown as entirely added (`git diff --no-index`).
+    Untracked(PathBuf),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -31,6 +33,9 @@ pub struct DiffOptions {
 
 impl Repository {
     pub async fn diff(&self, target: &DiffTarget, opts: &DiffOptions) -> Result<Vec<FileDiff>> {
+        if let DiffTarget::Untracked(path) = target {
+            return self.diff_untracked(path).await;
+        }
         let mut args: Vec<String> = match target {
             DiffTarget::WorkTree => vec!["diff".into()],
             DiffTarget::Staged => vec!["diff".into(), "--cached".into()],
@@ -39,7 +44,7 @@ impl Repository {
                 "--format=".into(),
                 "--diff-merges=first-parent".into(),
             ],
-            DiffTarget::Range { .. } => vec!["diff".into()],
+            DiffTarget::Range { .. } | DiffTarget::Untracked(_) => vec!["diff".into()],
         };
         args.extend(DIFF_FORMAT_ARGS.iter().map(|s| (*s).to_owned()));
         if let Some(n) = opts.context_lines {
@@ -58,9 +63,32 @@ impl Repository {
                 args.push(from.clone());
                 args.push(to.clone());
             }
-            DiffTarget::WorkTree | DiffTarget::Staged => {}
+            DiffTarget::WorkTree | DiffTarget::Staged | DiffTarget::Untracked(_) => {}
         }
         let out = self.read(self.command(args).paths(&opts.paths)).await?;
         parse_diff(&out)
+    }
+
+    async fn diff_untracked(&self, path: &std::path::Path) -> Result<Vec<FileDiff>> {
+        let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let mut args: Vec<String> = vec!["diff".into(), "--no-index".into()];
+        args.extend(DIFF_FORMAT_ARGS.iter().map(|s| (*s).to_owned()));
+        args.extend(["--".into(), null.into()]);
+        let cmd = self.command(args).arg(path).read_only().allow_failure();
+        let out = self.runner().run(&cmd).await?;
+        // `--no-index` exits 1 when the files differ, which is the normal case.
+        if out.exit_code != Some(0) && out.exit_code != Some(1) {
+            return Err(gf_core::GfError::GitCommand {
+                argv: vec!["diff".into(), "--no-index".into()],
+                exit_code: out.exit_code,
+                stderr: out.stderr.trim().to_owned(),
+            });
+        }
+        let mut files = parse_diff(&out.stdout)?;
+        for f in &mut files {
+            // Report the path relative to the repository like other diffs.
+            f.new_path = Some(path.to_path_buf());
+        }
+        Ok(files)
     }
 }

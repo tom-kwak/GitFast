@@ -111,6 +111,17 @@ impl Repository {
         self.runner.run_with(cmd, opts).await
     }
 
+    /// Runs a command on behalf of the user: its output is shown in the
+    /// command log. Fails on a non-zero exit code.
+    pub(crate) async fn exec(&self, cmd: GitCommand) -> Result<GitOutput> {
+        self.runner.run(&cmd.echo_stdout()).await
+    }
+
+    /// Like [`Self::exec`] with progress reporting and cancellation.
+    pub(crate) async fn exec_with(&self, cmd: GitCommand, opts: RunOptions) -> Result<GitOutput> {
+        self.runner.run_with(&cmd.echo_stdout(), opts).await
+    }
+
     /// Runs a read-only command and returns its stdout.
     pub(crate) async fn read(&self, cmd: GitCommand) -> Result<Vec<u8>> {
         Ok(self.runner.run(&cmd.read_only()).await?.stdout)

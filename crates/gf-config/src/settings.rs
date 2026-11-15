@@ -28,6 +28,8 @@ pub struct AppearanceSettings {
     pub font_size: u16,
     /// Show the command log panel.
     pub show_command_log: bool,
+    /// Show the refs sidebar (left).
+    pub show_refs: bool,
 }
 
 impl Default for AppearanceSettings {
@@ -36,6 +38,7 @@ impl Default for AppearanceSettings {
             theme: "gf-dark".into(),
             font_size: 13,
             show_command_log: true,
+            show_refs: true,
         }
     }
 }

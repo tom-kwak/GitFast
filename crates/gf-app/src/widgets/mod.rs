@@ -2,6 +2,8 @@
 //! of styling raw iced widgets, so the look stays consistent.
 
 pub mod format;
+pub mod graph_canvas;
+pub mod virtual_list;
 
 use iced::widget::{Text, button, column, container, row, scrollable, text, tooltip};
 use iced::{Color, Element, Length, Padding};
@@ -40,6 +42,55 @@ pub fn text_button<'a, M: Clone + 'a>(
         .padding(Padding::from([1, 2]))
         .style(style::text_button(t, color))
         .on_press_maybe(on_press)
+        .into()
+}
+
+/// `[ label ]` button drawn in the error color, for destructive actions.
+pub fn danger_button<'a, M: Clone + 'a>(
+    t: &'a Tokens,
+    label: &str,
+    on_press: Option<M>,
+) -> Element<'a, M> {
+    button(mono(t, format!("[ {label} ]")))
+        .padding(Padding::from([1, 2]))
+        .style(style::text_button(t, t.error()))
+        .on_press_maybe(on_press)
+        .into()
+}
+
+/// Small one-glyph action button with a tooltip explaining it (row actions
+/// such as stage `+` / unstage `−` / discard `↺`).
+pub fn icon_button<'a, M: Clone + 'a>(
+    t: &'a Tokens,
+    glyph: &'a str,
+    color: Color,
+    hint: impl Into<String>,
+    on_press: M,
+) -> Element<'a, M> {
+    tip(
+        t,
+        button(mono(t, glyph))
+            .padding(Padding::from([1, 5]))
+            .style(style::text_button(t, color))
+            .on_press(on_press),
+        hint.into(),
+    )
+}
+
+/// Like [`list_row`] but without vertical padding and filling the row
+/// height, so content such as graph lines can reach the row edges.
+pub fn list_row_flush<'a, M: Clone + 'a>(
+    t: &'a Tokens,
+    content: impl Into<Element<'a, M>>,
+    selected: bool,
+    on_press: M,
+) -> Element<'a, M> {
+    button(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(Padding::from([0, 6]))
+        .style(style::row_button(t, selected))
+        .on_press(on_press)
         .into()
 }
 
@@ -87,6 +138,54 @@ pub fn panel<'a, M: 'a>(
         .height(Length::Fill)
         .style(style::panel(t))
         .into()
+}
+
+/// [`panel`] with a colored border and title, e.g. `━ LOCAL CHANGES`.
+pub fn accent_panel<'a, M: 'a>(
+    t: &'a Tokens,
+    title: String,
+    accent: Color,
+    content: impl Into<Element<'a, M>>,
+) -> Element<'a, M> {
+    container(
+        column![
+            colored(t, format!("━ {title} "), accent).size(t.small()),
+            content.into()
+        ]
+        .spacing(4),
+    )
+    .padding(Padding::from([4, 6]))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(style::accent_panel(t, accent))
+    .into()
+}
+
+/// Thin full-height strip standing in for a closed side panel: an arrow
+/// and the panel name written vertically; clicking it reopens the panel.
+pub fn collapsed_strip<'a, M: Clone + 'a>(
+    t: &'a Tokens,
+    arrow: &'a str,
+    label: &str,
+    hint: String,
+    on_press: M,
+) -> Element<'a, M> {
+    let mut col = column![colored(t, arrow, t.accent())]
+        .spacing(0)
+        .align_x(iced::Alignment::Center);
+    for ch in label.chars() {
+        col = col.push(dim(t, ch.to_string()));
+    }
+    tip(
+        t,
+        button(col)
+            .width(Length::Fixed(t.font_size * 1.8))
+            .height(Length::Fill)
+            .padding(Padding::from([6, 2]))
+            .style(style::row_button(t, false))
+            .on_press(on_press),
+        hint,
+    )
 }
 
 /// A vertical scroll area with a thin, terminal-like scrollbar.
