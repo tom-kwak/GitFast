@@ -21,12 +21,14 @@ gf-core = { path = "crates/gf-core" }
 # gf-auth = { path = "crates/gf-auth" }
 gf-config = { path = "crates/gf-config" }
 # gf-watch = { path = "crates/gf-watch" }
-# gf-test-support = { path = "crates/gf-test-support" }
+gf-test-support = { path = "crates/gf-test-support" }
 
 # external
 thiserror = "2"
 anyhow = "1"
-tokio = { version = "1", default-features = false }
+tokio = { version = "1.54", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+gix = { version = "0.90", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 directories = "6"
 tracing = "0.1"

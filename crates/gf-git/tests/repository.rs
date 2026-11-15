@@ -1,0 +1,396 @@
+#![allow(clippy::unwrap_used)]
+
+mod common;
+
+use std::path::{Path, PathBuf};
+
+use common::{open, repo_with_merge, runner};
+use gf_core::GfError;
+use gf_core::model::{ChangeKind, ConflictKind, FileChange, RefKind, StatusEntry};
+use gf_git::{DiffOptions, DiffTarget, LogOrder, LogQuery, Repository};
+use gf_test_support::TestRepo;
+
+fn canonical(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap()
+}
+
+// ---------------------------------------------------------------- open
+
+#[tokio::test]
+async fn opens_from_root_and_subdirectory() {
+    let repo = TestRepo::new();
+    repo.write("a/b/c.txt", "x\n");
+    repo.commit_all("init");
+
+    let from_root = open(&repo).await;
+    let from_sub = Repository::open(repo.path().join("a/b"), runner(&repo))
+        .await
+        .unwrap();
+
+    let expected = canonical(repo.path());
+    assert_eq!(
+        from_root.handle().workdir.as_deref().map(canonical),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        from_sub.handle().workdir.as_deref().map(canonical),
+        Some(expected)
+    );
+    assert!(from_root.handle().git_dir.ends_with(".git"));
+}
+
+#[tokio::test]
+async fn opens_bare_repository() {
+    let bare = TestRepo::new_bare();
+    let repo = open(&bare).await;
+    assert!(repo.handle().is_bare());
+}
+
+#[tokio::test]
+async fn rejects_non_repository() {
+    let dir = tempfile_dir();
+    let repo = TestRepo::new(); // only for its isolated env
+    let err = Repository::open(dir.path(), runner(&repo))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GfError::NotARepository(_)), "{err}");
+}
+
+fn tempfile_dir() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
+}
+
+// ---------------------------------------------------------------- status
+
+#[tokio::test]
+async fn status_reports_every_kind_of_change() {
+    let repo = TestRepo::new();
+    repo.write("modified.txt", "1\n");
+    repo.write("staged.txt", "1\n");
+    repo.write("to-rename.txt", "rename me please\n");
+    repo.commit_all("init");
+
+    repo.write("modified.txt", "2\n");
+    repo.write("staged.txt", "2\n");
+    repo.git(&["add", "staged.txt"]);
+    repo.git(&["mv", "to-rename.txt", "renamed.txt"]);
+    repo.write("new dir/untracked file.txt", "u\n");
+
+    let status = open(&repo).await.status().await.unwrap();
+    assert_eq!(status.head.branch.as_deref(), Some("main"));
+    assert!(status.head.oid.is_some());
+
+    let find = |name: &str| {
+        status
+            .entries
+            .iter()
+            .find(|e| e.path() == Path::new(name))
+            .unwrap_or_else(|| panic!("{name} missing from {:?}", status.entries))
+    };
+    assert!(matches!(
+        find("modified.txt"),
+        StatusEntry::Changed {
+            index: ChangeKind::Unmodified,
+            worktree: ChangeKind::Modified,
+            ..
+        }
+    ));
+    assert!(find("staged.txt").is_staged());
+    assert!(matches!(
+        find("renamed.txt"),
+        StatusEntry::Changed { index: ChangeKind::Renamed, orig_path: Some(p), .. } if p == Path::new("to-rename.txt")
+    ));
+    assert!(matches!(
+        find("new dir/untracked file.txt"),
+        StatusEntry::Untracked { .. }
+    ));
+}
+
+#[tokio::test]
+async fn status_reports_conflicts() {
+    let repo = TestRepo::new();
+    repo.write("f.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["switch", "-q", "-c", "other"]);
+    repo.write("f.txt", "theirs\n");
+    repo.commit_all("theirs");
+    repo.git(&["switch", "-q", "main"]);
+    repo.write("f.txt", "ours\n");
+    repo.commit_all("ours");
+    assert!(!repo.git_output(&["merge", "other"]).status.success());
+
+    let status = open(&repo).await.status().await.unwrap();
+    assert_eq!(
+        status.entries,
+        vec![StatusEntry::Conflicted {
+            path: "f.txt".into(),
+            kind: ConflictKind::BothModified
+        }]
+    );
+}
+
+#[tokio::test]
+async fn status_on_unborn_branch_and_upstream_counts() {
+    let empty = TestRepo::new();
+    let status = open(&empty).await.status().await.unwrap();
+    assert_eq!(status.head.oid, None);
+    assert_eq!(status.head.branch.as_deref(), Some("main"));
+
+    let origin = TestRepo::new();
+    origin.write("a", "1\n");
+    origin.commit_all("one");
+    let clone = origin.clone_repo();
+    clone.write("b", "2\n");
+    clone.commit_all("local");
+    origin.write("c", "3\n");
+    origin.commit_all("remote");
+    clone.git(&["fetch", "-q"]);
+
+    let head = open(&clone).await.status().await.unwrap().head;
+    assert_eq!(head.upstream.as_deref(), Some("origin/main"));
+    assert_eq!((head.ahead, head.behind), (1, 1));
+}
+
+// ---------------------------------------------------------------- log
+
+#[tokio::test]
+async fn log_parses_commits_and_merges() {
+    let repo = repo_with_merge();
+    let commits = open(&repo)
+        .await
+        .log_cli(&LogQuery::default())
+        .await
+        .unwrap();
+
+    let summaries: Vec<_> = commits.iter().map(|c| c.summary.as_str()).collect();
+    assert_eq!(summaries.len(), 5);
+    assert_eq!(summaries[0], "M: merge feature");
+    assert!(commits[0].is_merge());
+    assert_eq!(
+        commits.last().map(|c| c.summary.as_str()),
+        Some("A: initial")
+    );
+    assert!(commits.last().unwrap().is_root());
+
+    let b = commits
+        .iter()
+        .find(|c| c.summary.starts_with("B:"))
+        .unwrap();
+    assert_eq!(b.body, "With a body line.");
+    assert_eq!(b.author.name, "Test Author");
+    assert_eq!(b.committer.email, "committer@example.com");
+    assert_eq!(b.author.time.offset_minutes, 0);
+}
+
+#[cfg(feature = "gix")]
+#[tokio::test]
+async fn gix_fast_path_matches_cli() {
+    let repo = repo_with_merge();
+    let r = open(&repo).await;
+
+    for query in [
+        LogQuery::default(),
+        LogQuery::head(2),
+        LogQuery {
+            skip: 1,
+            max_count: Some(3),
+            ..LogQuery::default()
+        },
+        LogQuery {
+            revisions: vec!["feature".into()],
+            ..LogQuery::default()
+        },
+    ] {
+        assert!(query.is_plain_walk());
+        let fast = r.log_fast(&query).await.expect("gix path applies").unwrap();
+        let cli = r.log_cli(&query).await.unwrap();
+        assert_eq!(fast, cli, "query {query:?}");
+    }
+}
+
+#[tokio::test]
+async fn log_filters_use_cli() {
+    let repo = repo_with_merge();
+    let r = open(&repo).await;
+
+    let by_path = r
+        .log(&LogQuery {
+            paths: vec!["src/feature.rs".into()],
+            ..LogQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(by_path.len(), 1);
+    assert_eq!(by_path[0].summary, "F: feature work");
+
+    let grep = r
+        .log(&LogQuery {
+            grep: Some("changelog".into()),
+            ..LogQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(grep.len(), 1);
+
+    let first_parent = r
+        .log(&LogQuery {
+            first_parent: true,
+            order: LogOrder::Topo,
+            ..LogQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        first_parent.len(),
+        4,
+        "F is only reachable via the merge's second parent"
+    );
+
+    let range = r
+        .log(&LogQuery {
+            revisions: vec!["main..feature".into()],
+            ..LogQuery::default()
+        })
+        .await
+        .unwrap();
+    assert!(range.is_empty(), "feature is fully merged");
+}
+
+#[tokio::test]
+async fn log_on_unborn_branch_is_empty() {
+    let repo = TestRepo::new();
+    let r = open(&repo).await;
+    assert!(r.log(&LogQuery::default()).await.unwrap().is_empty());
+    assert!(r.log_cli(&LogQuery::default()).await.unwrap().is_empty());
+    assert!(!r.head_exists().await.unwrap());
+}
+
+// ---------------------------------------------------------------- refs
+
+#[tokio::test]
+async fn branches_tags_and_remotes() {
+    let origin = repo_with_merge();
+    origin.git(&["tag", "light"]);
+    origin.git(&["tag", "-a", "v1.0", "-m", "Release 1.0\n\nNotes", "HEAD~1"]);
+    let clone = origin.clone_repo();
+    clone.git(&["remote", "add", "fork", "https://example.com/fork.git"]);
+    clone.git(&[
+        "remote",
+        "set-url",
+        "--push",
+        "fork",
+        "ssh://example.com/fork.git",
+    ]);
+
+    let r = open(&clone).await;
+    let branches = r.branches().await.unwrap();
+    let main = branches
+        .iter()
+        .find(|b| b.name.as_str() == "refs/heads/main")
+        .unwrap();
+    assert!(main.is_head);
+    assert_eq!(
+        main.upstream.as_ref().map(|u| u.name.short()),
+        Some("origin/main")
+    );
+    assert!(
+        branches
+            .iter()
+            .any(|b| b.name.kind() == RefKind::RemoteBranch && b.name.short() == "origin/feature")
+    );
+    assert!(!branches.iter().any(|b| b.name.short() == "origin/HEAD"));
+
+    let tags = r.tags().await.unwrap();
+    let v1 = tags.iter().find(|t| t.name.short() == "v1.0").unwrap();
+    assert_eq!(v1.message.as_deref(), Some("Release 1.0\n\nNotes"));
+    assert_eq!(v1.target.as_str(), clone.git(&["rev-parse", "HEAD~1"]));
+    let light = tags.iter().find(|t| t.name.short() == "light").unwrap();
+    assert_eq!(light.message, None);
+
+    let remotes = r.remotes().await.unwrap();
+    assert_eq!(remotes.len(), 2);
+    let fork = remotes.iter().find(|x| x.name == "fork").unwrap();
+    assert_eq!(fork.effective_push_url(), "ssh://example.com/fork.git");
+}
+
+// ---------------------------------------------------------------- diff
+
+#[tokio::test]
+async fn diff_worktree_staged_and_commit() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "one\ntwo\nthree\n");
+    repo.write(
+        "move-me.txt",
+        "content that is long enough to detect a rename\n",
+    );
+    let root = repo.commit_all("init");
+
+    repo.write("a.txt", "one\n2\nthree\n");
+    repo.write("new.txt", "fresh\n");
+    repo.git(&["add", "new.txt"]);
+    repo.git(&["mv", "move-me.txt", "moved.txt"]);
+    std::fs::write(repo.path().join("logo.bin"), [0u8, 159, 146, 150, 0, 1]).unwrap();
+    repo.git(&["add", "logo.bin"]);
+
+    let r = open(&repo).await;
+    let opts = DiffOptions::default();
+
+    let wt = r.diff(&DiffTarget::WorkTree, &opts).await.unwrap();
+    assert_eq!(wt.len(), 1);
+    assert_eq!(wt[0].change, FileChange::Modified);
+    assert_eq!(wt[0].line_stats(), (1, 1));
+
+    let staged = r.diff(&DiffTarget::Staged, &opts).await.unwrap();
+    let path_of = |f: &gf_core::model::FileDiff| f.display_path().cloned().unwrap();
+    let new = staged
+        .iter()
+        .find(|f| path_of(f) == Path::new("new.txt"))
+        .unwrap();
+    assert_eq!(new.change, FileChange::Added);
+    let moved = staged
+        .iter()
+        .find(|f| path_of(f) == Path::new("moved.txt"))
+        .unwrap();
+    assert_eq!(moved.change, FileChange::Renamed { similarity: 100 });
+    assert_eq!(moved.old_path.as_deref(), Some(Path::new("move-me.txt")));
+    let bin = staged
+        .iter()
+        .find(|f| path_of(f) == Path::new("logo.bin"))
+        .unwrap();
+    assert!(bin.is_binary);
+
+    let first = r
+        .diff(&DiffTarget::Commit(root.parse().unwrap()), &opts)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 2, "root commit diffs against the empty tree");
+    assert!(first.iter().all(|f| f.change == FileChange::Added));
+
+    let limited = r
+        .diff(
+            &DiffTarget::Staged,
+            &DiffOptions {
+                paths: vec!["new.txt".into()],
+                ..opts
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(limited.len(), 1);
+}
+
+#[tokio::test]
+async fn diff_of_merge_commit_uses_first_parent() {
+    let repo = repo_with_merge();
+    let r = open(&repo).await;
+    let head = r.log(&LogQuery::head(1)).await.unwrap().remove(0);
+    let files = r
+        .diff(&DiffTarget::Commit(head.id), &DiffOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        files[0].new_path.as_deref(),
+        Some(Path::new("src/feature.rs"))
+    );
+}

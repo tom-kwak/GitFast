@@ -1,5 +1,26 @@
 use std::path::PathBuf;
 
+use super::Oid;
+
+/// HEAD state reported alongside status (`# branch.*` headers).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeadInfo {
+    /// `None` before the first commit.
+    pub oid: Option<Oid>,
+    /// Short branch name; `None` when HEAD is detached.
+    pub branch: Option<String>,
+    /// Upstream short name, e.g. `origin/main`.
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatusReport {
+    pub head: HeadInfo,
+    pub entries: Vec<StatusEntry>,
+}
+
 /// One side (index or working tree) of a status entry, matching the `X`/`Y`
 /// letters of `git status --porcelain=v2`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
