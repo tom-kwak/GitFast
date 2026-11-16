@@ -113,6 +113,13 @@ pub enum Purpose {
         mode: gf_git::ResetMode,
     },
     BisectReset,
+    /// Meld `ids` (newest first) into one commit. Values: summary, details;
+    /// check 0 (when offered): stash uncommitted changes around it.
+    Squash {
+        ids: Vec<gf_core::model::Oid>,
+    },
+    /// A failure report was dismissed; nothing to run.
+    Failure,
     SkipOperation,
     AbortOperation,
     Undo(crate::repo_tab::UndoEntry),
@@ -560,6 +567,11 @@ impl App {
             Purpose::RebaseInteractive { base, items } => self.run_rebase_interactive(base, items),
             Purpose::BisectStart { good } => self
                 .bisect_step(move |r| async move { r.bisect_start("HEAD", good.as_str()).await }),
+            Purpose::Failure => self.restore_focus(),
+            Purpose::Squash { ids } => {
+                let message = super::advanced::commit_message(&value(0), &value(1));
+                self.run_squash(ids, message, check(0))
+            }
             Purpose::BisectReset => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.bisect = None;
@@ -740,6 +752,9 @@ fn validate(purpose: &Purpose, values: &[String]) -> Option<String> {
             Some("a branch is required".into())
         }
         Purpose::TrackLfs if first.is_empty() => Some("enter a pattern such as *.psd".into()),
+        Purpose::Squash { .. } if first.is_empty() => {
+            Some("the squashed commit needs a summary".into())
+        }
         _ => None,
     }
 }

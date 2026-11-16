@@ -4,23 +4,20 @@ use std::path::PathBuf;
 
 use gf_core::Result;
 
-use crate::Repository;
+use crate::backend::{CliBackend, IndexOps, LogOps};
 
-impl Repository {
-    /// Stages the given paths, including deletions (`git add -A -- paths`).
-    pub async fn stage(&self, paths: &[PathBuf]) -> Result<()> {
+impl IndexOps for CliBackend {
+    async fn stage(&self, paths: &[PathBuf]) -> Result<()> {
         self.exec(self.command(["add", "-A"]).paths(paths)).await?;
         Ok(())
     }
 
-    /// Stages every change in the working tree.
-    pub async fn stage_all(&self) -> Result<()> {
+    async fn stage_all(&self) -> Result<()> {
         self.exec(self.command(["add", "-A"])).await?;
         Ok(())
     }
 
-    /// Removes the given paths from the index, keeping working tree content.
-    pub async fn unstage(&self, paths: &[PathBuf]) -> Result<()> {
+    async fn unstage(&self, paths: &[PathBuf]) -> Result<()> {
         let cmd = if self.head_exists().await? {
             self.command(["restore", "--staged"]).paths(paths)
         } else {
@@ -32,7 +29,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn unstage_all(&self) -> Result<()> {
+    async fn unstage_all(&self) -> Result<()> {
         if self.head_exists().await? {
             self.exec(self.command(["reset", "--quiet"])).await?;
         } else {
@@ -42,9 +39,7 @@ impl Repository {
         Ok(())
     }
 
-    /// Throws away unstaged changes to tracked files and deletes the given
-    /// untracked files. Irreversible: callers must confirm with the user.
-    pub async fn discard(&self, tracked: &[PathBuf], untracked: &[PathBuf]) -> Result<()> {
+    async fn discard(&self, tracked: &[PathBuf], untracked: &[PathBuf]) -> Result<()> {
         if !tracked.is_empty() {
             self.exec(self.command(["restore", "--worktree"]).paths(tracked))
                 .await?;
@@ -56,10 +51,7 @@ impl Repository {
         Ok(())
     }
 
-    /// Applies a patch to the index (`cached`) or the working tree.
-    /// `reverse` un-applies it. Used for hunk and line staging with patches
-    /// from [`crate::patch`].
-    pub async fn apply_patch(&self, patch: String, cached: bool, reverse: bool) -> Result<()> {
+    async fn apply_patch(&self, patch: String, cached: bool, reverse: bool) -> Result<()> {
         let mut cmd = self.command(["apply", "--recount", "--whitespace=nowarn"]);
         if cached {
             cmd = cmd.arg("--cached");

@@ -1,6 +1,6 @@
-//! High-level repository operations, grouped by area. Each file adds an
-//! `impl Repository` block, so new areas (stash, rebase, submodule, ...) are
-//! added as new files without touching existing ones.
+//! Git operations, grouped by area: each file holds the area's types and
+//! parsers and the git CLI implementation of its interface
+//! (`impl XxxOps for CliBackend`, see [`crate::backend`]).
 
 pub mod bisect;
 pub mod blame;

@@ -36,7 +36,7 @@ cargo test --workspace
 | 크레이트 | 역할 | 규칙 |
 |---|---|---|
 | `gf-core` | 도메인 모델(`model::{Commit, Oid, Branch, StatusEntry, FileDiff…}`), `GfError`/`Result`, 이벤트 버스(`CoreEvent`, `EventBus`) | UI 의존성 금지 |
-| `gf-git` | git 백엔드. `cli/`는 실행기와 porcelain 파서, `ops/*.rs`는 기능별 고수준 연산, `gix_reader.rs`는 빠른 조회 | 쓰기는 항상 시스템 `git` CLI로 합니다 |
+| `gf-git` | git 백엔드. `backend/`는 영역별 인터페이스(trait)와 `CliBackend`, `ops/*.rs`는 영역별 타입·파서·CLI 구현, `routes.rs`는 명령별 백엔드 선택, `gix_reader.rs`는 gix 조회 | 명령별 백엔드는 [GIX_MIGRATION.md](GIX_MIGRATION.md) 표를 따릅니다. 모든 명령은 CLI 구현을 가집니다 |
 | `gf-config` | 설정(`Settings`), 경로(`AppPaths`) | serde + toml |
 | `gf-watch` | 파일 감시 → `CoreEvent` | |
 | `gf-test-support` | 테스트용 임시 저장소 | |
@@ -179,13 +179,17 @@ mod tests { /* update/nav 단위 테스트 */ }
 
 ## 6. git 연산 추가 (gf-git)
 
-1. `crates/gf-git/src/ops/<topic>.rs`에 `impl Repository { pub async fn … }`를 추가하고 `ops/mod.rs`에 등록합니다.
+1. 인터페이스: `crates/gf-git/src/backend/mod.rs`의 해당 영역 trait(예: `BranchOps`)에 메서드를 추가합니다. 새 영역이면 trait를 새로 만들고 `ops/<topic>.rs`를 `ops/mod.rs`에 등록합니다.
+   - 형태: `fn x(&self, …) -> impl Future<Output = Result<T>> + Send;`
+2. CLI 구현: `ops/<topic>.rs`의 `impl XxxOps for CliBackend`에 `async fn x`로 구현합니다.
    - **읽기**: `self.read(self.command([...]))` → 바이트를 받아 파서에 넘깁니다.
    - **쓰기**: `self.exec(self.command([...]).arg(..))`
    - 사용자 입력이 ref 자리에 들어가면 그 앞에 `--end-of-options`를 붙입니다.
-2. 파서는 순수 함수 `pub fn parse_x(out: &[u8]) -> Result<…>`로 만들고, 실제 git 출력 예시로 단위 테스트합니다(예: `ops/worktree.rs`).
-3. 실제 저장소가 필요한 시나리오는 `crates/gf-git/tests/*.rs`에 `gf-test-support`의 임시 저장소로 테스트합니다(예: `advanced_ops.rs`).
-4. 새 모델 타입이 여러 크레이트에서 쓰이면 `gf-core::model`에 둡니다.
+   - 같은 파일의 보조 함수는 `impl CliBackend { … }`에 둡니다.
+3. 연결: `crates/gf-git/src/routes.rs`에 `Repository`의 `pub async fn x`를 추가해 백엔드를 고릅니다(기본은 `XxxOps::x(&self.cli, …)`). gix 구현을 추가할 때는 [GIX_MIGRATION.md](GIX_MIGRATION.md) §4를 따릅니다.
+4. 파서는 순수 함수 `pub fn parse_x(out: &[u8]) -> Result<…>`로 만들고, 실제 git 출력 예시로 단위 테스트합니다(예: `ops/worktree.rs`).
+5. 실제 저장소가 필요한 시나리오는 `crates/gf-git/tests/*.rs`에 `gf-test-support`의 임시 저장소로 테스트합니다(예: `advanced_ops.rs`).
+6. 새 모델 타입이 여러 크레이트에서 쓰이면 `gf-core::model`에 둡니다.
 
 ## 7. 테스트 작성법
 

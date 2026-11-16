@@ -4,17 +4,18 @@ use std::path::{Path, PathBuf};
 use gf_core::model::{RepoHandle, RepoId};
 use gf_core::{GfError, Result};
 
+use crate::backend::CliBackend;
 use crate::cli::{GitCommand, GitOutput, GitRunner, RunOptions};
 
-/// An opened repository. Read operations are defined in `crate::ops`, one
-/// file per area; anything without a dedicated method can be executed with
+/// An opened repository: the UI's entry point. Each git command is a method
+/// (see `routes.rs`) served by the backend chosen for it — the git CLI or
+/// gix; anything without a dedicated method can be executed with
 /// [`Repository::run`].
 #[derive(Debug, Clone)]
 pub struct Repository {
-    handle: RepoHandle,
-    runner: GitRunner,
+    pub(crate) cli: CliBackend,
     #[cfg(feature = "gix")]
-    pub(crate) gix: Option<crate::gix_reader::GixReader>,
+    pub(crate) gix: Option<crate::backend::GixBackend>,
 }
 
 impl Repository {
@@ -59,31 +60,39 @@ impl Repository {
         };
         Ok(Self {
             #[cfg(feature = "gix")]
-            gix: crate::gix_reader::GixReader::open(&handle.git_dir),
-            handle,
-            runner,
+            gix: if cli_only() {
+                None
+            } else {
+                crate::backend::GixBackend::open(&handle.git_dir, runner.clone(), handle.id)
+            },
+            cli: CliBackend::new(handle, runner),
         })
     }
 
     pub fn handle(&self) -> &RepoHandle {
-        &self.handle
+        self.cli.handle()
+    }
+
+    /// The backends behind this repository, to compare their answers
+    /// (contract tests). The gix one is `None` when `GF_GIT_BACKEND=cli`
+    /// is set or gix could not open the repository.
+    #[cfg(feature = "gix")]
+    pub fn backends(&self) -> (&CliBackend, Option<&crate::backend::GixBackend>) {
+        (&self.cli, self.gix.as_ref())
     }
 
     pub fn id(&self) -> RepoId {
-        self.handle.id
+        self.cli.handle().id
     }
 
     pub fn runner(&self) -> &GitRunner {
-        &self.runner
+        self.cli.runner()
     }
 
     /// Directory git commands run in: the working tree, or the git dir for
     /// bare repositories.
     pub fn cwd(&self) -> &Path {
-        self.handle
-            .workdir
-            .as_deref()
-            .unwrap_or(&self.handle.git_dir)
+        self.cli.cwd()
     }
 
     /// A command bound to this repository (cwd + repo id for event tagging).
@@ -92,9 +101,7 @@ impl Repository {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        GitCommand::new(args)
-            .current_dir(self.cwd())
-            .repo(self.id())
+        self.cli.command(args)
     }
 
     /// Runs any git subcommand in this repository. This is the generic path
@@ -104,26 +111,16 @@ impl Repository {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.runner.run(&self.command(args).echo_stdout()).await
+        self.runner().run(&self.command(args).echo_stdout()).await
     }
 
     pub async fn run_command(&self, cmd: &GitCommand, opts: RunOptions) -> Result<GitOutput> {
-        self.runner.run_with(cmd, opts).await
+        self.runner().run_with(cmd, opts).await
     }
+}
 
-    /// Runs a command on behalf of the user: its output is shown in the
-    /// command log. Fails on a non-zero exit code.
-    pub(crate) async fn exec(&self, cmd: GitCommand) -> Result<GitOutput> {
-        self.runner.run(&cmd.echo_stdout()).await
-    }
-
-    /// Like [`Self::exec`] with progress reporting and cancellation.
-    pub(crate) async fn exec_with(&self, cmd: GitCommand, opts: RunOptions) -> Result<GitOutput> {
-        self.runner.run_with(&cmd.echo_stdout(), opts).await
-    }
-
-    /// Runs a read-only command and returns its stdout.
-    pub(crate) async fn read(&self, cmd: GitCommand) -> Result<Vec<u8>> {
-        Ok(self.runner.run(&cmd.read_only()).await?.stdout)
-    }
+/// `GF_GIT_BACKEND=cli` turns gix off: every command uses the git CLI.
+#[cfg(feature = "gix")]
+fn cli_only() -> bool {
+    std::env::var("GF_GIT_BACKEND").is_ok_and(|v| v.eq_ignore_ascii_case("cli"))
 }

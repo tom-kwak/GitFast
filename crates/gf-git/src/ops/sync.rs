@@ -3,7 +3,7 @@
 
 use gf_core::Result;
 
-use crate::Repository;
+use crate::backend::{CliBackend, SyncOps};
 use crate::cli::RunOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -31,9 +31,8 @@ pub struct PushOptions {
     pub tags: bool,
 }
 
-impl Repository {
-    /// `git fetch --prune` from one remote or all of them.
-    pub async fn fetch(&self, remote: Option<&str>, opts: RunOptions) -> Result<()> {
+impl SyncOps for CliBackend {
+    async fn fetch(&self, remote: Option<&str>, opts: RunOptions) -> Result<()> {
         let mut cmd = self.command(["fetch", "--prune", "--progress"]);
         cmd = match remote {
             Some(r) => cmd.arg(r),
@@ -43,7 +42,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn pull(&self, mode: PullMode, opts: RunOptions) -> Result<()> {
+    async fn pull(&self, mode: PullMode, opts: RunOptions) -> Result<()> {
         let mut cmd = self.command(["pull", "--progress"]);
         cmd = match mode {
             PullMode::Config => cmd,
@@ -55,7 +54,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn push(&self, push: &PushOptions, opts: RunOptions) -> Result<()> {
+    async fn push(&self, push: &PushOptions, opts: RunOptions) -> Result<()> {
         let mut cmd = self.command(["push", "--progress"]);
         if push.set_upstream {
             cmd = cmd.arg("--set-upstream");

@@ -3,7 +3,7 @@
 use gf_core::model::{StashEntry, Timestamp};
 use gf_core::{GfError, Result};
 
-use crate::Repository;
+use crate::backend::{CliBackend, StashOps};
 
 #[derive(Debug, Clone, Default)]
 pub struct StashOptions {
@@ -46,16 +46,15 @@ pub fn parse_stash_list(out: &[u8]) -> Result<Vec<StashEntry>> {
         .collect()
 }
 
-impl Repository {
-    pub async fn stashes(&self) -> Result<Vec<StashEntry>> {
+impl StashOps for CliBackend {
+    async fn stashes(&self) -> Result<Vec<StashEntry>> {
         let out = self
             .read(self.command(["stash", "list", STASH_FORMAT]))
             .await?;
         parse_stash_list(&out)
     }
 
-    /// Saves local changes to a new stash entry.
-    pub async fn stash_push(&self, opts: &StashOptions) -> Result<()> {
+    async fn stash_push(&self, opts: &StashOptions) -> Result<()> {
         let mut cmd = self.command(["stash", "push"]);
         if opts.include_untracked {
             cmd = cmd.arg("--include-untracked");
@@ -70,23 +69,19 @@ impl Repository {
         Ok(())
     }
 
-    /// Applies a stash, keeping it in the list. `--index` restores what
-    /// was staged as staged.
-    pub async fn stash_apply(&self, index: usize) -> Result<()> {
+    async fn stash_apply(&self, index: usize) -> Result<()> {
         self.exec(self.command(["stash", "apply", "--index", &format!("stash@{{{index}}}")]))
             .await?;
         Ok(())
     }
 
-    /// Applies a stash and removes it when that succeeded.
-    pub async fn stash_pop(&self, index: usize) -> Result<()> {
+    async fn stash_pop(&self, index: usize) -> Result<()> {
         self.exec(self.command(["stash", "pop", "--index", &format!("stash@{{{index}}}")]))
             .await?;
         Ok(())
     }
 
-    /// Deletes a stash entry. Irreversible from the UI's point of view.
-    pub async fn stash_drop(&self, index: usize) -> Result<()> {
+    async fn stash_drop(&self, index: usize) -> Result<()> {
         self.exec(self.command(["stash", "drop", &format!("stash@{{{index}}}")]))
             .await?;
         Ok(())

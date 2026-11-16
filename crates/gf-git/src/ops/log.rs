@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use gf_core::Result;
 use gf_core::model::Commit;
 
-use crate::Repository;
+use crate::backend::{CliBackend, LogOps};
 use crate::cli::parse::log::{LOG_ARGS, parse_log};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -50,8 +50,8 @@ impl LogQuery {
         }
     }
 
-    /// True when only revision walking is needed (no filters), which the
-    /// in-process gix reader can answer without spawning git.
+    /// True when only revision walking from plain revisions is needed (no
+    /// filters, ranges or ordering options).
     pub fn is_plain_walk(&self) -> bool {
         self.order == LogOrder::Default
             && !self.all_refs
@@ -106,40 +106,8 @@ impl LogQuery {
     }
 }
 
-impl Repository {
-    pub async fn log(&self, query: &LogQuery) -> Result<Vec<Commit>> {
-        match self.log_fast(query).await {
-            Some(Ok(commits)) => Ok(commits),
-            Some(Err(e)) => {
-                tracing::debug!(error = %e, "fast log failed, using git CLI");
-                self.log_cli(query).await
-            }
-            None => self.log_cli(query).await,
-        }
-    }
-
-    /// The in-process (gix) path alone. `None` when it does not apply: the
-    /// `gix` feature is off, gix could not open the repository, or the query
-    /// is not a plain walk.
-    pub async fn log_fast(&self, query: &LogQuery) -> Option<Result<Vec<Commit>>> {
-        #[cfg(feature = "gix")]
-        if query.is_plain_walk() {
-            let gix = self.gix.clone()?;
-            let q = query.clone();
-            return Some(
-                tokio::task::spawn_blocking(move || gix.log(&q))
-                    .await
-                    .unwrap_or_else(|e| Err(gf_core::GfError::Other(format!("gix task: {e}")))),
-            );
-        }
-        #[cfg(not(feature = "gix"))]
-        let _ = query;
-        None
-    }
-
-    /// `log` through the git CLI only. Public so the gix fast path can be
-    /// checked against it.
-    pub async fn log_cli(&self, query: &LogQuery) -> Result<Vec<Commit>> {
+impl LogOps for CliBackend {
+    async fn log(&self, query: &LogQuery) -> Result<Vec<Commit>> {
         let cmd = self
             .command(query.to_args())
             .paths(&query.paths)
@@ -166,8 +134,7 @@ impl Repository {
         parse_log(&out.stdout)
     }
 
-    /// False on an unborn branch (repository without commits).
-    pub async fn head_exists(&self) -> Result<bool> {
+    async fn head_exists(&self) -> Result<bool> {
         let cmd = self
             .command(["rev-parse", "--verify", "--quiet", "HEAD"])
             .read_only()

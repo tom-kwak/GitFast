@@ -3,7 +3,7 @@
 use gf_core::Result;
 use gf_core::model::Oid;
 
-use crate::Repository;
+use crate::backend::{CliBackend, CommitOps, LogOps};
 
 #[derive(Debug, Clone, Default)]
 pub struct CommitOptions {
@@ -15,11 +15,8 @@ pub struct CommitOptions {
     pub allow_empty: bool,
 }
 
-impl Repository {
-    /// Commits the index with `message` (passed on stdin, so any text is
-    /// safe). Returns the new commit id. Hooks run as usual. With `amend`, an
-    /// empty message keeps the last commit's message.
-    pub async fn commit(&self, message: &str, opts: &CommitOptions) -> Result<Oid> {
+impl CommitOps for CliBackend {
+    async fn commit(&self, message: &str, opts: &CommitOptions) -> Result<Oid> {
         let keep_message = opts.amend && message.trim().is_empty();
         let mut cmd = if keep_message {
             self.command(["commit", "--amend", "--no-edit"])
@@ -40,9 +37,7 @@ impl Repository {
         String::from_utf8_lossy(&head).trim().parse()
     }
 
-    /// Full message of HEAD, e.g. to prefill an amend. `None` before the
-    /// first commit.
-    pub async fn head_message(&self) -> Result<Option<String>> {
+    async fn head_message(&self) -> Result<Option<String>> {
         if !self.head_exists().await? {
             return Ok(None);
         }

@@ -5,6 +5,10 @@
 //! The list is virtualized (only visible rows are built) and the graph
 //! column has a maximum width, so repositories with many merged branches
 //! still show the commit text.
+//!
+//! History is loaded a page at a time ([`HISTORY_PAGE`] commits): scrolling
+//! to the end, or moving the selection onto the last row, asks the app for
+//! the next page ([`Output::LoadMore`]).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,12 +17,12 @@ use gf_core::model::{Commit, Oid, RefKind};
 use gf_git::graph::GraphRow;
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, column, container, row};
-use iced::{Color, Element, Length, Padding};
+use iced::{Color, Element, Length, Padding, Task};
 
 use crate::feature::{Cx, Feature, Update};
 use crate::features::context_menu::{Entry, Menu};
 use crate::nav::{self, Key, Moved, Nav};
-use crate::repo_tab::{History, Snapshot};
+use crate::repo_tab::{HISTORY_PAGE, History, Snapshot};
 use crate::theme::{Tokens, style};
 use crate::widgets::graph_canvas;
 use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
@@ -28,6 +32,8 @@ use crate::widgets::{self, colored, dim, format, mono};
 pub const LIST_ID: &str = "gf-history-list";
 /// Ref badges shown per commit before collapsing into `+N`.
 const MAX_BADGES: usize = 2;
+/// Start loading the next page this close (px) to the end of the list.
+const NEAR_END_PX: f32 = 200.0;
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -47,6 +53,12 @@ pub struct State {
     /// Author/date/message box of the selected commit; closed by default so
     /// the list keeps its space. The action buttons are always shown.
     show_details: bool,
+    /// Commits to load for the snapshot's history (0 = one page).
+    head_limit: usize,
+    /// Commits to load for `revision` (0 = one page).
+    revision_limit: usize,
+    /// The next page was requested and has not arrived yet.
+    loading_more: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +83,8 @@ pub enum Message {
     RightClick(Oid),
     /// The `actions ▾` button.
     OpenActions,
+    /// Load the next page of history.
+    LoadMore,
 }
 
 /// Operations on several selected commits.
@@ -78,8 +92,10 @@ pub enum Message {
 pub enum BatchAction {
     CherryPick,
     Revert,
-    /// Meld the selected commits into one (interactive rebase).
+    /// Meld the selected commits into one (squash dialog).
     Squash,
+    /// Open the rebase editor with the selection preset to squash.
+    SquashInEditor,
     BranchAtNewest,
     CopyIds,
     Clear,
@@ -96,6 +112,8 @@ pub enum CommitAction {
     BisectFrom,
     /// Move the current branch to this commit (`git reset`).
     Reset,
+    /// Meld this commit into its parent (squash dialog).
+    SquashIntoPrevious,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +135,9 @@ pub enum Output {
         show: Option<Oid>,
         menu: Menu<Message>,
     },
+    /// Reload the history being shown with the (already raised) limit:
+    /// the snapshot's when no revision is shown, else the revision's.
+    LoadMore,
 }
 
 impl State {
@@ -126,6 +147,41 @@ impl State {
         self.revision = revision;
         self.data = None;
         self.scroll = ScrollPos::default();
+        self.revision_limit = 0;
+        self.loading_more = false;
+    }
+
+    /// How many commits to load for the snapshot's history.
+    pub fn head_limit(&self) -> usize {
+        page_or(self.head_limit)
+    }
+
+    /// How many commits to load for the revision being shown.
+    pub fn revision_limit(&self) -> usize {
+        page_or(self.revision_limit)
+    }
+
+    /// A snapshot (with its history) arrived, or failed to.
+    pub fn snapshot_loaded(&mut self) {
+        if self.revision.is_none() {
+            self.loading_more = false;
+        }
+    }
+
+    /// Raises the limit of the history being shown by one page; `false`
+    /// when there is nothing more or a page is already on its way.
+    fn request_more(&mut self, more: bool) -> bool {
+        if !more || self.loading_more || self.loading {
+            return false;
+        }
+        let limit = if self.revision.is_some() {
+            &mut self.revision_limit
+        } else {
+            &mut self.head_limit
+        };
+        *limit = page_or(*limit) + HISTORY_PAGE;
+        self.loading_more = true;
+        true
     }
 
     /// Highlights `oid` in the list (e.g. picked from blame).
@@ -184,11 +240,31 @@ impl State {
         message: Message,
         snap: Option<&Snapshot>,
     ) -> Update<Message, Output> {
-        let commits: Vec<Commit> = match snap.and_then(|s| self.history(s)) {
-            Some(h) => h.commits.clone(),
-            None => Vec::new(),
+        let (commits, more): (Vec<Commit>, bool) = match snap.and_then(|s| self.history(s)) {
+            Some(h) => (h.commits.clone(), h.more),
+            None => (Vec::new(), false),
         };
-        self.update_list(message, &commits)
+        // Reaching the end (by scrolling or by moving onto the last row)
+        // loads the next page.
+        let at_end = match &message {
+            Message::Scrolled(pos) => pos.near_end(NEAR_END_PX),
+            Message::Select(id) | Message::SelectRange(id) => {
+                commits.last().is_some_and(|c| &c.id == id)
+            }
+            _ => false,
+        };
+        if matches!(message, Message::LoadMore) {
+            return if self.request_more(more) {
+                Update::output(Output::LoadMore)
+            } else {
+                Update::none()
+            };
+        }
+        let mut up = self.update_list(message, &commits);
+        if at_end && more && !self.loading_more && !self.loading {
+            up.task = Task::batch([up.task, Task::done(Message::LoadMore)]);
+        }
+        up
     }
 
     /// `update_with` for a given list of the commits shown (newest first).
@@ -293,10 +369,16 @@ impl State {
         if self.revision.as_deref() == Some(revision) {
             self.data = Some(data);
             self.loading = false;
+            self.loading_more = false;
         }
     }
 
     pub fn load_failed(&mut self) {
+        // A failed next page keeps what is already shown.
+        if self.loading_more {
+            self.loading_more = false;
+            return;
+        }
         self.loading = false;
         self.revision = None;
     }
@@ -308,6 +390,11 @@ impl State {
             (Some(_), None) => None,
         }
     }
+}
+
+/// `limit`, or one page when unset.
+fn page_or(limit: usize) -> usize {
+    if limit == 0 { HISTORY_PAGE } else { limit }
 }
 
 /// Row height for the list: one line of text plus padding.
@@ -477,6 +564,12 @@ fn commit_menu(c: &Commit) -> Menu<Message> {
                 act(CommitAction::Revert),
             ),
             Entry::caution(
+                'q',
+                "squash into previous…",
+                "meld this commit into the one before it",
+                act(CommitAction::SquashIntoPrevious),
+            ),
+            Entry::caution(
                 'i',
                 "rebase -i from here…",
                 "reorder / squash / reword / drop the commits after this one",
@@ -521,9 +614,15 @@ fn batch_menu(commits: &[Commit]) -> Menu<Message> {
             ),
             Entry::caution(
                 'q',
-                "squash into one…",
-                "meld them into a single commit (opens the rebase editor)",
+                format!("squash {n} into one…"),
+                "meld them into a single commit with a new message",
                 b(BatchAction::Squash),
+            ),
+            Entry::caution(
+                'i',
+                "squash in rebase editor…",
+                "the full plan: reorder, reword or drop the others too",
+                b(BatchAction::SquashInEditor),
             ),
             Entry::Separator,
             Entry::item(
@@ -660,7 +759,8 @@ impl Feature for State {
             | Message::ToggleMark(_)
             | Message::Batch(_)
             | Message::RightClick(_)
-            | Message::OpenActions => Update::none(),
+            | Message::OpenActions
+            | Message::LoadMore => Update::none(),
             Message::Scrolled(pos) => {
                 self.scroll = pos;
                 Update::none()
@@ -801,7 +901,9 @@ impl Feature for State {
         {
             content = content.push(detail(t, c, self.show_details));
         }
-        widgets::panel(t, format!("HISTORY ({})", history.commits.len()), content)
+        let count = history.commits.len();
+        let more = if history.more { "+" } else { "" };
+        widgets::panel(t, format!("HISTORY ({count}{more})"), content)
     }
 }
 
@@ -829,12 +931,84 @@ mod tests {
         assert!(matches!(s.update(Message::CopyId).output, Some(Output::CopyId(o)) if o == oid));
     }
 
+    fn shown(commits: Vec<Commit>, more: bool) -> State {
+        let mut s = State::default();
+        s.set_revision(Some("refs/heads/x".into()));
+        s.loaded(
+            "refs/heads/x",
+            Arc::new(History {
+                more,
+                ..History::new(commits)
+            }),
+        );
+        s
+    }
+
+    #[test]
+    fn scrolling_to_the_end_loads_one_more_page() {
+        let snap = Snapshot::default();
+        let mut s = shown(commits(5), true);
+        assert_eq!(s.revision_limit(), HISTORY_PAGE);
+        let near_top = ScrollPos {
+            offset: 0.0,
+            height: 100.0,
+            content: 2000.0,
+        };
+        let up = s.update_with(Message::Scrolled(near_top), Some(&snap));
+        assert!(up.output.is_none());
+        assert!(!s.loading_more);
+
+        let at_end = ScrollPos {
+            offset: 1850.0,
+            ..near_top
+        };
+        let _ = s.update_with(Message::Scrolled(at_end), Some(&snap));
+        // The scroll asks (through a task) for the next page.
+        let up = s.update_with(Message::LoadMore, Some(&snap));
+        assert!(matches!(up.output, Some(Output::LoadMore)));
+        assert_eq!(s.revision_limit(), 2 * HISTORY_PAGE);
+        assert_eq!(s.head_limit(), HISTORY_PAGE, "only the shown history grows");
+
+        // While the page is on its way, no second request.
+        assert!(
+            s.update_with(Message::LoadMore, Some(&snap))
+                .output
+                .is_none()
+        );
+        s.loaded(
+            "refs/heads/x",
+            Arc::new(History {
+                more: false,
+                ..History::new(commits(8))
+            }),
+        );
+        assert!(!s.loading_more);
+        // The whole history is shown: nothing more to load.
+        assert!(
+            s.update_with(Message::LoadMore, Some(&snap))
+                .output
+                .is_none()
+        );
+        assert_eq!(s.revision_limit(), 2 * HISTORY_PAGE);
+    }
+
+    #[test]
+    fn failed_page_keeps_the_history_shown() {
+        let snap = Snapshot::default();
+        let mut s = shown(commits(3), true);
+        let _ = s.update_with(Message::LoadMore, Some(&snap));
+        s.load_failed();
+        assert_eq!(s.revision(), Some("refs/heads/x"));
+        assert!(!s.loading_more);
+    }
+
     #[test]
     fn changing_revision_resets_scroll() {
         let mut s = State::default();
         let _ = s.update(Message::Scrolled(ScrollPos {
             offset: 500.0,
             height: 300.0,
+            ..ScrollPos::default()
         }));
         s.set_revision(Some("refs/heads/x".into()));
         assert_eq!(s.scroll, ScrollPos::default());

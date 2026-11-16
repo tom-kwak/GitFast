@@ -195,6 +195,7 @@ mod tests {
         let pos = ScrollPos {
             offset: 100.0,
             height: 50.0,
+            ..ScrollPos::default()
         };
         // Rows of 10px: 10..15 are visible.
         assert_eq!(reveal_offset(pos, 12, 10.0), None);

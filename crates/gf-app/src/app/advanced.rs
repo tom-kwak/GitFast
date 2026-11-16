@@ -110,12 +110,13 @@ impl App {
             }
             Err(e) => {
                 self.log
-                    .note(NoteKind::Error, format!("{label} failed"), vec![e]);
+                    .note(NoteKind::Error, format!("{label} failed"), vec![e.clone()]);
                 self.flash(
                     NoteKind::Error,
                     format!("✗ {} — see log", truncate(&label, 40)),
                 );
                 self.settings.appearance.show_command_log = true;
+                return Task::batch([refresh, self.show_failure(&label, &e)]);
             }
         }
         refresh
@@ -217,6 +218,22 @@ impl App {
                     .severity(crate::features::dialog::Severity::Change)
                     .choice("what happens to their changes:", modes, 0),
                 )
+            }
+            CommitAction::SquashIntoPrevious => {
+                let parent = self
+                    .active_tab()
+                    .and_then(|t| t.history.find(&oid, t.snapshot.as_deref()))
+                    .and_then(|c| (c.parents.len() == 1).then(|| c.parents[0].clone()));
+                match parent {
+                    Some(parent) => self.ask_squash(vec![oid, parent], 2),
+                    None => {
+                        self.flash(
+                            NoteKind::Error,
+                            "nothing to squash into: this is the first commit or a merge",
+                        );
+                        Task::none()
+                    }
+                }
             }
             CommitAction::BisectFrom => self.confirm(Confirm::change(
                 "bisect",
@@ -328,7 +345,14 @@ impl App {
                     Purpose::Revert(newest_first),
                 ))
             }
-            BatchAction::Squash => {
+            BatchAction::Squash => match self.fill_gaps(&commits) {
+                Ok(ids) => self.ask_squash(ids, n),
+                Err(e) => {
+                    self.flash(NoteKind::Error, e);
+                    Task::none()
+                }
+            },
+            BatchAction::SquashInEditor => {
                 if !is_chain(&commits) {
                     self.flash(
                         NoteKind::Error,
@@ -442,8 +466,11 @@ impl App {
                 }
             }
             Err(e) => {
-                self.log.note(NoteKind::Error, "bisect failed", vec![e]);
+                self.log
+                    .note(NoteKind::Error, "bisect failed", vec![e.clone()]);
                 self.flash(NoteKind::Error, "✗ bisect — see log");
+                let report = self.show_failure("bisect", &e);
+                return Task::batch([self.request_refresh(id), report]);
             }
         }
         self.request_refresh(id)
@@ -585,6 +612,100 @@ impl App {
             true,
             move |r| async move { r.rebase_interactive(Some(&base), &items).await },
         )
+    }
+
+    // --------------------------------------------------------------- squash
+
+    /// The selected commits (list order, newest first) plus any commits
+    /// between them on the first-parent line, so a ⌘-click selection with
+    /// gaps still squashes one continuous range.
+    fn fill_gaps(&self, commits: &[Commit]) -> Result<Vec<Oid>, String> {
+        if is_chain(commits) {
+            return Ok(commits.iter().map(|c| c.id.clone()).collect());
+        }
+        let tab = self.active_tab().ok_or("no repository open")?;
+        let snap = tab.snapshot.as_deref();
+        let wanted: Vec<&Oid> = commits.iter().map(|c| &c.id).collect();
+        let not_a_line = || {
+            "the selected commits are not on one line of history — select a continuous range"
+                .to_owned()
+        };
+        let mut ids = Vec::new();
+        let mut current = commits.first().ok_or_else(not_a_line)?.clone();
+        loop {
+            ids.push(current.id.clone());
+            if wanted.iter().all(|w| ids.contains(w)) {
+                return Ok(ids);
+            }
+            if ids.len() > MAX_SQUASH_GAP + wanted.len() {
+                return Err(not_a_line());
+            }
+            current = current
+                .parents
+                .first()
+                .and_then(|p| tab.history.find(p, snap))
+                .ok_or_else(not_a_line)?
+                .clone();
+        }
+    }
+
+    /// Checks the range in the background, then asks with the squash
+    /// dialog (see [`Self::on_squash_preview`]).
+    fn ask_squash(&mut self, ids: Vec<Oid>, selected: usize) -> Task<Message> {
+        let Some(tab) = self.active_tab() else {
+            return Task::none();
+        };
+        let repo = tab.repo.clone();
+        Task::perform(
+            {
+                let ids = ids.clone();
+                async move { repo.squash_preview(&ids).await.map_err(|e| e.to_string()) }
+            },
+            move |result| Message::SquashPreviewed {
+                ids: ids.clone(),
+                selected,
+                result,
+            },
+        )
+    }
+
+    pub(super) fn on_squash_preview(
+        &mut self,
+        ids: Vec<Oid>,
+        selected: usize,
+        result: Result<gf_git::SquashPreview, String>,
+    ) -> Task<Message> {
+        let preview = match result {
+            Ok(p) => p,
+            Err(e) => {
+                self.flash(NoteKind::Error, format!("cannot squash: {e}"));
+                return Task::none();
+            }
+        };
+        let dirty = self
+            .active_tab()
+            .and_then(|t| t.snapshot.as_deref())
+            .is_some_and(|s| {
+                s.status
+                    .entries
+                    .iter()
+                    .any(|e| !matches!(e, gf_core::model::StatusEntry::Untracked { .. }))
+            });
+        let (summary, details) = squash_message(&preview.commits);
+        let dialog = squash_dialog(&preview, selected, dirty, &summary, &details, ids);
+        self.open_dialog(dialog)
+    }
+
+    pub(super) fn run_squash(
+        &mut self,
+        ids: Vec<Oid>,
+        message: String,
+        autostash: bool,
+    ) -> Task<Message> {
+        let n = ids.len();
+        self.integrate_op(format!("squash {n} commits"), true, move |r| async move {
+            r.squash(&ids, &message, autostash).await
+        })
     }
 
     // ------------------------------------------------------------ conflicts
@@ -788,8 +909,190 @@ fn short_list(oids: &[Oid]) -> String {
 
 /// Whether `commits` (newest first) are one first-parent chain, so the diff
 /// from the oldest's parent to the newest holds exactly their changes.
+/// Commits `fill_gaps` may add between the selected ones.
+const MAX_SQUASH_GAP: usize = 200;
+
+/// `summary` alone, or `summary`, a blank line and `details`.
+pub(super) fn commit_message(summary: &str, details: &str) -> String {
+    let (summary, details) = (summary.trim(), details.trim_end());
+    if details.trim().is_empty() {
+        summary.to_owned()
+    } else {
+        format!("{summary}\n\n{details}")
+    }
+}
+
+/// Suggested message for melding `commits` (oldest first): the oldest's
+/// summary, then its body and a `- summary` line (with the body
+/// indented) for each later commit.
+fn squash_message(commits: &[Commit]) -> (String, String) {
+    let Some((oldest, rest)) = commits.split_first() else {
+        return (String::new(), String::new());
+    };
+    let mut details = Vec::new();
+    if !oldest.body.trim().is_empty() {
+        details.push(oldest.body.trim_end().to_owned());
+        details.push(String::new());
+    }
+    for c in rest {
+        details.push(format!("- {}", c.summary));
+        details.extend(
+            c.body
+                .trim_end()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| format!("  {l}")),
+        );
+    }
+    (
+        oldest.summary.clone(),
+        details.join("\n").trim_end().to_owned(),
+    )
+}
+
+fn squash_dialog(
+    preview: &gf_git::SquashPreview,
+    selected: usize,
+    dirty: bool,
+    summary: &str,
+    details: &str,
+    ids: Vec<Oid>,
+) -> crate::features::dialog::Dialog<Purpose> {
+    use crate::features::dialog::{Dialog, Severity};
+    let n = preview.commits.len();
+    let mut body = vec![format!("Meld these {n} commits (oldest first) into one:")];
+    body.extend(
+        preview
+            .commits
+            .iter()
+            .take(8)
+            .map(|c| format!("  {} {}", c.id.short(), truncate(&c.summary, 60))),
+    );
+    if n > 8 {
+        body.push(format!("  … and {} more", n - 8));
+    }
+    if n > selected {
+        body.push(format!(
+            "Includes {} commit(s) between the ones you selected.",
+            n - selected
+        ));
+    }
+    if preview.base.is_none() {
+        body.push("Starts at the first commit of the repository.".into());
+    }
+    if preview.pushed > 0 {
+        body.push(format!(
+            "⚠ {} of them are already on a remote: publishing needs a force push.",
+            preview.pushed
+        ));
+    }
+    body.push("The oldest commit's author and date are kept; undo restores the commits.".into());
+    let mut dialog = Dialog::confirm(
+        format!("Squash {n} commits"),
+        body,
+        "Squash",
+        Purpose::Squash { ids },
+    )
+    .severity(Severity::Change)
+    .field(
+        "summary",
+        summary,
+        "one line: what the combined commit does",
+    )
+    .area("details", details, "details (optional)");
+    if dirty {
+        dialog = dialog.check(
+            "stash my uncommitted changes and restore them afterwards",
+            true,
+        );
+    }
+    dialog
+}
+
 fn is_chain(commits: &[Commit]) -> bool {
     commits
         .windows(2)
         .all(|w| w[0].parents.first() == Some(&w[1].id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gf_core::model::{Signature, Timestamp};
+
+    fn commit(n: u8, parent: Option<u8>, summary: &str, body: &str) -> Commit {
+        let sig = Signature {
+            name: String::new(),
+            email: String::new(),
+            time: Timestamp {
+                seconds: 0,
+                offset_minutes: 0,
+            },
+        };
+        let id = |n: u8| -> Oid { format!("{n:040x}").parse().expect("oid") };
+        Commit {
+            id: id(n),
+            parents: parent.map(id).into_iter().collect(),
+            author: sig.clone(),
+            committer: sig,
+            summary: summary.into(),
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn squash_message_keeps_the_oldest_summary_and_lists_the_rest() {
+        let commits = [
+            commit(1, None, "feat: login", "Adds the form."),
+            commit(2, Some(1), "fix typo", ""),
+            commit(3, Some(2), "wip", "half done\n\nmore"),
+        ];
+        let (summary, details) = squash_message(&commits);
+        assert_eq!(summary, "feat: login");
+        assert_eq!(
+            details,
+            "Adds the form.\n\n- fix typo\n- wip\n  half done\n  more"
+        );
+        assert_eq!(
+            squash_message(&commits[1..2]),
+            ("fix typo".into(), String::new())
+        );
+    }
+
+    #[test]
+    fn commit_message_joins_summary_and_details() {
+        assert_eq!(commit_message(" a ", ""), "a");
+        assert_eq!(commit_message("a", "  \n"), "a");
+        assert_eq!(commit_message("a", "b\nc\n"), "a\n\nb\nc");
+    }
+
+    #[test]
+    fn squash_dialog_warns_and_offers_the_stash() {
+        let preview = gf_git::SquashPreview {
+            base: None,
+            commits: vec![commit(1, None, "a", ""), commit(2, Some(1), "b", "")],
+            pushed: 1,
+        };
+        let ids = preview.commits.iter().map(|c| c.id.clone()).collect();
+        let d = squash_dialog(&preview, 1, true, "a", "- b", ids);
+        let body = d.body.join("\n");
+        assert!(body.contains("Includes 1 commit(s) between"));
+        assert!(body.contains("first commit of the repository"));
+        assert!(body.contains("force push"));
+        assert_eq!(d.fields[0].value, "a");
+        assert_eq!(d.checks.len(), 1, "stash offered for a dirty tree");
+
+        let d = squash_dialog(&preview, 2, false, "a", "", Vec::new());
+        assert!(d.checks.is_empty());
+        assert!(!d.body.join("\n").contains("between"));
+    }
+
+    #[test]
+    fn chains_follow_first_parents() {
+        let a = commit(1, None, "a", "");
+        let b = commit(2, Some(1), "b", "");
+        let c = commit(3, Some(2), "c", "");
+        assert!(is_chain(&[c.clone(), b, a.clone()]));
+        assert!(!is_chain(&[c, a]));
+    }
 }
