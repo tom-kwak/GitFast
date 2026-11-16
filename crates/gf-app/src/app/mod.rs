@@ -186,6 +186,14 @@ pub enum Message {
     },
     /// Ask to undo the latest undoable step of the active tab.
     Undo,
+    /// A drag on the file list / diff divider starts.
+    ResizeListStart,
+    /// The divider is being dragged: pixels from where the drag started.
+    ResizeList(f32),
+    /// The divider was let go: remember the width.
+    ResizeListDone,
+    /// Double-click on the divider: back to the default width.
+    ResizeListReset,
     GitFinished {
         repo: Option<RepoId>,
         args: Vec<String>,
@@ -199,6 +207,8 @@ pub struct App {
     paths: AppPaths,
     settings: Settings,
     tokens: Tokens,
+    /// List width when the divider drag started (see `ResizeList`).
+    list_drag_start: Option<f32>,
     bus: EventBus,
     runner: GitRunner,
     tabs: Vec<RepoTab>,
@@ -275,6 +285,7 @@ impl App {
             paths,
             settings,
             tokens,
+            list_drag_start: None,
             bus,
             runner,
             tabs: Vec::new(),
@@ -702,6 +713,28 @@ impl App {
                 result,
             } => self.on_squash_preview(ids, selected, result),
             Message::Undo => self.ask_undo(),
+            Message::ResizeListStart => {
+                self.list_drag_start = Some(self.settings.appearance.list_cols);
+                Task::none()
+            }
+            Message::ResizeList(dx) => {
+                let start = *self
+                    .list_drag_start
+                    .get_or_insert(self.settings.appearance.list_cols);
+                self.settings.appearance.list_cols =
+                    resized_list_cols(start, dx, self.tokens.cols(1));
+                Task::none()
+            }
+            Message::ResizeListDone => {
+                self.list_drag_start = None;
+                self.save_settings();
+                Task::none()
+            }
+            Message::ResizeListReset => {
+                self.settings.appearance.list_cols = gf_config::DEFAULT_LIST_COLS;
+                self.save_settings();
+                Task::none()
+            }
             Message::GitFinished {
                 repo,
                 args,
@@ -937,12 +970,13 @@ impl App {
                         tab.bisect.as_ref(),
                     )
                 }) {
-                    Some(banner) => {
-                        column![banner.map(Message::Banner), main_area(t, tab, cx, active)]
-                            .spacing(4)
-                            .into()
-                    }
-                    None => main_area(t, tab, cx, active),
+                    Some(banner) => column![
+                        banner.map(Message::Banner),
+                        main_area(t, tab, cx, active, self.settings.appearance.list_cols)
+                    ]
+                    .spacing(4)
+                    .into(),
+                    None => main_area(t, tab, cx, active, self.settings.appearance.list_cols),
                 };
                 row![left, main].spacing(4).height(Length::Fill).into()
             }
@@ -1066,13 +1100,44 @@ impl App {
 /// Width of the file list column (columns of text), the same in HISTORY
 /// (commit files) and WORKING TREE (changed files), so the divider to the
 /// diff stays put when switching between them.
-const LIST_COLS: usize = 34;
+/// Narrowest and widest the file list beside the diff can be dragged
+/// (character columns).
+const MIN_LIST_COLS: f32 = 18.0;
+const MAX_LIST_COLS: f32 = 120.0;
+
+/// The list width after dragging the divider `dx` pixels from a drag that
+/// started at `start` columns.
+fn resized_list_cols(start: f32, dx: f32, col_px: f32) -> f32 {
+    (start + dx / col_px).clamp(MIN_LIST_COLS, MAX_LIST_COLS)
+}
+
+/// The file list beside the diff, the divider to resize it and the diff:
+/// one width for HISTORY and WORKING TREE.
+fn list_split<'a>(
+    t: &'a Tokens,
+    list_cols: f32,
+    list: Element<'a, Message>,
+    diff: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let divider = widgets::splitter::Splitter::new(Message::ResizeList, t.border, t.accent())
+        .on_press(Message::ResizeListStart)
+        .on_release(Message::ResizeListDone)
+        .on_reset(Message::ResizeListReset);
+    row![
+        container(list).width(Length::Fixed(t.cols(1) * list_cols)),
+        divider,
+        container(diff).width(Length::Fill),
+    ]
+    .height(Length::Fill)
+    .into()
+}
 
 fn main_area<'a>(
     t: &'a Tokens,
     tab: &'a RepoTab,
     cx: Cx<'a>,
     active: Pane,
+    list_cols: f32,
 ) -> Element<'a, Message> {
     let frame =
         |pane: Pane, content: Element<'a, Message>| focus::pane_frame(t, pane, active, content);
@@ -1126,19 +1191,18 @@ fn main_area<'a>(
             let top = frame(Pane::History, tab.history.view(cx).map(Message::History));
             let changes: Element<'a, Message> = match &tab.blame {
                 Some(b) => frame(Pane::Diff, b.view(t).map(Message::Blame)),
-                None => row![
-                    container(frame(
+                None => list_split(
+                    t,
+                    list_cols,
+                    frame(
                         Pane::Files,
-                        tab.commit_diff.files_view(cx).map(Message::CommitDiff)
-                    ))
-                    .width(Length::Fixed(t.cols(LIST_COLS))),
+                        tab.commit_diff.files_view(cx).map(Message::CommitDiff),
+                    ),
                     frame(
                         Pane::Diff,
-                        tab.commit_diff.view(cx).map(Message::CommitDiff)
+                        tab.commit_diff.view(cx).map(Message::CommitDiff),
                     ),
-                ]
-                .spacing(4)
-                .into(),
+                ),
             };
             column![
                 tabs,
@@ -1168,18 +1232,10 @@ fn main_area<'a>(
                     None => tab.local_diff.view(cx).map(Message::LocalDiff),
                 },
             );
-            column![
-                tabs,
-                row![
-                    container(left).width(Length::Fixed(t.cols(LIST_COLS))),
-                    container(diff).width(Length::Fill),
-                ]
+            column![tabs, list_split(t, list_cols, left.into(), diff),]
                 .spacing(4)
-                .height(Length::Fill),
-            ]
-            .spacing(4)
-            .width(Length::Fill)
-            .into()
+                .width(Length::Fill)
+                .into()
         }
     }
 }
@@ -1329,6 +1385,16 @@ fn shortcut(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragging_the_divider_follows_the_cursor_within_limits() {
+        // 8px columns: 80px right of the start is 10 columns wider.
+        assert!((resized_list_cols(34.0, 80.0, 8.0) - 44.0).abs() < f32::EPSILON);
+        assert!((resized_list_cols(34.0, -1000.0, 8.0) - MIN_LIST_COLS).abs() < f32::EPSILON);
+        assert!((resized_list_cols(34.0, 5000.0, 8.0) - MAX_LIST_COLS).abs() < f32::EPSILON);
+        // Coming back from past a limit lands where the cursor is.
+        assert!((resized_list_cols(34.0, -16.0, 8.0) - 32.0).abs() < f32::EPSILON);
+    }
     use keyboard::key::{Code, Key, Named, Physical};
 
     fn press(
