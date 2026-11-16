@@ -45,7 +45,7 @@ pub const FILTER_ID: &str = "gf-repo-picker-filter";
 const PATH_COLS: usize = 64;
 
 /// Keeps one line: `~/a/b/c/repo` → `…/c/repo`, cut at a `/` when it can.
-fn elide_path(path: &str, max: usize) -> String {
+pub(crate) fn elide_path(path: &str, max: usize) -> String {
     let n = path.chars().count();
     if n <= max {
         return path.to_owned();
@@ -530,7 +530,7 @@ fn path_items(entries: &[Entry], query: &str) -> (Vec<Item>, Option<PathBuf>) {
 /// Case-insensitive subsequence match of `needle` in `hay`: a score
 /// (higher is better: consecutive letters and word starts count more) and
 /// the char positions matched.
-fn fuzzy(needle: &str, hay: &str) -> Option<(i32, Vec<usize>)> {
+pub(crate) fn fuzzy(needle: &str, hay: &str) -> Option<(i32, Vec<usize>)> {
     let hay: Vec<char> = hay.chars().collect();
     let mut marks = Vec::new();
     let mut score = 0;

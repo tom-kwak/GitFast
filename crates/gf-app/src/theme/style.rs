@@ -55,6 +55,18 @@ pub fn bar(t: &Tokens) -> impl Fn(&Theme) -> container::Style + '_ {
     }
 }
 
+/// The toolbar under the tab bar: faintly tinted with the accent of the
+/// active tab above it, so it reads as that tab's toolbar and stands apart
+/// from the tab strip.
+pub fn toolbar(t: &Tokens) -> impl Fn(&Theme) -> container::Style + '_ {
+    let amount = if t.dark { 0.10 } else { 0.12 };
+    move |_| container::Style {
+        text_color: Some(t.fg),
+        background: Some(Background::Color(tint(t.bg, t.accent(), amount))),
+        ..container::Style::default()
+    }
+}
+
 /// Tooltip box.
 pub fn tooltip(t: &Tokens) -> impl Fn(&Theme) -> container::Style + '_ {
     move |_| container::Style {
