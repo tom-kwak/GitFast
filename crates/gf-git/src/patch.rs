@@ -20,9 +20,14 @@ use std::path::Path;
 use gf_core::model::{FileChange, FileDiff, LineKind};
 
 /// Whether partial (hunk/line) operations are possible for this file.
-/// New, deleted, renamed and binary files are handled as whole files.
+/// New, deleted, renamed and binary files, and submodules (whose
+/// `Subproject commit` patch `git apply` accepts but ignores), are handled
+/// as whole entries.
 pub fn supports_partial(file: &FileDiff) -> bool {
-    file.change == FileChange::Modified && !file.is_binary && !file.hunks.is_empty()
+    file.change == FileChange::Modified
+        && !file.is_binary
+        && !file.hunks.is_empty()
+        && !file.is_submodule()
 }
 
 /// Patch for hunk `hunk` of `file`, limited to `lines` (indices into the
@@ -165,6 +170,22 @@ index 1111111..2222222 100644
     fn no_change_selected_gives_none() {
         let sel = BTreeSet::from([0, 5]);
         assert!(hunk_patch(&file(), 0, Some(&sel), false).is_none());
+    }
+
+    #[test]
+    fn submodules_have_no_hunk_patches() {
+        let diff = "\
+diff --git a/lib b/lib
+--- a/lib
++++ b/lib
+@@ -1 +1 @@
+-Subproject commit aed28f9933c9e8435c0f1d07aa563c0a830859bc
++Subproject commit aed28f9933c9e8435c0f1d07aa563c0a830859bc-dirty
+";
+        let f = parse_diff(diff.as_bytes()).expect("parse").remove(0);
+        assert!(f.is_submodule());
+        assert!(!file().is_submodule());
+        assert!(hunk_patch(&f, 0, None, true).is_none());
     }
 
     #[test]

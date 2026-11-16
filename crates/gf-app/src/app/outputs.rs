@@ -62,25 +62,49 @@ impl App {
                 })
             }
             changes::Output::Discard { tracked, untracked } => {
-                let mut body = Vec::new();
-                if !tracked.is_empty() {
-                    body.push(format!(
-                        "Throw away unstaged changes in {}?",
-                        names(&tracked)
-                    ));
-                }
-                if !untracked.is_empty() {
-                    body.push(format!("Delete untracked {}?", names(&untracked)));
-                }
-                body.push("Staged changes are kept.".into());
-                self.confirm(Confirm::delete(
-                    "Discard changes",
-                    body,
-                    "Discard",
-                    Purpose::Discard { tracked, untracked },
-                ))
+                self.confirm_discard(tracked, untracked)
             }
         }
+    }
+
+    /// Asks before discarding work tree changes. Submodules are named
+    /// apart: discarding one checks out its recorded commit (in it and its
+    /// nested submodules), which also drops edits made inside it.
+    fn confirm_discard(
+        &mut self,
+        tracked: Vec<std::path::PathBuf>,
+        untracked: Vec<std::path::PathBuf>,
+    ) -> Task<Message> {
+        let is_submodule = |p: &std::path::PathBuf| {
+            self.active_tab()
+                .and_then(|t| t.snapshot.as_ref())
+                .is_some_and(|s| s.submodules.iter().any(|m| &m.path == p))
+        };
+        let (subs, files): (Vec<_>, Vec<_>) = tracked.iter().cloned().partition(is_submodule);
+        let mut body = Vec::new();
+        if !files.is_empty() {
+            body.push(format!("Throw away unstaged changes in {}?", names(&files)));
+        }
+        if !subs.is_empty() {
+            body.push(format!(
+                "Put submodule {} back on the commit this repository records?",
+                names(&subs)
+            ));
+            body.push(
+                "Its checked-out commit (and those of submodules inside it) is switched back and edits to tracked files in it are thrown away; untracked files in it are kept."
+                    .into(),
+            );
+        }
+        if !untracked.is_empty() {
+            body.push(format!("Delete untracked {}?", names(&untracked)));
+        }
+        body.push("Staged changes are kept.".into());
+        self.confirm(Confirm::delete(
+            "Discard changes",
+            body,
+            "Discard",
+            Purpose::Discard { tracked, untracked },
+        ))
     }
 
     pub(super) fn on_diff(
@@ -120,6 +144,9 @@ impl App {
                 Task::perform(diff_view::highlight(*diff), move |spans| {
                     Message::DiffHighlighted(id, source.clone(), file, spans)
                 })
+            }
+            diff_view::Output::DiscardSubmodule(path) => {
+                self.confirm_discard(vec![path], Vec::new())
             }
             diff_view::Output::Blame { path, rev } => self.open_blame(path, rev),
             diff_view::Output::FileHistory(path) => self.open_file_history(path),

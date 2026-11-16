@@ -64,6 +64,20 @@ impl FileDiff {
         self.new_path.as_ref().or(self.old_path.as_ref())
     }
 
+    /// A submodule (gitlink): its diff is a `Subproject commit <id>` line
+    /// per side (`<id>-dirty` when its work tree has changes). Patches
+    /// cannot change it; it is put back by checking out the recorded commit.
+    pub fn is_submodule(&self) -> bool {
+        let gitlink = |m: &Option<String>| m.as_deref() == Some("160000");
+        gitlink(&self.old_mode)
+            || gitlink(&self.new_mode)
+            || self
+                .hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .any(|l| l.kind != LineKind::Context && l.content.starts_with("Subproject commit "))
+    }
+
     pub fn mode_changed(&self) -> bool {
         matches!((&self.old_mode, &self.new_mode), (Some(a), Some(b)) if a != b)
     }
