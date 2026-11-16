@@ -3,10 +3,10 @@
 //! enabled only when it can run, the reason on its tooltip.
 
 use iced::widget::{column, row, space, text_editor, text_input};
-use iced::{Background, Border, Element, Length};
+use iced::{Element, Length};
 
 use crate::feature::{Cx, Feature, Update};
-use crate::theme::{Tokens, style};
+use crate::theme::style;
 use crate::widgets::{self, colored};
 
 /// Conventional soft limit for the summary line.
@@ -223,7 +223,7 @@ impl Feature for State {
                     text_editor::Binding::from_key_press(key)
                 }
             })
-            .style(editor_style(t));
+            .style(style::text_area(t));
 
         let loading = Some("loading…");
         let commit_blocked = repo.map_or(loading, |r| self.commit_blocked(r));
@@ -287,26 +287,6 @@ impl Feature for State {
             "COMMIT".into(),
             column![summary, body, buttons].spacing(4),
         )
-    }
-}
-
-fn editor_style(
-    t: &Tokens,
-) -> impl Fn(&iced::Theme, text_editor::Status) -> text_editor::Style + '_ {
-    move |_, status| text_editor::Style {
-        background: Background::Color(t.bg),
-        border: Border {
-            color: if matches!(status, text_editor::Status::Focused { .. }) {
-                t.accent()
-            } else {
-                t.border
-            },
-            width: 1.0,
-            radius: 0.0.into(),
-        },
-        placeholder: t.dim,
-        value: t.fg,
-        selection: t.selection,
     }
 }
 

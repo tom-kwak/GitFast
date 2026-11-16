@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use gf_core::model::Oid;
 use gf_core::{GfError, Result};
 
-use crate::Repository;
+use crate::backend::{CliBackend, SubmoduleOps};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmoduleStatus {
@@ -60,8 +60,8 @@ pub fn parse_submodules(out: &[u8]) -> Result<Vec<Submodule>> {
         .collect()
 }
 
-impl Repository {
-    pub async fn submodules(&self) -> Result<Vec<Submodule>> {
+impl SubmoduleOps for CliBackend {
+    async fn submodules(&self) -> Result<Vec<Submodule>> {
         parse_submodules(
             &self
                 .read(self.command(["submodule", "status", "--recursive"]))
@@ -69,16 +69,13 @@ impl Repository {
         )
     }
 
-    /// `git submodule update --init --recursive`: checks out the recorded
-    /// commits, initializing new submodules.
-    pub async fn update_submodules(&self) -> Result<()> {
+    async fn update_submodules(&self) -> Result<()> {
         self.exec(self.command(["submodule", "update", "--init", "--recursive"]))
             .await?;
         Ok(())
     }
 
-    /// Re-reads submodule URLs from `.gitmodules`.
-    pub async fn sync_submodules(&self) -> Result<()> {
+    async fn sync_submodules(&self) -> Result<()> {
         self.exec(self.command(["submodule", "sync", "--recursive"]))
             .await?;
         Ok(())

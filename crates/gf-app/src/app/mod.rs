@@ -177,6 +177,13 @@ pub enum Message {
         Option<Vec<gf_core::model::Oid>>,
     ),
     RebaseEditor(crate::features::rebase_editor::Message),
+    /// What the squash dialog shows; `selected` is how many of the ids the
+    /// user picked (the rest filled a gap).
+    SquashPreviewed {
+        ids: Vec<gf_core::model::Oid>,
+        selected: usize,
+        result: Result<gf_git::SquashPreview, String>,
+    },
     /// Ask to undo the latest undoable step of the active tab.
     Undo,
     GitFinished {
@@ -689,6 +696,11 @@ impl App {
                 self.on_rebase_plan(base, plan, squash)
             }
             Message::RebaseEditor(m) => self.on_rebase_editor(m),
+            Message::SquashPreviewed {
+                ids,
+                selected,
+                result,
+            } => self.on_squash_preview(ids, selected, result),
             Message::Undo => self.ask_undo(),
             Message::GitFinished {
                 repo,

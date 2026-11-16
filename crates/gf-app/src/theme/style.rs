@@ -3,7 +3,7 @@
 //! pressed states so every clickable thing visibly reacts (PLAN.md §4-2).
 
 use gf_core::model::LineKind;
-use iced::widget::{button, container, text_input};
+use iced::widget::{button, container, text_editor, text_input};
 use iced::{Background, Border, Color, Theme};
 
 use super::Tokens;
@@ -178,6 +178,24 @@ pub fn field_input(t: &Tokens) -> impl Fn(&Theme, text_input::Status) -> text_in
             1.0,
         ),
         icon: t.dim,
+        placeholder: t.dim,
+        value: t.fg,
+        selection: t.selection,
+    }
+}
+
+/// Bordered multi-line editor (commit details, dialog text areas).
+pub fn text_area(t: &Tokens) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style + '_ {
+    move |_, status| text_editor::Style {
+        background: Background::Color(t.bg),
+        border: square(
+            if matches!(status, text_editor::Status::Focused { .. }) {
+                t.accent()
+            } else {
+                t.border
+            },
+            1.0,
+        ),
         placeholder: t.dim,
         value: t.fg,
         selection: t.selection,

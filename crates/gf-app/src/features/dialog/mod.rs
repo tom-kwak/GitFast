@@ -8,16 +8,23 @@
 //! | Normal   | accent (input)  | yes            | no                |
 //! | Change   | yellow, `?`     | yes            | optional          |
 //! | Delete   | red, `⚠`        | **no** — click | never             |
+//! | Failure  | red, `✗`        | dismisses      | no                |
+//!
+//! [`Dialog::notice`] builds a dialog with a single `[ OK ⏎ ]` button (no
+//! Cancel), used to report a failure and what to do about it.
 //!
 //! Generic over the purpose `P`, which the app uses to know what to do on
 //! submit. Apps should not build confirmations by hand: use the app's
 //! shared `confirm` helper so every delete/change asks the same way.
 
-use iced::widget::{Column, column, container, row, space, text_input};
+use iced::widget::{Column, column, container, row, space, text_editor, text_input};
 use iced::{Background, Border, Color, Element, Length, Padding};
 
 use crate::theme::{Tokens, style};
 use crate::widgets::{self, colored, dim, mono};
+
+/// Id of the multi-line text area.
+pub const AREA_ID: &str = "gf-dialog-area";
 
 /// Id of the first text field, focused when the dialog opens.
 pub const FIRST_FIELD_ID: &str = "gf-dialog-field-0";
@@ -38,6 +45,8 @@ pub enum Severity {
     Change,
     /// Deletes something that cannot be brought back from the UI.
     Delete,
+    /// Reports something that went wrong; nothing runs on confirm.
+    Failure,
 }
 
 impl Severity {
@@ -45,7 +54,7 @@ impl Severity {
         match self {
             Self::Normal => t.accent(),
             Self::Change => t.warning(),
-            Self::Delete => t.error(),
+            Self::Delete | Self::Failure => t.error(),
         }
     }
 
@@ -54,6 +63,7 @@ impl Severity {
             Self::Normal => "",
             Self::Change => "? ",
             Self::Delete => "⚠ ",
+            Self::Failure => "✗ ",
         }
     }
 }
@@ -71,6 +81,33 @@ pub struct Check {
     pub value: bool,
 }
 
+/// A multi-line text box below the fields. Its text is handed back after
+/// the fields' values (see [`Outcome::Submitted`]).
+pub struct Area {
+    pub label: String,
+    pub placeholder: String,
+    pub content: text_editor::Content,
+}
+
+impl Clone for Area {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            placeholder: self.placeholder.clone(),
+            content: text_editor::Content::with_text(&self.content.text()),
+        }
+    }
+}
+
+impl std::fmt::Debug for Area {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Area")
+            .field("label", &self.label)
+            .field("text", &self.content.text())
+            .finish()
+    }
+}
+
 /// One of several options (radio buttons). An option marked dangerous
 /// turns the dialog into a deletion while it is selected.
 #[derive(Debug, Clone)]
@@ -85,6 +122,7 @@ pub struct Dialog<P> {
     pub title: String,
     pub body: Vec<String>,
     pub fields: Vec<Field>,
+    pub area: Option<Area>,
     pub checks: Vec<Check>,
     pub choice: Option<Choice>,
     pub confirm_label: String,
@@ -95,11 +133,14 @@ pub struct Dialog<P> {
     /// Key of a skippable confirmation; shows a "don't ask again" box.
     pub remember: Option<String>,
     dont_ask: bool,
+    /// Only one button (no Cancel): the dialog just informs.
+    notice: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Field(usize, String),
+    Area(text_editor::Action),
     Check(usize),
     Choose(usize),
     DontAsk,
@@ -112,6 +153,8 @@ pub enum Message {
 pub enum Outcome<P> {
     Submitted {
         purpose: P,
+        /// The fields' values (trimmed), then the text area's text (with
+        /// trailing whitespace removed) when the dialog has one.
         values: Vec<String>,
         checks: Vec<bool>,
         /// Selected option of the choice, if the dialog has one.
@@ -135,6 +178,7 @@ impl<P: Clone> Dialog<P> {
             title: title.into(),
             body,
             fields: Vec::new(),
+            area: None,
             checks: Vec::new(),
             choice: None,
             confirm_label: confirm_label.into(),
@@ -143,6 +187,16 @@ impl<P: Clone> Dialog<P> {
             error: None,
             remember: None,
             dont_ask: false,
+            notice: false,
+        }
+    }
+
+    /// A failure report with a single `[ OK ⏎ ]` button; Enter and Esc
+    /// both dismiss it.
+    pub fn notice(title: impl Into<String>, body: Vec<String>, purpose: P) -> Self {
+        Self {
+            notice: true,
+            ..Self::confirm(title, body, "OK", purpose).severity(Severity::Failure)
         }
     }
 
@@ -169,6 +223,21 @@ impl<P: Clone> Dialog<P> {
             label: label.into(),
             value: value.into(),
             placeholder: placeholder.into(),
+        });
+        self
+    }
+
+    /// A multi-line text box (one per dialog), shown after the fields.
+    pub fn area(
+        mut self,
+        label: impl Into<String>,
+        text: &str,
+        placeholder: impl Into<String>,
+    ) -> Self {
+        self.area = Some(Area {
+            label: label.into(),
+            placeholder: placeholder.into(),
+            content: text_editor::Content::with_text(text),
         });
         self
     }
@@ -224,6 +293,12 @@ impl<P: Clone> Dialog<P> {
                 }
                 None
             }
+            Message::Area(action) => {
+                if let Some(a) = self.area.as_mut() {
+                    a.content.perform(action);
+                }
+                None
+            }
             Message::Check(i) => {
                 if let Some(c) = self.checks.get_mut(i) {
                     c.value = !c.value;
@@ -246,6 +321,11 @@ impl<P: Clone> Dialog<P> {
                     .fields
                     .iter()
                     .map(|f| f.value.trim().to_owned())
+                    .chain(
+                        self.area
+                            .as_ref()
+                            .map(|a| a.content.text().trim_end().to_owned()),
+                    )
                     .collect(),
                 checks: self.checks.iter().map(|c| c.value).collect(),
                 choice: self.choice.as_ref().map(|c| c.selected),
@@ -292,6 +372,16 @@ impl<P: Clone> Dialog<P> {
             }
             col = col.push(column![dim(t, format!("│ {}", f.label)), input].spacing(2));
         }
+        if let Some(area) = &self.area {
+            let editor = text_editor(&area.content)
+                .id(AREA_ID)
+                .placeholder(area.placeholder.as_str())
+                .on_action(Message::Area)
+                .size(t.font_size)
+                .height(Length::Fixed(t.font_size * 9.0))
+                .style(style::text_area(t));
+            col = col.push(column![dim(t, format!("│ {}", area.label)), editor].spacing(2));
+        }
         if let Some(choice) = &self.choice {
             col = col.push(dim(t, format!("│ {}", choice.label)));
             for (i, (label, dangerous)) in choice.options.iter().enumerate() {
@@ -333,14 +423,16 @@ impl<P: Clone> Dialog<P> {
         } else {
             widgets::text_button(t, &self.confirm_label, Some("⏎"), Some(Message::Submit))
         };
-        col = col.push(
-            row![
-                space().width(Length::Fill),
-                widgets::text_button(t, "Cancel", Some("Esc"), Some(Message::Cancel)),
-                confirm,
-            ]
-            .spacing(6),
-        );
+        let mut buttons = row![space().width(Length::Fill)].spacing(6);
+        if !self.notice {
+            buttons = buttons.push(widgets::text_button(
+                t,
+                "Cancel",
+                Some("Esc"),
+                Some(Message::Cancel),
+            ));
+        }
+        col = col.push(buttons.push(confirm));
         if danger {
             col = col.push(dim(
                 t,
@@ -444,6 +536,38 @@ mod tests {
             Some(1),
             "out of range ignored"
         );
+    }
+
+    #[test]
+    fn area_text_comes_after_the_fields() {
+        let mut d = Dialog::confirm("Squash", vec![], "Squash", ())
+            .field("summary", " feat ", "")
+            .area("details", "line 1\nline 2\n\n", "");
+        let _ = d.update(Message::Area(text_editor::Action::Move(
+            text_editor::Motion::DocumentEnd,
+        )));
+        match d.update(Message::Submit) {
+            Some(Outcome::Submitted { values, .. }) => {
+                assert_eq!(values, ["feat", "line 1\nline 2"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let copy = d.clone();
+        assert_eq!(
+            copy.area.map(|a| a.content.text()),
+            Some("line 1\nline 2\n\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn notice_is_dismissed_with_enter() {
+        let mut d = Dialog::notice("Push rejected", vec!["why".into()], 1);
+        assert_eq!(d.effective_severity(), Severity::Failure);
+        assert!(d.notice);
+        assert!(matches!(
+            d.enter(),
+            Some(Outcome::Submitted { purpose: 1, .. })
+        ));
     }
 
     #[test]

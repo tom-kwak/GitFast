@@ -210,6 +210,19 @@ impl App {
                 tab.all_branches = !tab.all_branches;
                 load_snapshot(tab)
             }
+            history::Output::LoadMore => {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                match tab.history.revision().map(str::to_owned) {
+                    Some(revision) => load_history(tab, revision),
+                    // Coalesces with a refresh already running.
+                    None => {
+                        let id = tab.repo.id();
+                        self.request_refresh(id)
+                    }
+                }
+            }
             history::Output::BackToHead => {
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();

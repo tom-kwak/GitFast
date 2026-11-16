@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use gf_core::model::Oid;
 use gf_core::{GfError, Result};
 
-use crate::Repository;
+use crate::backend::{CliBackend, WorktreeOps};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
@@ -52,8 +52,8 @@ pub fn parse_worktrees(out: &[u8]) -> Result<Vec<Worktree>> {
     Ok(list)
 }
 
-impl Repository {
-    pub async fn worktrees(&self) -> Result<Vec<Worktree>> {
+impl WorktreeOps for CliBackend {
+    async fn worktrees(&self) -> Result<Vec<Worktree>> {
         parse_worktrees(
             &self
                 .read(self.command(["worktree", "list", "--porcelain"]))
@@ -61,9 +61,7 @@ impl Repository {
         )
     }
 
-    /// Adds a working tree at `path` for `branch`; with `new_branch`, the
-    /// branch is created from HEAD.
-    pub async fn add_worktree(&self, path: &Path, branch: &str, new_branch: bool) -> Result<()> {
+    async fn add_worktree(&self, path: &Path, branch: &str, new_branch: bool) -> Result<()> {
         let mut cmd = self.command(["worktree", "add"]);
         if new_branch {
             cmd = cmd.args(["-b", branch]).arg(path);
@@ -74,9 +72,7 @@ impl Repository {
         Ok(())
     }
 
-    /// Removes a linked working tree. Without `force`, git refuses when it
-    /// has uncommitted changes.
-    pub async fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
+    async fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
         let mut cmd = self.command(["worktree", "remove"]);
         if force {
             cmd = cmd.arg("--force");
@@ -85,7 +81,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn prune_worktrees(&self) -> Result<()> {
+    async fn prune_worktrees(&self) -> Result<()> {
         self.exec(self.command(["worktree", "prune"])).await?;
         Ok(())
     }

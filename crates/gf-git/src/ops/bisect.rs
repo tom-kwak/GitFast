@@ -3,7 +3,7 @@
 use gf_core::Result;
 use gf_core::model::Oid;
 
-use crate::Repository;
+use crate::backend::{BisectOps, CliBackend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -42,9 +42,8 @@ pub fn parse_progress(out: &str) -> BisectProgress {
     p
 }
 
-impl Repository {
-    /// Starts bisecting between a known bad and a known good revision.
-    pub async fn bisect_start(&self, bad: &str, good: &str) -> Result<BisectProgress> {
+impl BisectOps for CliBackend {
+    async fn bisect_start(&self, bad: &str, good: &str) -> Result<BisectProgress> {
         // `bisect start` has no `--end-of-options`; refuse option-like names.
         if bad.starts_with('-') || good.starts_with('-') {
             return Err(gf_core::GfError::Other(format!(
@@ -57,8 +56,7 @@ impl Repository {
         Ok(parse_progress(&out.stdout_str()))
     }
 
-    /// Marks the checked-out commit and moves to the next candidate.
-    pub async fn bisect_mark(&self, verdict: Verdict) -> Result<BisectProgress> {
+    async fn bisect_mark(&self, verdict: Verdict) -> Result<BisectProgress> {
         let word = match verdict {
             Verdict::Good => "good",
             Verdict::Bad => "bad",
@@ -68,8 +66,7 @@ impl Repository {
         Ok(parse_progress(&out.stdout_str()))
     }
 
-    /// Ends bisecting and returns to the original branch.
-    pub async fn bisect_reset(&self) -> Result<()> {
+    async fn bisect_reset(&self) -> Result<()> {
         self.exec(self.command(["bisect", "reset"])).await?;
         Ok(())
     }

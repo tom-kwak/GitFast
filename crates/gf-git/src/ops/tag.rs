@@ -2,12 +2,10 @@
 
 use gf_core::Result;
 
-use crate::Repository;
+use crate::backend::{CliBackend, TagOps};
 
-impl Repository {
-    /// Creates a tag at `target` (default HEAD). With a message the tag is
-    /// annotated, otherwise lightweight.
-    pub async fn create_tag(
+impl TagOps for CliBackend {
+    async fn create_tag(
         &self,
         name: &str,
         target: Option<&str>,
@@ -27,12 +25,12 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn delete_tag(&self, name: &str) -> Result<()> {
+    async fn delete_tag(&self, name: &str) -> Result<()> {
         self.exec(self.command(["tag", "-d", name])).await?;
         Ok(())
     }
 
-    pub async fn push_tag(&self, remote: &str, name: &str) -> Result<()> {
+    async fn push_tag(&self, remote: &str, name: &str) -> Result<()> {
         self.exec(self.command(["push", remote, &format!("refs/tags/{name}")]))
             .await?;
         Ok(())

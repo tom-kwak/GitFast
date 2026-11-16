@@ -163,6 +163,68 @@ async fn interactive_rebase_reword_squash_drop() {
 }
 
 #[tokio::test]
+async fn squash_range_with_autostash_and_pushed_count() {
+    let repo = TestRepo::new();
+    repo.write("f.txt", "0\n");
+    repo.commit_all("base");
+    let mut ids = Vec::new();
+    for (i, msg) in ["one", "two", "three", "four"].iter().enumerate() {
+        repo.write(format!("{i}.txt"), msg);
+        ids.push(repo.commit_all(msg));
+    }
+    // "one" is on a remote already.
+    repo.git(&["update-ref", "refs/remotes/origin/main", &ids[0]]);
+    // Uncommitted change: needs the autostash.
+    repo.write("f.txt", "dirty\n");
+    let r = open(&repo).await;
+    let pick = |i: &[usize]| -> Vec<gf_core::model::Oid> {
+        i.iter().map(|&i| ids[i].parse().unwrap()).collect()
+    };
+
+    let preview = r.squash_preview(&pick(&[2, 0, 1])).await.unwrap();
+    assert_eq!(
+        preview
+            .commits
+            .iter()
+            .map(|c| c.summary.as_str())
+            .collect::<Vec<_>>(),
+        ["one", "two", "three"]
+    );
+    assert_eq!(preview.pushed, 1);
+    assert!(preview.base.is_some());
+    assert!(r.squash_preview(&pick(&[0, 2])).await.is_err(), "gap");
+
+    assert_eq!(
+        r.squash(&pick(&[1, 2]), "two + three", true).await.unwrap(),
+        Integration::Done
+    );
+    assert_eq!(summaries(&repo), ["four", "two + three", "one", "base"]);
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("f.txt")).unwrap(),
+        "dirty\n",
+        "uncommitted change restored"
+    );
+}
+
+#[tokio::test]
+async fn squash_from_the_root_commit() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    let root = repo.commit_all("root");
+    repo.write("b.txt", "b\n");
+    let second = repo.commit_all("second");
+    let r = open(&repo).await;
+    let ids = [second.parse().unwrap(), root.parse().unwrap()];
+    assert_eq!(r.squash_preview(&ids).await.unwrap().base, None);
+    assert_eq!(
+        r.squash(&ids, "everything", false).await.unwrap(),
+        Integration::Done
+    );
+    assert_eq!(summaries(&repo), ["everything"]);
+    assert!(repo.path().join("b.txt").exists());
+}
+
+#[tokio::test]
 async fn reflog_and_undo() {
     let repo = TestRepo::new();
     repo.write("a.txt", "a\n");

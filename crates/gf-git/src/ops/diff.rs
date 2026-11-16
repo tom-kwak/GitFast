@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use gf_core::Result;
 use gf_core::model::{FileDiff, Oid};
 
-use crate::Repository;
+use crate::backend::{CliBackend, DiffOps};
 use crate::cli::parse::diff::{DIFF_FORMAT_ARGS, parse_diff};
 
 /// Which two states to compare.
@@ -31,8 +31,8 @@ pub struct DiffOptions {
     pub paths: Vec<PathBuf>,
 }
 
-impl Repository {
-    pub async fn diff(&self, target: &DiffTarget, opts: &DiffOptions) -> Result<Vec<FileDiff>> {
+impl DiffOps for CliBackend {
+    async fn diff(&self, target: &DiffTarget, opts: &DiffOptions) -> Result<Vec<FileDiff>> {
         if let DiffTarget::Untracked(path) = target {
             return self.diff_untracked(path).await;
         }
@@ -69,6 +69,21 @@ impl Repository {
         parse_diff(&out)
     }
 
+    async fn numstat(
+        &self,
+        staged: bool,
+    ) -> Result<std::collections::HashMap<PathBuf, Option<crate::cli::parse::numstat::LineCounts>>>
+    {
+        use crate::cli::parse::numstat::{NUMSTAT_ARGS, parse_numstat};
+        let mut cmd = self.command(NUMSTAT_ARGS);
+        if staged {
+            cmd = cmd.arg("--cached");
+        }
+        parse_numstat(&self.read(cmd).await?)
+    }
+}
+
+impl CliBackend {
     async fn diff_untracked(&self, path: &std::path::Path) -> Result<Vec<FileDiff>> {
         let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
         let mut args: Vec<String> = vec!["diff".into(), "--no-index".into()];
@@ -90,22 +105,5 @@ impl Repository {
             f.new_path = Some(path.to_path_buf());
         }
         Ok(files)
-    }
-}
-
-impl Repository {
-    /// Added/removed line counts per changed file: unstaged changes, or
-    /// staged ones with `staged`. `None` per file means binary.
-    pub async fn numstat(
-        &self,
-        staged: bool,
-    ) -> Result<std::collections::HashMap<PathBuf, Option<crate::cli::parse::numstat::LineCounts>>>
-    {
-        use crate::cli::parse::numstat::{NUMSTAT_ARGS, parse_numstat};
-        let mut cmd = self.command(NUMSTAT_ARGS);
-        if staged {
-            cmd = cmd.arg("--cached");
-        }
-        parse_numstat(&self.read(cmd).await?)
     }
 }

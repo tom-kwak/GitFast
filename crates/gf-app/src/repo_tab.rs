@@ -16,8 +16,9 @@ use gf_watch::RepoWatcher;
 
 use crate::features::{changes, commit_box, diff_view, history, sidebar};
 
-/// How many commits the history loads.
-pub const HISTORY_LIMIT: usize = 1000;
+/// Commits per history page: the list starts with this many and loads
+/// another page each time it is scrolled to the end.
+pub const HISTORY_PAGE: usize = 1000;
 /// Number of lane colors the graph cycles through (see `history`).
 pub const LANE_COLORS: usize = 6;
 
@@ -26,39 +27,64 @@ pub const LANE_COLORS: usize = 6;
 pub struct History {
     pub commits: Vec<Commit>,
     pub graph: Vec<GraphRow>,
+    /// More commits exist past `commits` (the load hit its limit).
+    pub more: bool,
 }
 
 impl History {
     pub fn new(commits: Vec<Commit>) -> Self {
         let graph = graph::layout(&commits, LANE_COLORS);
-        Self { commits, graph }
+        Self {
+            commits,
+            graph,
+            more: false,
+        }
     }
 
-    /// Commits that touched `path`, following renames.
-    pub async fn load_path(repo: &Repository, path: PathBuf) -> gf_core::Result<Self> {
+    /// The first `limit` commits of `commits`; `more` when there were
+    /// more than that.
+    fn limited(mut commits: Vec<Commit>, limit: usize) -> Self {
+        let more = commits.len() > limit;
+        commits.truncate(limit);
+        Self {
+            more,
+            ..Self::new(commits)
+        }
+    }
+
+    /// Up to `limit` commits that touched `path`, following renames.
+    pub async fn load_path(
+        repo: &Repository,
+        path: PathBuf,
+        limit: usize,
+    ) -> gf_core::Result<Self> {
         let query = LogQuery {
             paths: vec![path],
             follow: true,
-            max_count: Some(HISTORY_LIMIT),
+            // One extra tells whether there is more.
+            max_count: Some(limit + 1),
             ..LogQuery::default()
         };
-        Ok(Self::new(repo.log(&query).await?))
+        Ok(Self::limited(repo.log(&query).await?, limit))
     }
 
-    /// Loads the history of `revisions` (HEAD when empty) or of all refs.
+    /// Up to `limit` commits of `revisions` (HEAD when empty) or of all
+    /// refs. Topological order makes a longer load extend a shorter one,
+    /// so the rows already on screen stay put.
     pub async fn load(
         repo: &Repository,
         revisions: Vec<String>,
         all_refs: bool,
+        limit: usize,
     ) -> gf_core::Result<Self> {
         let query = LogQuery {
             revisions,
             all_refs,
-            max_count: Some(HISTORY_LIMIT),
+            max_count: Some(limit + 1),
             order: LogOrder::Topo,
             ..LogQuery::default()
         };
-        Ok(Self::new(repo.log(&query).await?))
+        Ok(Self::limited(repo.log(&query).await?, limit))
     }
 }
 
@@ -122,7 +148,12 @@ fn count_new_file(path: &Path) -> Option<LineCounts> {
 
 impl Snapshot {
     /// Loads all parts concurrently.
-    pub async fn load(repo: Repository, all_branches: bool) -> Result<Arc<Self>, String> {
+    /// `history_limit`: how many commits of history to load.
+    pub async fn load(
+        repo: Repository,
+        all_branches: bool,
+        history_limit: usize,
+    ) -> Result<Arc<Self>, String> {
         let uses_lfs = std::fs::read_to_string(repo.cwd().join(".gitattributes"))
             .is_ok_and(|a| a.contains("filter=lfs"));
         let lfs = async {
@@ -140,7 +171,7 @@ impl Snapshot {
             repo.tags(),
             repo.remotes(),
             repo.stashes(),
-            History::load(&repo, Vec::new(), all_branches),
+            History::load(&repo, Vec::new(), all_branches, history_limit),
             repo.numstat(true),
             repo.numstat(false),
         );

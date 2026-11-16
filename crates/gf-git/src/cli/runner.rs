@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gf_core::event::CommandId;
+use gf_core::model::RepoId;
 use gf_core::{CommandEvent, CommandPhase, CoreEvent, EventBus, GfError, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -289,6 +290,38 @@ impl GitRunner {
             stderr,
             exit_code: status.code(),
         })
+    }
+
+    /// Reports an operation done in-process (by gix) like a command, so the
+    /// command log lists every change made on the user's behalf. `argv`
+    /// starts with the tool, e.g. `["gix", "branch", "x"]`.
+    pub fn report_in_process(
+        &self,
+        repo: Option<RepoId>,
+        argv: Vec<String>,
+        lines: &[String],
+        exit_code: i32,
+        duration: Duration,
+    ) {
+        let Some(bus) = &self.bus else {
+            return;
+        };
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let send = |phase| bus.publish(CoreEvent::Command(CommandEvent { id, repo, phase }));
+        send(CommandPhase::Started {
+            argv,
+            read_only: false,
+        });
+        for line in lines {
+            send(CommandPhase::Output {
+                line: line.clone(),
+                is_stderr: exit_code != 0,
+            });
+        }
+        send(CommandPhase::Finished {
+            exit_code: Some(exit_code),
+            duration,
+        });
     }
 
     fn emit(&self, id: CommandId, cmd: &GitCommand, phase: CommandPhase) {

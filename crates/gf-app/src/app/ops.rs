@@ -13,6 +13,7 @@ use iced::futures::SinkExt;
 use super::dialogs::{Confirm, Purpose};
 use super::{App, Message, OpKind};
 use crate::features::command_log::NoteKind;
+use crate::features::dialog::Dialog;
 use crate::features::diff_view::{self, DiffSource};
 use crate::features::toolbar;
 use crate::git_actions;
@@ -25,7 +26,8 @@ pub fn load_snapshot(tab: &mut RepoTab) -> Task<Message> {
     let repo = tab.repo.clone();
     let id = repo.id();
     let all = tab.all_branches;
-    Task::perform(Snapshot::load(repo, all), move |result| {
+    let limit = tab.history.head_limit();
+    Task::perform(Snapshot::load(repo, all, limit), move |result| {
         Message::Loaded(id, result)
     })
 }
@@ -33,14 +35,15 @@ pub fn load_snapshot(tab: &mut RepoTab) -> Task<Message> {
 pub fn load_history(tab: &RepoTab, revision: String) -> Task<Message> {
     let repo = tab.repo.clone();
     let id = repo.id();
+    let limit = tab.history.revision_limit();
     Task::perform(
         {
             let revision = revision.clone();
             async move {
                 // `file: <path>` is a file history (see `open_file_history`).
                 let history = match revision.strip_prefix("file: ") {
-                    Some(path) => History::load_path(&repo, path.into()).await,
-                    None => History::load(&repo, vec![revision], false).await,
+                    Some(path) => History::load_path(&repo, path.into(), limit).await,
+                    None => History::load(&repo, vec![revision], false, limit).await,
                 };
                 history.map(Arc::new).map_err(|e| e.to_string())
             }
@@ -93,6 +96,10 @@ impl App {
             return Task::none();
         };
         tab.loading = false;
+        // A page requested while this load ran arrives with the next one.
+        if !tab.reload_pending {
+            tab.history.snapshot_loaded();
+        }
         let mut tasks = Vec::new();
         match result {
             Ok(snap) => {
@@ -308,8 +315,9 @@ impl App {
                     self.flash(NoteKind::Info, format!("{label} cancelled"));
                     return Task::batch(tasks);
                 }
-                // Offer the next step for common push/pull failures.
-                match &kind {
+                // Offer the next step for common push/pull failures;
+                // anything else gets the failure report.
+                let asked = match &kind {
                     OpKind::Push { branch, to }
                         if e.contains("non-fast-forward")
                             || e.contains("fetch first")
@@ -331,6 +339,7 @@ impl App {
                             },
                         ));
                         tasks.push(ask);
+                        true
                     }
                     OpKind::Pull if e.contains("divergent") || e.contains("reconcile") => {
                         let ask = self.confirm(
@@ -351,9 +360,10 @@ impl App {
                             ),
                         );
                         tasks.push(ask);
+                        true
                     }
-                    _ => {}
-                }
+                    _ => false,
+                };
                 let mut lines = vec![e.clone()];
                 if let Some(hint) = git_actions::hint_for_error(&[], &e) {
                     lines.push(format!("hint: {hint}"));
@@ -365,10 +375,41 @@ impl App {
                     format!("✗ {} — see log", truncate(&label, 40)),
                 );
                 self.settings.appearance.show_command_log = true;
+                if !asked {
+                    tasks.push(self.show_failure(&label, &e));
+                }
             }
         }
         tasks.push(self.restore_focus());
         Task::batch(tasks)
+    }
+
+    /// Reports a failed git command in a dialog: git's own words, what
+    /// most likely happened and what to do (see [`git_actions::diagnose`]).
+    /// Left out while another dialog or the rebase editor is open, so it
+    /// never replaces a question; the command log still has the details.
+    pub(super) fn show_failure(&mut self, label: &str, error: &str) -> Task<Message> {
+        if self.dialog.is_some() || self.rebase_editor.is_some() {
+            return Task::none();
+        }
+        let d = git_actions::diagnose(error);
+        let mut body = vec![format!("{} failed — git said:", truncate(label, 60))];
+        body.extend(
+            git_actions::error_excerpt(error, 6)
+                .into_iter()
+                .map(|l| format!("  {l}")),
+        );
+        body.push(String::new());
+        body.push(format!("What happened: {}", d.cause));
+        body.push(String::new());
+        body.push("What to do:".into());
+        body.extend(
+            d.steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("  {}. {s}", i + 1)),
+        );
+        self.open_dialog(Dialog::notice(d.title, body, Purpose::Failure))
     }
 
     pub(super) fn run_git(&mut self, args: Vec<String>) -> Task<Message> {
@@ -451,6 +492,7 @@ impl App {
                     format!("✗ {} — see log", truncate(&title, 40)),
                 );
                 self.settings.appearance.show_command_log = true;
+                tasks.push(self.show_failure(&title, &e));
             }
         }
         if let Some(id) = repo {

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use gf_core::Result;
 
-use crate::Repository;
+use crate::backend::{CliBackend, LfsOps};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LfsFile {
@@ -41,38 +41,35 @@ pub fn parse_ls_files(out: &[u8]) -> Vec<LfsFile> {
         .collect()
 }
 
-impl Repository {
-    /// Whether `git lfs` is installed.
-    pub async fn lfs_available(&self) -> bool {
+impl LfsOps for CliBackend {
+    async fn lfs_available(&self) -> bool {
         let cmd = self.command(["lfs", "version"]).read_only().allow_failure();
         self.runner().run(&cmd).await.is_ok_and(|o| o.success())
     }
 
-    pub async fn lfs_tracked(&self) -> Result<Vec<String>> {
+    async fn lfs_tracked(&self) -> Result<Vec<String>> {
         Ok(parse_tracked(
             &self.read(self.command(["lfs", "track"])).await?,
         ))
     }
 
-    pub async fn lfs_files(&self) -> Result<Vec<LfsFile>> {
+    async fn lfs_files(&self) -> Result<Vec<LfsFile>> {
         Ok(parse_ls_files(
             &self.read(self.command(["lfs", "ls-files"])).await?,
         ))
     }
 
-    /// Starts tracking `pattern` with LFS (edits `.gitattributes`).
-    pub async fn lfs_track(&self, pattern: &str) -> Result<()> {
+    async fn lfs_track(&self, pattern: &str) -> Result<()> {
         self.exec(self.command(["lfs", "track", pattern])).await?;
         Ok(())
     }
 
-    pub async fn lfs_untrack(&self, pattern: &str) -> Result<()> {
+    async fn lfs_untrack(&self, pattern: &str) -> Result<()> {
         self.exec(self.command(["lfs", "untrack", pattern])).await?;
         Ok(())
     }
 
-    /// Downloads LFS content for the current checkout.
-    pub async fn lfs_pull(&self) -> Result<()> {
+    async fn lfs_pull(&self) -> Result<()> {
         self.exec(self.command(["lfs", "pull"])).await?;
         Ok(())
     }

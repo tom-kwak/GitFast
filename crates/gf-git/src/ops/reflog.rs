@@ -5,7 +5,7 @@
 use gf_core::model::Oid;
 use gf_core::{GfError, Result};
 
-use crate::Repository;
+use crate::backend::{CliBackend, LogOps, ReflogOps};
 
 /// How `git reset` treats the index and the working tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,9 +46,8 @@ pub fn parse_reflog(out: &[u8]) -> Result<Vec<ReflogEntry>> {
         .collect()
 }
 
-impl Repository {
-    /// Most recent HEAD movements, newest first.
-    pub async fn reflog(&self, limit: usize) -> Result<Vec<ReflogEntry>> {
+impl ReflogOps for CliBackend {
+    async fn reflog(&self, limit: usize) -> Result<Vec<ReflogEntry>> {
         let out = self
             .read(self.command([
                 "reflog",
@@ -61,8 +60,7 @@ impl Repository {
         parse_reflog(&out)
     }
 
-    /// Current HEAD commit, `None` before the first commit.
-    pub async fn head_oid(&self) -> Result<Option<Oid>> {
+    async fn head_oid(&self) -> Result<Option<Oid>> {
         if !self.head_exists().await? {
             return Ok(None);
         }
@@ -70,9 +68,7 @@ impl Repository {
         String::from_utf8_lossy(&out).trim().parse().map(Some)
     }
 
-    /// `git reset --soft|--mixed|--hard <to>`: moves the current branch
-    /// (or a detached HEAD) to `to`.
-    pub async fn reset(&self, to: &Oid, mode: ResetMode) -> Result<()> {
+    async fn reset(&self, to: &Oid, mode: ResetMode) -> Result<()> {
         let flag = match mode {
             ResetMode::Soft => "--soft",
             ResetMode::Mixed => "--mixed",
@@ -83,12 +79,7 @@ impl Repository {
         Ok(())
     }
 
-    /// Moves the current branch back to `to`.
-    ///
-    /// With `soft`, the undone commits' changes stay staged (undoing a
-    /// commit gives the work back); otherwise `reset --keep` restores the
-    /// files too but refuses to overwrite uncommitted changes.
-    pub async fn undo_to(&self, to: &Oid, soft: bool) -> Result<()> {
+    async fn undo_to(&self, to: &Oid, soft: bool) -> Result<()> {
         let mode = if soft { "--soft" } else { "--keep" };
         self.exec(self.command(["reset", mode, "--end-of-options", to.as_str()]))
             .await?;

@@ -3,22 +3,36 @@
 //! reorder, and inline message editing — instead of a todo file in an
 //! editor. Starting it goes through the shared change confirmation.
 
+use std::collections::HashMap;
+
 use gf_core::model::Oid;
 use gf_git::{TodoAction, TodoItem};
 use iced::widget::text::Wrapping;
-use iced::widget::{Column, button, column, container, row, space, text_input};
+use iced::widget::{Column, button, column, container, row, space, text_editor};
 use iced::{Background, Border, Element, Length, Padding};
 
 use crate::theme::{Tokens, style};
 use crate::widgets::{self, colored, dim, mono};
 
-#[derive(Debug, Clone)]
 pub struct State {
     pub base: Oid,
     pub items: Vec<TodoItem>,
     /// Commit ids in their original order, to tell whether rows were moved.
     original: Vec<Oid>,
     error: Option<String>,
+    /// Multi-line message editors of the reword/squash rows, by commit;
+    /// their text is kept in the row's action (see `sync_editors`).
+    editors: HashMap<Oid, text_editor::Content>,
+}
+
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("State")
+            .field("base", &self.base)
+            .field("items", &self.items)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -27,7 +41,8 @@ pub enum Message {
     Cycle(usize),
     MoveUp(usize),
     MoveDown(usize),
-    SetText(usize, String),
+    /// Edit in the message editor of row `i`.
+    Edit(usize, text_editor::Action),
     Start,
     Cancel,
 }
@@ -61,41 +76,46 @@ fn action_label(a: &TodoAction) -> (&'static str, &'static str) {
 
 impl State {
     pub fn new(base: Oid, items: Vec<TodoItem>) -> Self {
-        Self {
+        let mut state = Self {
             base,
             original: items.iter().map(|i| i.commit.id.clone()).collect(),
             items,
             error: None,
+            editors: HashMap::new(),
+        };
+        state.sync_editors();
+        state
+    }
+
+    /// An editor for every row with a message (filled from the action),
+    /// none for the others.
+    fn sync_editors(&mut self) {
+        let mut keep = HashMap::new();
+        for item in &self.items {
+            if let TodoAction::Reword(m) | TodoAction::Squash(m) = &item.action {
+                let id = &item.commit.id;
+                let editor = self
+                    .editors
+                    .remove(id)
+                    .unwrap_or_else(|| text_editor::Content::with_text(m));
+                keep.insert(id.clone(), editor);
+            }
         }
+        self.editors = keep;
     }
 
     /// Presets the plan to meld `ids` (list order, newest first) into one
     /// commit: the oldest is picked, the rest folded in with the combined
     /// message. They must be adjacent in the plan.
     pub fn squash(mut self, ids: &[Oid]) -> Result<Self, String> {
-        let mut pos: Vec<usize> = ids
-            .iter()
-            .map(|id| {
-                self.items
-                    .iter()
-                    .position(|i| &i.commit.id == id)
-                    .ok_or_else(|| format!("{} is not on the current branch", id.short()))
-            })
-            .collect::<Result<_, _>>()?;
-        pos.sort_unstable();
-        if pos.len() < 2 || pos.windows(2).any(|w| w[1] != w[0] + 1) {
-            return Err("only adjacent commits on the current branch can be squashed; select a continuous range".into());
-        }
-        let (first, last) = (pos[0], pos[pos.len() - 1]);
-        let message = self.items[first..=last]
+        let range = gf_git::squash_range(&self.items, ids).map_err(|e| e.to_string())?;
+        let message = self.items[range.clone()]
             .iter()
             .map(full_message)
             .collect::<Vec<_>>()
             .join("\n\n");
-        for item in &mut self.items[first + 1..last] {
-            item.action = TodoAction::Fixup;
-        }
-        self.items[last].action = TodoAction::Squash(message);
+        self.items = gf_git::squash_plan(std::mem::take(&mut self.items), range, message);
+        self.sync_editors();
         Ok(self)
     }
 
@@ -159,6 +179,9 @@ impl State {
         match message {
             Message::Cycle(i) if i < self.items.len() => {
                 self.items[i].action = self.next_action(i);
+                // A new action comes with a new prefilled message.
+                self.editors.remove(&self.items[i].commit.id);
+                self.sync_editors();
                 None
             }
             Message::MoveUp(i) if i > 0 && i < self.items.len() => {
@@ -169,11 +192,13 @@ impl State {
                 self.items.swap(i, i + 1);
                 None
             }
-            Message::SetText(i, text) => {
-                if let Some(TodoAction::Reword(m) | TodoAction::Squash(m)) =
-                    self.items.get_mut(i).map(|it| &mut it.action)
+            Message::Edit(i, action) => {
+                let item = self.items.get_mut(i)?;
+                if let (Some(editor), TodoAction::Reword(m) | TodoAction::Squash(m)) =
+                    (self.editors.get_mut(&item.commit.id), &mut item.action)
                 {
-                    *m = text;
+                    editor.perform(action);
+                    *m = editor.text();
                 }
                 None
             }
@@ -243,18 +268,21 @@ impl State {
                 line = line.push(dim(t, "removed"));
             }
             let mut cell = column![line];
-            if let TodoAction::Reword(m) | TodoAction::Squash(m) = &item.action {
+            if let Some(editor) = self.editors.get(&item.commit.id) {
+                let lines = editor.line_count().clamp(2, 8);
+                #[allow(clippy::cast_precision_loss)]
+                let height = (lines as f32 + 0.6) * t.font_size * 1.3;
                 cell = cell.push(
                     row![
                         dim(t, "      message"),
-                        text_input("commit message", m)
-                            .on_input(move |v| Message::SetText(i, v))
+                        text_editor(editor)
+                            .placeholder("commit message — first line is the summary")
+                            .on_action(move |a| Message::Edit(i, a))
                             .size(t.font_size)
-                            .padding(3)
-                            .style(style::field_input(t)),
+                            .height(Length::Fixed(height))
+                            .style(style::text_area(t)),
                     ]
-                    .spacing(6)
-                    .align_y(iced::Alignment::Center),
+                    .spacing(6),
                 );
             }
             list = list.push(cell);
@@ -352,6 +380,34 @@ mod tests {
         );
         assert!(editor().squash(&[id(1), id(3)]).is_err());
         assert!(editor().squash(&[id(9), id(1)]).is_err());
+    }
+
+    #[test]
+    fn messages_are_edited_over_several_lines() {
+        let mut e = editor();
+        let _ = e.update(Message::Cycle(1));
+        let _ = e.update(Message::Edit(
+            1,
+            text_editor::Action::Move(text_editor::Motion::DocumentEnd),
+        ));
+        for c in ['\n', '\n', 'x'] {
+            let _ = e.update(Message::Edit(
+                1,
+                text_editor::Action::Edit(text_editor::Edit::Insert(c)),
+            ));
+        }
+        assert_eq!(e.items[1].action, TodoAction::Reword("c2\n\nx".into()));
+        // Changing the action starts from a fresh prefilled message.
+        let _ = e.update(Message::Cycle(1));
+        assert_eq!(e.items[1].action, TodoAction::Squash("c1\n\nc2".into()));
+        assert_eq!(
+            e.editors
+                .get(&e.items[1].commit.id)
+                .map(text_editor::Content::text),
+            Some("c1\n\nc2".to_owned())
+        );
+        let _ = e.update(Message::Cycle(1));
+        assert!(e.editors.is_empty(), "fixup has no message");
     }
 
     #[test]

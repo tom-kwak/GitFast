@@ -6,7 +6,7 @@ use std::path::Path;
 use gf_core::model::{Oid, Timestamp};
 use gf_core::{GfError, Result};
 
-use crate::Repository;
+use crate::backend::{BlameOps, CliBackend};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlameLine {
@@ -91,9 +91,8 @@ pub fn parse_blame(out: &[u8]) -> Result<Vec<BlameLine>> {
     Ok(lines)
 }
 
-impl Repository {
-    /// Blame of `path` at `rev` (`None` = the working tree version).
-    pub async fn blame(&self, path: &Path, rev: Option<&str>) -> Result<Vec<BlameLine>> {
+impl BlameOps for CliBackend {
+    async fn blame(&self, path: &Path, rev: Option<&str>) -> Result<Vec<BlameLine>> {
         let mut cmd = self.command(["blame", "--porcelain"]);
         if let Some(rev) = rev {
             cmd = cmd.arg(rev);

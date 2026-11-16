@@ -6,7 +6,7 @@ use std::path::Path;
 
 use gf_core::Result;
 
-use crate::Repository;
+use crate::backend::{CliBackend, StateOps};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RepoState {
@@ -103,8 +103,8 @@ pub fn detect(git_dir: &Path) -> RepoState {
     RepoState::Clean
 }
 
-impl Repository {
-    pub async fn state(&self) -> Result<RepoState> {
+impl StateOps for CliBackend {
+    async fn state(&self) -> Result<RepoState> {
         Ok(detect(&self.handle().git_dir))
     }
 }
