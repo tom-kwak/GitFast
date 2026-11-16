@@ -286,7 +286,12 @@ pub struct State {
 pub enum Message {
     ToggleLine(LineKey),
     ClearSelection,
-    Hunk { hunk: usize, action: Action },
+    Hunk {
+        hunk: usize,
+        action: Action,
+    },
+    /// Put the shown submodule back on its recorded commit.
+    DiscardSubmodule,
     Selected(Action),
     SelectFile(usize),
     Scrolled(ScrollPos),
@@ -309,6 +314,9 @@ pub enum Output {
         action: Action,
         description: String,
     },
+    /// Discard a submodule's work tree changes (whole entry; the app
+    /// confirms first).
+    DiscardSubmodule(PathBuf),
     /// Reload the current source (options changed).
     Reload,
     /// File `n` needs highlighting; the app calls [`highlight`] and
@@ -530,6 +538,17 @@ impl State {
                 let h = &f.hunks[hi];
                 // Buttons first: they stay visible however wide the file is.
                 let mut bar = row![].spacing(2).align_y(iced::Alignment::Center);
+                if !partial && f.is_submodule() && actions.contains(&Action::Discard) {
+                    bar = bar.push(widgets::tip(
+                        t,
+                        widgets::danger_button(
+                            t,
+                            "discard submodule",
+                            Some(Message::DiscardSubmodule),
+                        ),
+                        "check out the commit this repository records for the submodule".into(),
+                    ));
+                }
                 if partial {
                     for &a in actions {
                         let msg = Message::Hunk {
@@ -712,6 +731,10 @@ impl State {
                     description: format!("{} 1 hunk", action.label()),
                 })
             }
+            Message::DiscardSubmodule => match self.current_path() {
+                Some(path) => Update::output(Output::DiscardSubmodule(path)),
+                None => Update::none(),
+            },
             Message::Selected(action) => {
                 let count = self.selection.len();
                 let patches = self.patches(self.selection_by_hunk().into_iter(), action);

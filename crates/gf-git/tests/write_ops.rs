@@ -20,6 +20,54 @@ fn paths(p: &[&str]) -> Vec<PathBuf> {
 // ---------------------------------------------------------------- index
 
 #[tokio::test]
+async fn discard_puts_a_submodule_back_on_its_recorded_commit() {
+    let sub = TestRepo::new();
+    sub.write("lib.txt", "one\n");
+    let first = sub.commit_all("one");
+    sub.write("lib.txt", "two\n");
+    let recorded = sub.commit_all("two");
+
+    let repo = TestRepo::new();
+    repo.write("README.md", "hi\n");
+    repo.commit_all("init");
+    repo.git(
+        &["-c", "protocol.file.allow=always", "submodule", "add", "-q"]
+            .into_iter()
+            .chain([sub.path().to_str().unwrap(), "lib"])
+            .collect::<Vec<_>>(),
+    );
+    repo.commit_all("add lib");
+
+    // Another commit checked out in the submodule, plus an edit in it.
+    let in_sub = |args: &[&str]| {
+        let out = repo
+            .command()
+            .current_dir(repo.path().join("lib"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    in_sub(&["checkout", "-q", &first]);
+    repo.write("lib/lib.txt", "edited\n");
+    repo.write("README.md", "changed\n");
+
+    let r = open(&repo).await;
+    r.discard(&paths(&["lib", "README.md"]), &[]).await.unwrap();
+    assert_eq!(in_sub(&["rev-parse", "HEAD"]), recorded);
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("lib/lib.txt")).unwrap(),
+        "two\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
+        "hi\n"
+    );
+    assert!(repo.git(&["status", "--porcelain"]).is_empty());
+}
+
+#[tokio::test]
 async fn stage_unstage_and_discard() {
     let repo = TestRepo::new();
     repo.write("a.txt", "a\n");
