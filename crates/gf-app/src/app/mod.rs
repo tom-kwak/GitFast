@@ -757,6 +757,7 @@ impl App {
             );
         })
         .ok();
+        let repo = repo.with_gix_fetch(self.settings.git.gix_fetch);
         let mut tab = RepoTab::new(repo, watcher);
         let load = ops::load_snapshot(&mut tab);
         self.tabs.push(tab);

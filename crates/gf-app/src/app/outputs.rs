@@ -715,6 +715,22 @@ impl App {
                 self.settings.appearance.show_command_log = true;
                 Task::none()
             }
+            PromptCommand::GixFetch(on) => {
+                if let Some(on) = on {
+                    self.settings.git.gix_fetch = on;
+                    self.save_settings();
+                    for tab in &mut self.tabs {
+                        tab.repo = tab.repo.clone().with_gix_fetch(on);
+                    }
+                }
+                let text = if self.settings.git.gix_fetch {
+                    "fetch uses gix (git when gix can't) — `:gix-fetch off` to use git"
+                } else {
+                    "fetch uses git — `:gix-fetch on` to fetch in-process with gix"
+                };
+                self.flash(NoteKind::Info, text);
+                Task::none()
+            }
             PromptCommand::Undo => self.ask_undo(),
             PromptCommand::Pwd => {
                 let text = self.active_tab().map_or_else(

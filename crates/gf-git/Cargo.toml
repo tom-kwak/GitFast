@@ -8,10 +8,18 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["gix"]
-# Fast in-process reads (log walking) via gitoxide. Without it every read
-# goes through the git CLI.
+default = ["gix", "gix-fetch"]
+# In-process reads and ref edits via gitoxide (see docs/GIX_MIGRATION.md).
+# Without it every command goes through the git CLI.
 gix = ["dep:gix"]
+# Fetch via gitoxide, used only when the `git.gix_fetch` setting is on.
+# HTTPS through the system TLS (Security.framework on macOS), like git.
+gix-fetch = [
+    "gix",
+    "gix/blocking-network-client",
+    "gix/blocking-http-transport-reqwest-native-tls",
+    "gix/progress-tree",
+]
 
 [dependencies]
 gf-core.workspace = true

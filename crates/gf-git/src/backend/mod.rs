@@ -10,6 +10,8 @@
 mod cli;
 #[cfg(feature = "gix")]
 mod gix_backend;
+#[cfg(feature = "gix-fetch")]
+mod gix_fetch;
 #[cfg(feature = "gix")]
 mod gix_refs;
 #[cfg(feature = "gix")]
