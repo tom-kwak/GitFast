@@ -15,6 +15,7 @@ use super::{App, Message, Shortcut};
 use crate::features::context_menu;
 use crate::features::diff_view::Role;
 use crate::features::prompt::PROMPT_ID;
+use crate::features::repo_picker;
 use crate::features::sidebar::REFS_FILTER_ID;
 use crate::nav::{Key, Moved, Nav, Pane};
 use crate::theme::Tokens;
@@ -79,6 +80,9 @@ impl App {
     /// After a dialog, menu or command: back to the prompt only if the user
     /// was typing there (or there is nothing else to focus).
     pub(super) fn restore_focus(&self) -> Task<Message> {
+        if self.picker.is_some() {
+            return operation::focus(repo_picker::FILTER_ID);
+        }
         if self.typing || self.tabs.is_empty() {
             operation::focus(PROMPT_ID)
         } else {
@@ -103,6 +107,12 @@ impl App {
                 }
                 None => run(self, k.shortcut),
             };
+        }
+        if self.switcher.is_some() {
+            return self.switcher_key(k);
+        }
+        if self.dialog.is_none() && self.picker.is_some() {
+            return self.picker_key(k);
         }
         if self.dialog.is_some() || self.rebase_editor.is_some() {
             return run(self, k.shortcut);
@@ -131,6 +141,65 @@ impl App {
             return task;
         }
         run(self, k.shortcut.filter(|s| !prompt_only(*s)))
+    }
+
+    /// Keys while the ⌃⇥ switcher is up: ⇥ / ↑↓ move, ⏎ switches, Esc
+    /// cancels (letting go of ⌃ switches too, see `Message::Modifiers`).
+    fn switcher_key(&mut self, k: KeyInput) -> Task<Message> {
+        match (k.shortcut, k.nav.map(|n| n.key)) {
+            (Some(Shortcut::CycleTab { back }), _) => self.cycle_tab(back),
+            (Some(Shortcut::Escape), _) => {
+                self.switcher = None;
+                Task::none()
+            }
+            (_, Some(Key::Up)) => self.cycle_tab(true),
+            (_, Some(Key::Down)) => self.cycle_tab(false),
+            (Some(Shortcut::Enter), _) | (_, Some(Key::Enter)) => self.finish_switch(),
+            _ => Task::none(),
+        }
+    }
+
+    /// Keys while the open-repository window is up: the filter field keeps
+    /// typing; ↑/↓/⏎, ⌘1–9, ⌘⌫, ⌘O and Esc drive the list.
+    fn picker_key(&mut self, k: KeyInput) -> Task<Message> {
+        let Some(picker) = self.picker.as_mut() else {
+            return Task::none();
+        };
+        if let Some(n) = k.nav {
+            let by = match n.key {
+                Key::Up => -1,
+                Key::Down => 1,
+                Key::PageUp => -picker.page(),
+                Key::PageDown => picker.page(),
+                Key::Tab => {
+                    return match picker.complete() {
+                        Some(out) => self.on_picker_output(out),
+                        None => Task::none(),
+                    };
+                }
+                Key::Enter => {
+                    return match picker.activate() {
+                        Some(out) => self.on_picker_output(out),
+                        None => Task::none(),
+                    };
+                }
+                // Everything else is typing in the filter.
+                _ => return Task::none(),
+            };
+            picker.move_by(by);
+            return Task::none();
+        }
+        let out = match k.shortcut {
+            Some(Shortcut::Escape) => picker.escape(),
+            Some(Shortcut::Forget) => picker.forget_selected(),
+            Some(Shortcut::Open) => Some(repo_picker::Output::Browse),
+            Some(Shortcut::SelectTab(i)) => {
+                return self.update(Message::Picker(repo_picker::Message::Pick(i)));
+            }
+            Some(Shortcut::Quit) => return iced::exit(),
+            _ => None,
+        };
+        out.map_or_else(Task::none, |out| self.on_picker_output(out))
     }
 
     fn on_nav(&mut self, n: Nav) -> Option<Task<Message>> {

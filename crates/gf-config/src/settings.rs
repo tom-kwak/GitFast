@@ -9,7 +9,7 @@ use gf_core::{GfError, Result};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of remembered recent repositories.
-const MAX_RECENT: usize = 20;
+const MAX_RECENT: usize = 100;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn recent_repos_are_deduplicated_and_capped() {
         let mut s = Settings::default();
-        for i in 0..25 {
+        for i in 0..MAX_RECENT + 5 {
             s.remember_repo(Path::new(&format!("/r{i}")));
         }
         s.remember_repo(Path::new("/r10"));
