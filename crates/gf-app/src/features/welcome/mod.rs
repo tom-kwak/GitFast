@@ -12,7 +12,8 @@ use crate::widgets::{self, colored, dim, format, mono};
 #[derive(Debug, Clone)]
 pub enum Message {
     OpenRecent(PathBuf),
-    PickFolder,
+    /// The open-repository window.
+    Open,
 }
 
 const BANNER: &str = r"
@@ -61,7 +62,7 @@ pub fn view<'a>(t: &'a Tokens, recent: &'a [PathBuf], drop_hover: bool) -> Eleme
     let content = column![
         colored(t, BANNER, t.accent()),
         row![
-            widgets::text_button(t, "Open repository…", Some("⌘O"), Some(Message::PickFolder)),
+            widgets::text_button(t, "Open repository…", Some("⌘O"), Some(Message::Open)),
             drop_line,
         ]
         .spacing(16)

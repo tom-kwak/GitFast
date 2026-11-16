@@ -46,8 +46,8 @@ use crate::features::diff_view::DiffSource;
 use crate::features::prompt::PROMPT_ID;
 use crate::features::status_line::Flash;
 use crate::features::{
-    changes, command_log, commit_box, diff_view, history, prompt, sidebar, status_line, tabs,
-    toolbar, welcome,
+    changes, command_log, commit_box, diff_view, history, prompt, repo_picker, sidebar,
+    status_line, tab_switcher, tabs, toolbar, welcome,
 };
 use crate::nav::{Key, Nav, Pane};
 use crate::repo_tab::{History, RepoTab, Snapshot};
@@ -57,6 +57,15 @@ use crate::widgets;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shortcut {
     Open,
+    /// ⌘⌫: forget the selected repository in the open window.
+    Forget,
+    /// ⌃⇥ / ⌃⇧⇥: walk the tabs in most-recently-used order.
+    CycleTab {
+        back: bool,
+    },
+    /// ⌘⇧[ / ⌘⇧]: the tab to the left / right.
+    PrevTab,
+    NextTab,
     CloseTab,
     Refresh,
     SelectTab(usize),
@@ -115,6 +124,12 @@ pub enum Message {
     CodeView(diff_view::Role),
     Commit(commit_box::Message),
     Dialog(dialog::Message),
+    Picker(repo_picker::Message),
+    Switcher(tab_switcher::Message),
+    /// Show the open-repository window (⌘O, `+ open`).
+    OpenPicker,
+    /// An animation frame (only subscribed to while something animates).
+    Frame,
 
     Core(CoreEvent),
     Key(Shortcut),
@@ -216,6 +231,12 @@ pub struct App {
     prompt: prompt::State,
     log: command_log::State,
     dialog: Option<Dialog<Purpose>>,
+    /// Open-repository window (modal, under a confirmation it asks for).
+    picker: Option<repo_picker::State>,
+    /// Tabs by last use, for ⌃⇥.
+    mru: tab_switcher::Mru,
+    /// ⌃⇥ switcher shown: the highlighted position in the MRU order.
+    switcher: Option<usize>,
     /// Open action menu (right-click / `actions ▾`).
     menu: Option<context_menu::State<Message>>,
     /// Where the mouse was last pressed: menus open there.
@@ -293,6 +314,9 @@ impl App {
             prompt: prompt::State::default(),
             log: command_log::State::default(),
             dialog: None,
+            picker: None,
+            mru: tab_switcher::Mru::default(),
+            switcher: None,
             menu: None,
             pointer: crate::widgets::pointer::Pointer::default(),
             rebase_editor: None,
@@ -377,16 +401,24 @@ impl App {
             Message::Tabs(m) => match m {
                 tabs::Message::Select(i) => self.select_tab(i),
                 tabs::Message::Close(i) => self.close_tab(i),
-                tabs::Message::Open => self.update(Message::PickFolder),
+                tabs::Message::Open => self.update(Message::OpenPicker),
             },
             Message::Toolbar(m) => self.on_toolbar(m),
             Message::Welcome(m) => match m {
                 welcome::Message::OpenRecent(p) => self.update(Message::Open(p)),
-                welcome::Message::PickFolder => self.update(Message::PickFolder),
+                welcome::Message::Open => self.update(Message::OpenPicker),
             },
             Message::Modifiers(m) => {
                 self.modifiers = m;
+                // Letting go of ⌃ picks the highlighted tab.
+                if !m.control() && self.switcher.is_some() {
+                    return self.finish_switch();
+                }
                 Task::none()
+            }
+            Message::Switcher(tab_switcher::Message::Pick(i)) => {
+                self.switcher = None;
+                self.select_tab(i)
             }
             // Keys belong to an open menu.
             Message::Prompt(_) if self.menu.is_some() => Task::none(),
@@ -598,6 +630,7 @@ impl App {
                 if let Some(a) = active.filter(|a| *a < self.tabs.len()) {
                     self.active = a;
                 }
+                self.note_active();
                 Task::batch(tasks)
             }
             Message::PickFolder => Task::perform(
@@ -610,6 +643,19 @@ impl App {
                 },
                 Message::Picked,
             ),
+            Message::OpenPicker => self.open_picker(),
+            Message::Frame => Task::none(),
+            Message::Picker(m) => match self.picker.as_mut() {
+                Some(p) => {
+                    let Update { task, output } = p.update(m);
+                    let task = task.map(Message::Picker);
+                    match output {
+                        Some(out) => Task::batch([task, self.on_picker_output(out)]),
+                        None => task,
+                    }
+                }
+                None => Task::none(),
+            },
             Message::Picked(Some(path)) => self.update(Message::Open(path)),
             Message::Picked(None) => self.restore_focus(),
             Message::Loaded(id, result) => self.on_loaded(id, result),
@@ -768,8 +814,7 @@ impl App {
     fn add_tab(&mut self, repo: Repository) -> Task<Message> {
         // Already open (possibly via another path inside it): just switch.
         if let Some(i) = self.tabs.iter().position(|t| t.repo.cwd() == repo.cwd()) {
-            self.active = i;
-            return Task::none();
+            return self.select_tab(i);
         }
         let cwd = repo.cwd().to_path_buf();
         let handle = repo.handle();
@@ -795,6 +840,7 @@ impl App {
         let load = ops::load_snapshot(&mut tab);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.note_active();
         self.settings.remember_repo(&cwd);
         self.save_settings();
         self.flash(
@@ -808,9 +854,135 @@ impl App {
     fn select_tab(&mut self, i: usize) -> Task<Message> {
         if i < self.tabs.len() && i != self.active {
             self.active = i;
+            self.note_active();
             self.save_settings();
         }
+        self.reveal_active_tab()
+    }
+
+    /// Remembers the active tab as the most recently used.
+    fn note_active(&mut self) {
+        if let Some(id) = self.active_tab().map(|t| t.repo.id()) {
+            self.mru.touch(id);
+        }
+    }
+
+    fn mru_order(&self) -> Vec<usize> {
+        let ids: Vec<_> = self.tabs.iter().map(|t| t.repo.id()).collect();
+        self.mru.order(&ids)
+    }
+
+    /// Scrolls the tab bar so the active tab is in view.
+    fn reveal_active_tab(&self) -> Task<Message> {
+        let n = self.tabs.len();
+        if n < 2 {
+            return Task::none();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let x = self.active as f32 / (n - 1) as f32;
+        operation::snap_to(
+            tabs::BAR_ID,
+            iced::widget::scrollable::RelativeOffset {
+                x: Some(x),
+                y: None,
+            },
+        )
+    }
+
+    /// ⌃⇥: shows the switcher on the previous tab, or moves along it.
+    fn cycle_tab(&mut self, back: bool) -> Task<Message> {
+        let n = self.tabs.len();
+        if n < 2 {
+            self.flash(NoteKind::Info, "only one tab open — ⌘O opens another");
+            return Task::none();
+        }
+        self.switcher = Some(tab_switcher::step(self.switcher, n, back));
+        // A ⌃⇥ that arrives after ⌃ was already let go switches at once.
+        if !self.modifiers.control() {
+            return self.finish_switch();
+        }
         Task::none()
+    }
+
+    fn finish_switch(&mut self) -> Task<Message> {
+        let Some(pos) = self.switcher.take() else {
+            return Task::none();
+        };
+        match self.mru_order().get(pos) {
+            Some(&i) => self.select_tab(i),
+            None => Task::none(),
+        }
+    }
+
+    /// Shows the open-repository window with the recent repositories.
+    fn open_picker(&mut self) -> Task<Message> {
+        self.menu = None;
+        let entries = self
+            .settings
+            .repos
+            .recent
+            .iter()
+            .map(|path| {
+                let tab = self.tabs.iter().position(|t| t.repo.cwd() == path);
+                repo_picker::Entry::read(path.clone(), tab)
+            })
+            .collect();
+        self.picker = Some(repo_picker::State::new(entries));
+        operation::focus(repo_picker::FILTER_ID)
+    }
+
+    fn on_picker_output(&mut self, out: repo_picker::Output) -> Task<Message> {
+        use repo_picker::Output;
+        match out {
+            Output::Open(path) => {
+                self.picker = None;
+                Task::batch([self.restore_focus(), self.update(Message::Open(path))])
+            }
+            Output::SwitchTab(i) => {
+                self.picker = None;
+                Task::batch([self.restore_focus(), self.select_tab(i)])
+            }
+            Output::Forget(path) => {
+                let shown = widgets::format::tilde(&path);
+                self.confirm(dialogs::Confirm::change(
+                    "forget-recent",
+                    "Forget repository",
+                    vec![
+                        format!("Remove {shown} from the recent list?"),
+                        "The folder and its files are not touched; open it again to bring it back."
+                            .into(),
+                    ],
+                    "Forget",
+                    Purpose::ForgetRecent(path),
+                ))
+            }
+            Output::Completed => Task::batch([
+                operation::focus(repo_picker::FILTER_ID),
+                operation::move_cursor_to_end(repo_picker::FILTER_ID),
+            ]),
+            Output::Browse => {
+                self.picker = None;
+                self.update(Message::PickFolder)
+            }
+            Output::Close => {
+                self.picker = None;
+                self.restore_focus()
+            }
+        }
+    }
+
+    /// Removes `path` from the recent list (and from the open window).
+    fn forget_recent(&mut self, path: &Path) -> Task<Message> {
+        self.settings.repos.recent.retain(|p| p != path);
+        self.save_settings();
+        if let Some(p) = self.picker.as_mut() {
+            p.forgotten(path);
+        }
+        self.flash(
+            NoteKind::Info,
+            format!("forgot {}", widgets::format::tilde(path)),
+        );
+        self.restore_focus()
     }
 
     fn close_tab(&mut self, i: usize) -> Task<Message> {
@@ -876,7 +1048,17 @@ impl App {
             };
         }
         match k {
-            Shortcut::Open => self.update(Message::PickFolder),
+            Shortcut::Open => self.open_picker(),
+            Shortcut::Forget => Task::none(),
+            Shortcut::CycleTab { back } => self.cycle_tab(back),
+            Shortcut::PrevTab | Shortcut::NextTab => {
+                let n = self.tabs.len();
+                if n < 2 {
+                    return Task::none();
+                }
+                let by = if k == Shortcut::PrevTab { n - 1 } else { 1 };
+                self.select_tab((self.active + by) % n)
+            }
             Shortcut::CloseTab => self.close_tab(self.active),
             Shortcut::Refresh => self.refresh_active(),
             Shortcut::SelectTab(i) => self.select_tab(i),
@@ -1027,12 +1209,26 @@ impl App {
             .height(Length::Fill)
             .style(style::app(t));
 
-        // A confirmation sits above the rebase editor that asked for it.
-        let modal: Option<Element<'_, Message>> = match (&self.dialog, &self.rebase_editor) {
-            (Some(d), _) => Some(d.view(t).map(Message::Dialog)),
-            (None, Some(e)) => Some(e.view(t).map(Message::RebaseEditor)),
-            (None, None) => None,
-        };
+        // A confirmation sits above the window (picker, rebase editor) that
+        // asked for it.
+        let modal: Option<Element<'_, Message>> =
+            match (&self.dialog, &self.picker, &self.rebase_editor) {
+                (Some(d), _, _) => Some(d.view(t).map(Message::Dialog)),
+                (None, Some(p), _) => Some(p.view(cx).map(Message::Picker)),
+                _ if self.switcher.is_some() => Some(
+                    tab_switcher::view(
+                        t,
+                        &self.tabs,
+                        &self.mru_order(),
+                        self.switcher.unwrap_or(0),
+                    )
+                    .map(Message::Switcher),
+                ),
+                (None, None, Some(e)) => Some(e.view(t).map(Message::RebaseEditor)),
+                (None, None, None) => None,
+            };
+        // Clicking the shade around the open window closes it.
+        let close_on_shade = self.dialog.is_none() && self.picker.is_some();
         // The layer structure never changes: switching the root between
         // `base` and `stack![base, …]` would rebuild the widget tree and
         // reset every scroll position (lists jumped to the top whenever a
@@ -1045,15 +1241,21 @@ impl App {
                     a: 0.55,
                     ..Color::BLACK
                 };
-                opaque(
-                    container(center(modal))
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .style(move |_| container::Style {
-                            background: Some(Background::Color(shade)),
-                            ..container::Style::default()
-                        }),
-                )
+                let backdrop = container(iced::widget::space())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(move |_| container::Style {
+                        background: Some(Background::Color(shade)),
+                        ..container::Style::default()
+                    });
+                let backdrop = if close_on_shade {
+                    iced::widget::mouse_area(backdrop)
+                        .on_press(Message::Picker(repo_picker::Message::Close))
+                        .into()
+                } else {
+                    Element::from(backdrop)
+                };
+                opaque(stack![backdrop, center(opaque(modal))])
             }
         };
         let menu_layer: Element<'_, Message> = match &self.menu {
@@ -1075,6 +1277,14 @@ impl App {
             }),
             event::listen_with(global_event),
         ];
+        // The open window shakes when it refuses a path: redraw each frame.
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(repo_picker::State::shaking)
+        {
+            subs.push(window::frames().map(|_| Message::Frame));
+        }
         if self.busy() {
             subs.push(iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick));
         } else if !self.tabs.is_empty() {
@@ -1343,9 +1553,19 @@ fn shortcut(
     status: event::Status,
 ) -> Option<Shortcut> {
     use keyboard::key::{Key, Named};
+    // ⌃⇥ (Ctrl+Tab everywhere; on macOS ⌘ is a different key).
+    if modifiers.control() && !modifiers.logo() {
+        if let Key::Named(Named::Tab) = key.as_ref() {
+            return Some(Shortcut::CycleTab {
+                back: modifiers.shift(),
+            });
+        }
+    }
     if modifiers.command() {
-        if let Key::Named(Named::Enter) = key.as_ref() {
-            return Some(Shortcut::Commit);
+        match key.as_ref() {
+            Key::Named(Named::Enter) => return Some(Shortcut::Commit),
+            Key::Named(Named::Backspace) => return Some(Shortcut::Forget),
+            _ => {}
         }
         // Layout-independent: ⌘O works with the Korean input method too.
         // ⌘C/V/X/A/Z are left to text fields.
@@ -1357,6 +1577,9 @@ fn shortcut(
             'j' => Shortcut::ToggleLog,
             'b' => Shortcut::ToggleRefs,
             'e' => Shortcut::ToggleLocal,
+            // ⌘⇧[ / ⌘⇧]: previous / next repository tab (Safari, Terminal).
+            '[' | '{' if modifiers.shift() => Shortcut::PrevTab,
+            ']' | '}' if modifiers.shift() => Shortcut::NextTab,
             // Left tab / right tab of the main area.
             '[' => Shortcut::CodeView(diff_view::Role::Commit),
             ']' => Shortcut::CodeView(diff_view::Role::Local),
@@ -1404,6 +1627,54 @@ mod tests {
         status: event::Status,
     ) -> Option<Shortcut> {
         shortcut(&key, modifiers, Physical::Code(code), status)
+    }
+
+    #[test]
+    fn tab_switching_keys() {
+        let ctrl = keyboard::Modifiers::CTRL;
+        let tab = Key::Named(Named::Tab);
+        assert_eq!(
+            press(tab.clone(), Code::Tab, ctrl, event::Status::Captured),
+            Some(Shortcut::CycleTab { back: false })
+        );
+        assert_eq!(
+            press(
+                tab,
+                Code::Tab,
+                ctrl | keyboard::Modifiers::SHIFT,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::CycleTab { back: true })
+        );
+        let cmd_shift = keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT;
+        assert_eq!(
+            press(
+                Key::Character("{".into()),
+                Code::BracketLeft,
+                cmd_shift,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::PrevTab)
+        );
+        assert_eq!(
+            press(
+                Key::Character("}".into()),
+                Code::BracketRight,
+                cmd_shift,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::NextTab)
+        );
+        // Without ⇧ the brackets still switch the main area's mode.
+        assert_eq!(
+            press(
+                Key::Character("[".into()),
+                Code::BracketLeft,
+                keyboard::Modifiers::COMMAND,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::CodeView(diff_view::Role::Commit))
+        );
     }
 
     #[test]

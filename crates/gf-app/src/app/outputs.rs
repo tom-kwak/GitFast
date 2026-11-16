@@ -617,7 +617,7 @@ impl App {
                 }
             }
             PromptCommand::Git(args) => self.run_git(args),
-            PromptCommand::Open(None) => self.update(Message::PickFolder),
+            PromptCommand::Open(None) => self.open_picker(),
             PromptCommand::Open(Some(path)) => self.update(Message::Open(path)),
             PromptCommand::CloseTab => self.close_tab(self.active),
             PromptCommand::SelectTab(i) => {
