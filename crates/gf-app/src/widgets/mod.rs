@@ -4,6 +4,7 @@
 pub mod format;
 pub mod graph_canvas;
 pub mod pointer;
+pub mod splitter;
 pub mod virtual_list;
 
 use iced::widget::{Text, button, column, container, row, scrollable, text, tooltip};

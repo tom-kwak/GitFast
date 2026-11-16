@@ -31,7 +31,13 @@ pub struct AppearanceSettings {
     pub show_command_log: bool,
     /// Show the refs sidebar (left).
     pub show_refs: bool,
+    /// Width of the file list beside the diff, in character columns; the
+    /// same in HISTORY and WORKING TREE. Dragged with the divider.
+    pub list_cols: f32,
 }
+
+/// Default width of the file list beside the diff (character columns).
+pub const DEFAULT_LIST_COLS: f32 = 34.0;
 
 impl Default for AppearanceSettings {
     fn default() -> Self {
@@ -40,6 +46,7 @@ impl Default for AppearanceSettings {
             font_size: 13,
             show_command_log: true,
             show_refs: true,
+            list_cols: DEFAULT_LIST_COLS,
         }
     }
 }
