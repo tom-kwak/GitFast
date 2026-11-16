@@ -402,7 +402,20 @@ impl Repository {
 
     // ---- SyncOps
     /// `git fetch --prune` from one remote or all of them.
+    /// With `with_gix_fetch(true)`, gix first; a cancel is final, any
+    /// other gix error or unsupported case fetches with the CLI.
     pub async fn fetch(&self, remote: Option<&str>, opts: RunOptions) -> Result<()> {
+        #[cfg(feature = "gix-fetch")]
+        if let Some(gix) = self.gix.as_ref().filter(|_| self.gix_fetch) {
+            match SyncOps::fetch(gix, remote, opts.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(e @ gf_core::GfError::Cancelled) => return Err(e),
+                Err(gf_core::GfError::Unsupported(what)) => {
+                    tracing::debug!(what, "fetch: not with gix, using git CLI");
+                }
+                Err(e) => tracing::warn!(error = %e, "fetch: gix failed, using git CLI"),
+            }
+        }
         SyncOps::fetch(&self.cli, remote, opts).await
     }
     pub async fn pull(&self, mode: PullMode, opts: RunOptions) -> Result<()> {

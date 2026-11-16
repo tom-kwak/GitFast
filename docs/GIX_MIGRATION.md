@@ -19,7 +19,8 @@ gf-git/src/
 │  ├─ cli.rs          CliBackend: 시스템 git 실행(command/read/exec 헬퍼)
 │  ├─ gix_backend.rs  GixBackend: gix 조회 구현(log·ref·reflog·stash·worktree·rebase). 지원하지 않는 메서드는 Err(Unsupported)
 │  ├─ gix_status.rs   GixBackend: status, numstat
-│  └─ gix_refs.rs     GixBackend: 브랜치·경량 태그 ref 편집
+│  ├─ gix_refs.rs     GixBackend: 브랜치·경량 태그 ref 편집
+│  └─ gix_fetch.rs    GixBackend: fetch --prune (기능 `gix-fetch`, 설정으로 켤 때만)
 ├─ ops/*.rs      영역별 타입·파서와 `impl XxxOps for CliBackend` (CLI 구현)
 ├─ routes.rs     Repository → 명령별 백엔드 선택표(이 파일만 보면 누가 처리하는지 압니다)
 └─ repository.rs Repository: UI가 쓰는 진입점(open, handle, run …)
@@ -36,6 +37,7 @@ gf-git/src/
 - **명령 로그:** gix로 실행한 쓰기도 `GitRunner::report_in_process`로 명령 로그에 남깁니다(예: `gix branch feature/x`, 출력 `Created branch feature/x at abc1234.`).
 - **에러:** gix 에러는 `GfError`의 별도 변형으로 구분합니다. 같은 실패를 CLI로 재시도했을 때 나오는 stderr로 실패 다이얼로그(`diagnose`)가 분류합니다.
 - **끄는 방법:** 환경변수 `GF_GIT_BACKEND=cli` 또는 Cargo 기능 `gix` 끄기(`--no-default-features`)로 언제든 CLI만 쓸 수 있습니다.
+- **gix fetch 켜기:** 기본은 꺼져 있습니다. 프롬프트에서 `:gix-fetch on`(설정 `git.gix_fetch = true`), 끄려면 `:gix-fetch off`.
 
 ## 2. 명령별 백엔드
 
@@ -68,7 +70,8 @@ gf-git/src/
 | CommitOps | commit, head_message | CLI | hook, 서명 |
 | IndexOps / ConflictOps | stage, unstage, discard, apply_patch, 충돌 해결 | CLI | gix-apply 미구현 |
 | IntegrateOps | merge, rebase, cherry-pick, revert, continue/skip/abort | CLI | sequencer 없음 |
-| SyncOps | fetch | CLI → gix 선택 기능 (P4) | 인증·ssh 설정 차이 |
+| SyncOps | fetch(`--prune`, 한 remote 또는 `--all`) | **gix** ✅ (설정을 켰을 때만, 기본 CLI) | 진행률·취소·명령 로그 지원. 아래 차이 참고 |
+| | ↳ CLI로 보내는 경우 | CLI | shallow 저장소, submodule 있음(git은 필요 시 submodule도 fetch), `src/*:dst/*` 외 refspec, `--all`에서 제외 설정된 remote, 등록되지 않은 URL, `followRemoteHEAD=always`, gix 오류(인증 실패 등) |
 | | pull, push | CLI | 고수준 push 없음 |
 | BisectOps / LfsOps | 전부 | CLI | 미구현 |
 | (Repository::run) | 프롬프트의 임의 git 명령 | CLI | "모든 git 명령" 경로 |
@@ -82,8 +85,15 @@ gf-git/src/
 | **P2** gix 조회 B ✅ | status, numstat (diff hunk는 CLI 유지) | 계약 테스트 통과(스테이징·워킹트리·이름변경+수정·권한 변경·줄끝 개행 변경·바이너리·중첩 untracked·충돌·detached·upstream), 벤치마크에서 이득 확인 |
 | **P2b** submodule ✅ | submodule이 있는 저장소의 status·numstat (submodule 목록은 CLI 유지) | 계약 테스트 통과(깨끗함·다른 커밋·내용 수정·untracked·스테이징된 새 커밋·새로 추가·미초기화), 실제 저장소 3곳에서 벤치마크 결과 일치 |
 | **P3** gix ref 쓰기 ✅ | 브랜치 생성·삭제, 경량 태그 생성·삭제 (이름변경은 reflog·설정 이동 때문에 CLI 유지) | 같은 저장소 두 벌에 CLI와 gix로 각각 적용해 ref·reflog·설정이 같은지 비교하는 계약 테스트 8건 통과, git이 해야 하는 경우는 CLI로 넘어가는지 확인, 명령 로그 기록 확인 |
-| **P4** 선택 기능 | fetch를 gix로(설정에서 켤 때만) | 인증·진행률이 CLI와 같은 수준 |
+| **P4** 선택 기능 ✅ | fetch를 gix로(설정 `git.gix_fetch`, `:gix-fetch on`) | 같은 원격 변경을 두 clone에 CLI·gix로 각각 fetch해 ref가 같은지 비교(새 커밋·새 브랜치·prune·강제 갱신·태그 자동 추적·도달 불가 태그 제외·remote HEAD 생성·`--all`), 객체 연결성 검사, 취소·대체 경로 테스트. 실제 HTTPS·SSH 원격과 인증 도우미로는 아직 확인하지 않음 |
 | 보류 | commit, checkout, reset, merge 계열, stash 쓰기, push/pull, blame, bisect, LFS | gix의 해당 crate가 "usable" 이상이 되면 다시 검토 |
+
+### gix fetch가 git과 다른 점 (P4)
+
+- `--prune`은 gix에 없어서 직접 구현했습니다: fetch 후 각 refspec 대상(`refs/remotes/<name>/`) 아래에서 원격에 더 이상 없는 ref를 ref 트랜잭션으로 지웁니다.
+- git 2.48+처럼 없는 `refs/remotes/<name>/HEAD`를 원격 HEAD로 만듭니다. 설치된 git이 2.48 미만이면 만들지 않습니다(같은 결과를 위해 `git --version`을 한 번 확인).
+- `FETCH_HEAD`를 쓰지 않고, `gc --auto`를 실행하지 않으며, remote 추적 ref의 reflog 메시지가 git과 다릅니다. pull은 CLI가 다시 fetch하므로 영향이 없습니다.
+- HTTPS는 시스템 TLS(macOS Security.framework), SSH는 `ssh` 프로그램, 자격 증명은 git과 같은 credential helper를 씁니다. 실패하면 CLI가 다시 fetch합니다.
 
 ## 4. 새 명령을 추가할 때
 

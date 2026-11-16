@@ -30,6 +30,9 @@ pub enum PromptCommand {
     Confirms {
         reset: bool,
     },
+    /// `:gix-fetch [on|off]`: fetch with gix instead of `git fetch`; no
+    /// argument shows the current choice.
+    GixFetch(Option<bool>),
 }
 
 /// Shell commands people type out of terminal habit that are not git
@@ -62,6 +65,10 @@ pub const BUILTINS: &[(&str, &str)] = &[
         "undo the last commit / merge / rebase / pull made in gf",
     ),
     (":local", "open/close the working tree (else history)    ⌘E"),
+    (
+        ":gix-fetch",
+        ":gix-fetch [on|off] — fetch in-process with gix (git as fallback)",
+    ),
     (":clear", "clear the command log"),
     (":help", "show this help                                ?"),
     (":quit", "quit gf                                       ⌘Q"),
@@ -143,6 +150,16 @@ pub fn parse(line: &str) -> Result<Option<PromptCommand>, String> {
                     return Err(format!("unknown option `{other}` — use `:confirm reset`"));
                 }
             },
+            "gix-fetch" => PromptCommand::GixFetch(match arg.as_deref() {
+                None => None,
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                Some(other) => {
+                    return Err(format!(
+                        "unknown option `{other}` — use `:gix-fetch on` or `off`"
+                    ));
+                }
+            }),
             "local" => PromptCommand::ToggleLocal,
             "clear" => PromptCommand::ClearLog,
             "help" | "h" => PromptCommand::Help,
@@ -401,5 +418,19 @@ mod tests {
             Ok(Some(PromptCommand::Confirms { reset: true }))
         );
         assert!(parse(":confirm nope").is_err());
+    }
+
+    #[test]
+    fn parses_gix_fetch_switch() {
+        assert_eq!(parse(":gix-fetch"), Ok(Some(PromptCommand::GixFetch(None))));
+        assert_eq!(
+            parse(":gix-fetch on"),
+            Ok(Some(PromptCommand::GixFetch(Some(true))))
+        );
+        assert_eq!(
+            parse(":gix-fetch off"),
+            Ok(Some(PromptCommand::GixFetch(Some(false))))
+        );
+        assert!(parse(":gix-fetch maybe").is_err());
     }
 }

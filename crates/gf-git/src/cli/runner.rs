@@ -45,7 +45,7 @@ impl GitOutput {
 }
 
 /// Per-call controls for a long-running command.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     /// Kills the git process when cancelled; the call returns
     /// [`GfError::Cancelled`].
@@ -112,6 +112,11 @@ impl GitRunner {
     pub fn with_cleared_env(mut self) -> Self {
         self.clear_env = true;
         self
+    }
+
+    /// The git executable this runner starts.
+    pub fn git_executable(&self) -> &std::path::Path {
+        &self.git
     }
 
     pub async fn run(&self, cmd: &GitCommand) -> Result<GitOutput> {

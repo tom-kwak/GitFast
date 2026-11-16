@@ -69,6 +69,9 @@ impl ConfirmSettings {
 pub struct GitSettings {
     /// Explicit git executable; `None` uses `git` from `PATH`.
     pub executable: Option<PathBuf>,
+    /// Fetch in-process with gix instead of `git fetch` (falls back to git
+    /// for anything gix does not handle). Off by default; `:gix-fetch on`.
+    pub gix_fetch: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

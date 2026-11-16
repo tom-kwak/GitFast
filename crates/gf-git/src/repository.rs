@@ -16,6 +16,9 @@ pub struct Repository {
     pub(crate) cli: CliBackend,
     #[cfg(feature = "gix")]
     pub(crate) gix: Option<crate::backend::GixBackend>,
+    /// Fetch through gix (setting `git.gix_fetch`; needs feature
+    /// `gix-fetch`). Off by default.
+    pub(crate) gix_fetch: bool,
 }
 
 impl Repository {
@@ -66,7 +69,16 @@ impl Repository {
                 crate::backend::GixBackend::open(&handle.git_dir, runner.clone(), handle.id)
             },
             cli: CliBackend::new(handle, runner),
+            gix_fetch: false,
         })
+    }
+
+    /// Lets `fetch` use gix (with the CLI as fallback). Without the
+    /// `gix-fetch` feature this changes nothing.
+    #[must_use]
+    pub fn with_gix_fetch(mut self, on: bool) -> Self {
+        self.gix_fetch = on;
+        self
     }
 
     pub fn handle(&self) -> &RepoHandle {

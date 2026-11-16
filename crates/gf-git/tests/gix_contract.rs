@@ -665,3 +665,107 @@ async fn gix_edits_appear_in_the_command_log() {
         "{started:?}"
     );
 }
+
+// ------------------------------------------------------------------- fetch
+
+/// An origin and a second remote, two identical clones of them, then
+/// changes on origin: a new commit and tag, a new branch, a deleted branch
+/// (pruned), a rewound branch (forced update) and a tag on an unreachable
+/// commit (not auto-followed).
+#[cfg(feature = "gix-fetch")]
+fn fetch_twins() -> (TestRepo, TestRepo, TestRepo, TestRepo) {
+    let origin = TestRepo::new();
+    origin.write("a.txt", "a\n");
+    origin.commit_all("A");
+    origin.write("a.txt", "b\n");
+    origin.commit_all("B");
+    origin.git(&["tag", "-a", "v0", "-m", "zero"]);
+    origin.git(&["branch", "keep"]);
+    origin.git(&["branch", "doomed"]);
+    let mirror = TestRepo::new();
+    mirror.write("m.txt", "m\n");
+    mirror.commit_all("M");
+
+    let clone = || {
+        let c = origin.clone_repo();
+        c.git(&["remote", "add", "mirror", mirror.path().to_str().unwrap()]);
+        c
+    };
+    let (a, b) = (clone(), clone());
+
+    origin.write("a.txt", "c\n");
+    origin.commit_all("C");
+    origin.git(&["tag", "v1"]);
+    origin.git(&["branch", "fresh"]);
+    origin.git(&["branch", "-D", "doomed"]);
+    origin.git(&["branch", "-f", "keep", "HEAD~2"]);
+    origin.git(&["switch", "-q", "--detach"]);
+    origin.write("o.txt", "o\n");
+    origin.commit_all("orphan");
+    origin.git(&["tag", "orphan"]);
+    origin.git(&["switch", "-q", "main"]);
+    mirror.write("m.txt", "m2\n");
+    mirror.commit_all("M2");
+    (origin, mirror, a, b)
+}
+
+#[cfg(feature = "gix-fetch")]
+#[tokio::test]
+async fn fetch_matches_the_git_cli() {
+    for remote in [Some("origin"), None] {
+        let (_origin, _mirror, a, b) = fetch_twins();
+        let (ra, rb) = (open(&a).await, open(&b).await);
+        let (cli, _) = ra.backends();
+        let (_, gix) = rb.backends();
+        gf_git::backend::SyncOps::fetch(cli, remote, gf_git::RunOptions::default())
+            .await
+            .unwrap();
+        gf_git::backend::SyncOps::fetch(gix.unwrap(), remote, gf_git::RunOptions::default())
+            .await
+            .unwrap_or_else(|e| panic!("gix fetch {remote:?}: {e}"));
+        let refs = |r: &TestRepo| r.git(&["for-each-ref", "--format=%(refname) %(objectname)"]);
+        assert_eq!(
+            refs(&b),
+            refs(&a),
+            "fetch {remote:?}: gix (left) vs git CLI (right)"
+        );
+        // Everything the refs point to arrived.
+        b.git(&["fsck", "--connectivity-only", "--no-dangling"]);
+    }
+}
+
+#[cfg(feature = "gix-fetch")]
+#[tokio::test]
+async fn fetch_routing_cancel_and_fallbacks() {
+    let (_origin, _mirror, a, _b) = fetch_twins();
+    let repo = open(&a).await;
+    let (_, gix) = repo.backends();
+    let gix = gix.unwrap();
+
+    let token = gf_git::CancellationToken::new();
+    token.cancel();
+    let opts = gf_git::RunOptions {
+        cancel: Some(token),
+        ..gf_git::RunOptions::default()
+    };
+    assert!(matches!(
+        gf_git::backend::SyncOps::fetch(gix, None, opts).await,
+        Err(gf_core::GfError::Cancelled)
+    ));
+    assert!(matches!(
+        gf_git::backend::SyncOps::fetch(
+            gix,
+            Some("https://example.com/x.git"),
+            gf_git::RunOptions::default()
+        )
+        .await,
+        Err(gf_core::GfError::Unsupported(_))
+    ));
+
+    // Off by default: the repository fetches with the CLI unless enabled.
+    let repo = open(&a).await.with_gix_fetch(true);
+    repo.fetch(None, gf_git::RunOptions::default())
+        .await
+        .unwrap();
+    assert!(a.git(&["branch", "-r"]).contains("origin/fresh"));
+}
