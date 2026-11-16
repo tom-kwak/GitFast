@@ -15,8 +15,8 @@ use super::{App, Message, Shortcut};
 use crate::features::context_menu;
 use crate::features::diff_view::Role;
 use crate::features::prompt::PROMPT_ID;
-use crate::features::repo_picker;
 use crate::features::sidebar::REFS_FILTER_ID;
+use crate::features::{repo_picker, tab_list};
 use crate::nav::{Key, Moved, Nav, Pane};
 use crate::theme::Tokens;
 use crate::widgets::pointer::Field;
@@ -83,6 +83,9 @@ impl App {
         if self.picker.is_some() {
             return operation::focus(repo_picker::FILTER_ID);
         }
+        if self.tab_list.is_some() {
+            return operation::focus(tab_list::FILTER_ID);
+        }
         if self.typing || self.tabs.is_empty() {
             operation::focus(PROMPT_ID)
         } else {
@@ -113,6 +116,9 @@ impl App {
         }
         if self.dialog.is_none() && self.picker.is_some() {
             return self.picker_key(k);
+        }
+        if self.dialog.is_none() && self.tab_list.is_some() {
+            return self.tab_list_key(k);
         }
         if self.dialog.is_some() || self.rebase_editor.is_some() {
             return run(self, k.shortcut);
@@ -155,6 +161,51 @@ impl App {
             (_, Some(Key::Up)) => self.cycle_tab(true),
             (_, Some(Key::Down)) => self.cycle_tab(false),
             (Some(Shortcut::Enter), _) | (_, Some(Key::Enter)) => self.finish_switch(),
+            _ => Task::none(),
+        }
+    }
+
+    /// Keys while the tab dropdown is open: the filter keeps typing;
+    /// ↑/↓/PgUp/PgDn/⏎, ⌘W, ⌘1–9, ⌘P and Esc drive the list.
+    fn tab_list_key(&mut self, k: KeyInput) -> Task<Message> {
+        let keys: Vec<tab_list::Key> = self.tabs.iter().map(tab_list::Key::of).collect();
+        let Some(list) = self.tab_list.as_mut() else {
+            return Task::none();
+        };
+        if let Some(n) = k.nav {
+            let by = match n.key {
+                Key::Up => -1,
+                Key::Down => 1,
+                Key::PageUp => -tab_list::State::page(),
+                Key::PageDown => tab_list::State::page(),
+                Key::Enter => {
+                    return match list.selected() {
+                        Some(i) => self.update(Message::TabList(tab_list::Message::Pick(i))),
+                        None => Task::none(),
+                    };
+                }
+                // Everything else is typing in the filter.
+                _ => return Task::none(),
+            };
+            list.move_by(by);
+            return Task::none();
+        }
+        match k.shortcut {
+            Some(Shortcut::Escape) => {
+                if list.escape(&keys) {
+                    self.close_tab_list()
+                } else {
+                    Task::none()
+                }
+            }
+            Some(Shortcut::CloseTab) => match list.selected() {
+                Some(i) => self.close_tab_from_list(i),
+                None => Task::none(),
+            },
+            Some(Shortcut::SelectTab(i)) => {
+                self.update(Message::TabList(tab_list::Message::Pick(i)))
+            }
+            Some(s @ (Shortcut::TabList | Shortcut::Open | Shortcut::Quit)) => self.on_shortcut(s),
             _ => Task::none(),
         }
     }

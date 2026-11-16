@@ -204,7 +204,7 @@ pub fn view<'a>(
     container(bar)
         .padding(Padding::from([2, 4]))
         .width(Length::Fill)
-        .style(style::bar(t))
+        .style(style::toolbar(t))
         .into()
 }
 

@@ -47,7 +47,7 @@ use crate::features::prompt::PROMPT_ID;
 use crate::features::status_line::Flash;
 use crate::features::{
     changes, command_log, commit_box, diff_view, history, prompt, repo_picker, sidebar,
-    status_line, tab_switcher, tabs, toolbar, welcome,
+    status_line, tab_list, tab_switcher, tabs, toolbar, welcome,
 };
 use crate::nav::{Key, Nav, Pane};
 use crate::repo_tab::{History, RepoTab, Snapshot};
@@ -63,6 +63,8 @@ pub enum Shortcut {
     CycleTab {
         back: bool,
     },
+    /// ⌘P: the dropdown of all tabs (`▾ N tabs`).
+    TabList,
     /// ⌘⇧[ / ⌘⇧]: the tab to the left / right.
     PrevTab,
     NextTab,
@@ -126,6 +128,7 @@ pub enum Message {
     Dialog(dialog::Message),
     Picker(repo_picker::Message),
     Switcher(tab_switcher::Message),
+    TabList(tab_list::Message),
     /// Show the open-repository window (⌘O, `+ open`).
     OpenPicker,
     /// An animation frame (only subscribed to while something animates).
@@ -237,6 +240,8 @@ pub struct App {
     mru: tab_switcher::Mru,
     /// ⌃⇥ switcher shown: the highlighted position in the MRU order.
     switcher: Option<usize>,
+    /// The `▾ N tabs` dropdown, when open.
+    tab_list: Option<tab_list::State>,
     /// Open action menu (right-click / `actions ▾`).
     menu: Option<context_menu::State<Message>>,
     /// Where the mouse was last pressed: menus open there.
@@ -317,6 +322,7 @@ impl App {
             picker: None,
             mru: tab_switcher::Mru::default(),
             switcher: None,
+            tab_list: None,
             menu: None,
             pointer: crate::widgets::pointer::Pointer::default(),
             rebase_editor: None,
@@ -402,6 +408,7 @@ impl App {
                 tabs::Message::Select(i) => self.select_tab(i),
                 tabs::Message::Close(i) => self.close_tab(i),
                 tabs::Message::Open => self.update(Message::OpenPicker),
+                tabs::Message::List => self.toggle_tab_list(),
             },
             Message::Toolbar(m) => self.on_toolbar(m),
             Message::Welcome(m) => match m {
@@ -416,6 +423,7 @@ impl App {
                 }
                 Task::none()
             }
+            Message::TabList(m) => self.on_tab_list(m),
             Message::Switcher(tab_switcher::Message::Pick(i)) => {
                 self.switcher = None;
                 self.select_tab(i)
@@ -914,9 +922,70 @@ impl App {
         }
     }
 
+    fn tab_keys(&self) -> Vec<tab_list::Key> {
+        self.tabs.iter().map(tab_list::Key::of).collect()
+    }
+
+    /// ⌘P / `▾ N tabs`: opens the tab dropdown, or closes it when open.
+    fn toggle_tab_list(&mut self) -> Task<Message> {
+        if self.tab_list.take().is_some() {
+            return self.restore_focus();
+        }
+        if self.tabs.len() < 2 {
+            self.flash(NoteKind::Info, "only one tab open — ⌘O opens another");
+            return Task::none();
+        }
+        self.menu = None;
+        self.tab_list = Some(tab_list::State::new(&self.tab_keys(), self.active));
+        operation::focus(tab_list::FILTER_ID)
+    }
+
+    pub(super) fn close_tab_list(&mut self) -> Task<Message> {
+        self.tab_list = None;
+        self.restore_focus()
+    }
+
+    fn on_tab_list(&mut self, m: tab_list::Message) -> Task<Message> {
+        let keys = self.tab_keys();
+        let Some(list) = self.tab_list.as_mut() else {
+            return Task::none();
+        };
+        match m {
+            tab_list::Message::Filter(f) => {
+                list.set_filter(f, &keys);
+                Task::none()
+            }
+            tab_list::Message::Scroll(_) => {
+                list.update(&m);
+                Task::none()
+            }
+            tab_list::Message::Pick(i) => {
+                let close = self.close_tab_list();
+                Task::batch([close, self.select_tab(i)])
+            }
+            tab_list::Message::CloseTab(i) => self.close_tab_from_list(i),
+            tab_list::Message::Dismiss => self.close_tab_list(),
+        }
+    }
+
+    /// Closes a tab from the dropdown; the dropdown stays open on the
+    /// remaining tabs (closes itself when one is left).
+    pub(super) fn close_tab_from_list(&mut self, i: usize) -> Task<Message> {
+        let task = self.close_tab(i);
+        if self.tabs.len() < 2 {
+            return Task::batch([task, self.close_tab_list()]);
+        }
+        let keys = self.tab_keys();
+        if let Some(list) = self.tab_list.as_mut() {
+            list.refilter(&keys);
+        }
+        Task::batch([task, operation::focus(tab_list::FILTER_ID)])
+    }
+
     /// Shows the open-repository window with the recent repositories.
     fn open_picker(&mut self) -> Task<Message> {
         self.menu = None;
+        self.tab_list = None;
         let entries = self
             .settings
             .repos
@@ -1051,6 +1120,7 @@ impl App {
             Shortcut::Open => self.open_picker(),
             Shortcut::Forget => Task::none(),
             Shortcut::CycleTab { back } => self.cycle_tab(back),
+            Shortcut::TabList => self.toggle_tab_list(),
             Shortcut::PrevTab | Shortcut::NextTab => {
                 let n = self.tabs.len();
                 if n < 2 {
@@ -1166,7 +1236,9 @@ impl App {
 
         let mut layout = column![].height(Length::Fill);
         if !self.tabs.is_empty() {
-            layout = layout.push(tabs::view(t, &self.tabs, self.active).map(Message::Tabs));
+            layout = layout.push(
+                tabs::view(t, &self.tabs, self.active, self.tab_list.is_some()).map(Message::Tabs),
+            );
         }
         if let Some(tab) = tab {
             layout = layout.push(
@@ -1258,9 +1330,12 @@ impl App {
                 opaque(stack![backdrop, center(opaque(modal))])
             }
         };
-        let menu_layer: Element<'_, Message> = match &self.menu {
-            Some(menu) => opaque(menu.view(t).map(Message::Menu)),
-            None => empty(),
+        let menu_layer: Element<'_, Message> = match (&self.menu, &self.tab_list) {
+            (Some(menu), _) => opaque(menu.view(t).map(Message::Menu)),
+            (None, Some(list)) => {
+                opaque(list.view(t, &self.tabs, self.active).map(Message::TabList))
+            }
+            (None, None) => empty(),
         };
         let screen: Element<'_, Message> = stack![base, modal_layer, menu_layer].into();
         self.pointer.track(screen)
@@ -1571,6 +1646,7 @@ fn shortcut(
         // ⌘C/V/X/A/Z are left to text fields.
         return Some(match key.to_latin(physical)? {
             'o' => Shortcut::Open,
+            'p' => Shortcut::TabList,
             'w' => Shortcut::CloseTab,
             'r' => Shortcut::Refresh,
             'l' => Shortcut::FocusPrompt,

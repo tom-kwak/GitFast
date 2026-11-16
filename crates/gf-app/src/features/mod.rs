@@ -17,6 +17,7 @@ pub mod rebase_editor;
 pub mod repo_picker;
 pub mod sidebar;
 pub mod status_line;
+pub mod tab_list;
 pub mod tab_switcher;
 pub mod tabs;
 pub mod toolbar;
