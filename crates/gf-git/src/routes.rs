@@ -474,7 +474,13 @@ impl Repository {
         UndoOps::capture(&self.cli, scope).await
     }
     /// Puts back a captured state (see `ops::undo`).
-    pub async fn restore(&self, scope: &Scope, to: &Capture, mode: HeadMode) -> Result<()> {
-        UndoOps::restore(&self.cli, scope, to, mode).await
+    pub async fn restore(
+        &self,
+        scope: &Scope,
+        expected: Option<&Capture>,
+        to: &Capture,
+        mode: HeadMode,
+    ) -> Result<()> {
+        UndoOps::restore(&self.cli, scope, expected, to, mode).await
     }
 }

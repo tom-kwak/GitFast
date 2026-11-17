@@ -412,10 +412,12 @@ pub trait UndoOps {
     /// The state of everything `scope` covers. Saves work tree files as
     /// blobs so they can be written back later.
     fn capture(&self, scope: &Scope) -> impl Future<Output = Result<Capture>> + Send;
-    /// Puts back what `to` captured (HEAD moved with `mode`).
+    /// Puts back what `to` captured (HEAD moved with `mode`), after
+    /// checking the repository still looks like `expected` (when given).
     fn restore(
         &self,
         scope: &Scope,
+        expected: Option<&Capture>,
         to: &Capture,
         mode: HeadMode,
     ) -> impl Future<Output = Result<()>> + Send;

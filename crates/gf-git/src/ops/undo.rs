@@ -325,6 +325,22 @@ impl CliBackend {
                         Some(FileContent::Symlink(std::fs::read_link(&abs)?)),
                     ));
                 }
+                Ok(m) if m.is_file() && needs_own_hash(rel) => {
+                    let id = self
+                        .read(
+                            self.command(["hash-object", "-w", "--no-filters", "--"])
+                                .arg(rel),
+                        )
+                        .await?;
+                    let oid = String::from_utf8_lossy(&id).trim_end().to_owned();
+                    out.push((
+                        rel.clone(),
+                        Some(FileContent::Blob {
+                            oid,
+                            executable: executable(&m),
+                        }),
+                    ));
+                }
                 Ok(m) if m.is_file() => {
                     to_hash.push((out.len(), executable(&m)));
                     out.push((rel.clone(), None));
@@ -411,8 +427,14 @@ impl CliBackend {
                 .await
                 .unwrap_or_default();
             for rec in text.split('\0').filter(|r| !r.is_empty()) {
-                let (k, v) = rec.split_once('\n').unwrap_or((rec, ""));
-                out.push((k.to_owned(), v.to_owned()));
+                // A key with no `=` at all means true (and can only be
+                // written back with a value).
+                let (k, v) = rec.split_once('\n').unwrap_or((rec, "true"));
+                // `^branch\.x\.` also matches `branch.x.y.remote` (branch
+                // `x.y`): keep only this section's own keys.
+                if in_section(k, section) {
+                    out.push((k.to_owned(), v.to_owned()));
+                }
             }
         }
         out
@@ -486,25 +508,53 @@ impl UndoOps for CliBackend {
         })
     }
 
-    async fn restore(&self, scope: &Scope, to: &Capture, mode: HeadMode) -> Result<()> {
+    async fn restore(
+        &self,
+        scope: &Scope,
+        expected: Option<&Capture>,
+        to: &Capture,
+        mode: HeadMode,
+    ) -> Result<()> {
         let now = self.capture(scope).await?;
 
-        // Stash entries that are not in the target go first (undoing a
-        // stash push drops the entry it made).
-        if scope.stash {
-            let extra: Vec<usize> = now
-                .stash
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| !to.stash.iter().any(|t| t.oid == s.oid))
-                .map(|(i, _)| i)
-                .collect();
-            for i in extra.into_iter().rev() {
-                self.exec(
-                    self.command(["stash", "drop", "-q"])
-                        .arg(format!("stash@{{{i}}}")),
+        // Checked again right before writing: something may have changed
+        // while the user was reading the confirmation.
+        if let Some(expected) = expected {
+            let changed = expected.differences(&now);
+            if !changed.is_empty() {
+                return Err(GfError::Other(format!(
+                    "changed since it was checked ({}) — nothing was changed, try again",
+                    changed.join(", ")
+                )));
+            }
+        }
+
+        // Everything needed is still there before anything is changed:
+        // saved file contents can be pruned by `git gc` after two weeks.
+        let blobs: Vec<&str> = to
+            .files
+            .iter()
+            .filter_map(|(_, c)| match c {
+                Some(FileContent::Blob { oid, .. }) => Some(oid.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !blobs.is_empty() {
+            let input: String = blobs.iter().map(|o| format!("{o}\n")).collect();
+            let out = self
+                .read(
+                    self.command(["cat-file", "--batch-check=%(objecttype)"])
+                        .stdin(input),
                 )
                 .await?;
+            let missing = String::from_utf8_lossy(&out)
+                .lines()
+                .filter(|l| *l != "blob")
+                .count();
+            if missing > 0 {
+                return Err(GfError::Other(format!(
+                    "the saved copy of {missing} file(s) is gone (git cleans it up after about two weeks) — nothing was changed"
+                )));
             }
         }
 
@@ -607,6 +657,22 @@ impl UndoOps for CliBackend {
         }
 
         if scope.stash {
+            // Entries not in the target are dropped last, once the files
+            // they hold are back (undoing a stash push drops its entry).
+            let extra: Vec<usize> = now
+                .stash
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| !to.stash.iter().any(|t| t.oid == s.oid))
+                .map(|(i, _)| i)
+                .collect();
+            for i in extra.into_iter().rev() {
+                self.exec(
+                    self.command(["stash", "drop", "-q"])
+                        .arg(format!("stash@{{{i}}}")),
+                )
+                .await?;
+            }
             // Oldest first, so the newest missing entry ends up on top.
             for s in to.stash.iter().rev() {
                 if !now.stash.iter().any(|n| n.oid == s.oid) {
@@ -693,6 +759,11 @@ impl CliBackend {
                     }
                 }
             }
+            // Still detached: move HEAD the step's way (undoing a commit on
+            // a detached HEAD keeps its changes staged, like on a branch).
+            (None, Some(oid)) if now.is_some_and(|h| h.branch.is_none() && h.oid.is_some()) => {
+                self.exec(reset(oid)).await?;
+            }
             (None, Some(oid)) => {
                 self.exec(
                     self.command(["switch", "-q", "--detach", "--end-of-options"])
@@ -704,6 +775,26 @@ impl CliBackend {
         }
         Ok(())
     }
+}
+
+/// Whether config `key` (`section[.subsection].name`) belongs to exactly
+/// `section` (`branch.x`). Section names compare without case, like git.
+fn in_section(key: &str, section: &str) -> bool {
+    let Some((own, _name)) = key.rsplit_once('.') else {
+        return false;
+    };
+    match (own.split_once('.'), section.split_once('.')) {
+        (Some((a, sub_a)), Some((b, sub_b))) => a.eq_ignore_ascii_case(b) && sub_a == sub_b,
+        (None, None) => own.eq_ignore_ascii_case(section),
+        _ => false,
+    }
+}
+
+/// Paths `hash-object --stdin-paths` would misread (one path per line, a
+/// leading `"` is unquoted): hashed one at a time instead.
+fn needs_own_hash(p: &Path) -> bool {
+    p.to_str()
+        .is_none_or(|s| s.contains(['\n', '\r']) || s.starts_with('"'))
 }
 
 fn regex_escape(s: &str) -> String {

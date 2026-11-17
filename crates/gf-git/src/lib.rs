@@ -39,7 +39,7 @@ pub use ops::stash::StashOptions;
 pub use ops::state::RepoState;
 pub use ops::submodule::{Submodule, SubmoduleStatus};
 pub use ops::sync::{PullMode, PushOptions};
-pub use ops::undo::{Capture, HeadMode, Scope};
+pub use ops::undo::{Capture, FileContent, HeadMode, Scope};
 pub use ops::worktree::Worktree;
 pub use repository::Repository;
 pub use tokio_util::sync::CancellationToken;

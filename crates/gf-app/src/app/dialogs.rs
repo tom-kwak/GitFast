@@ -25,7 +25,7 @@ use gf_git::{PullMode, PushOptions};
 use iced::Task;
 use iced::widget::operation;
 
-use super::ops::Record;
+use super::ops::{Changes, Record};
 use super::outputs::{names, stash_options};
 use super::{App, Message, OpKind};
 use crate::features::dialog::{Dialog, FIRST_FIELD_ID, Outcome, Severity};
@@ -38,6 +38,8 @@ pub enum Purpose {
     Discard {
         tracked: Vec<PathBuf>,
         untracked: Vec<PathBuf>,
+        /// The dialog promised ⌘Z: refuse to run without a saved copy.
+        saved: bool,
     },
     ApplyPatches {
         patches: Vec<String>,
@@ -129,6 +131,8 @@ pub enum Purpose {
     /// Undo (or redo) the next step; the check box stashes first.
     Undo {
         redo: bool,
+        /// "Undo anyway": overwrite what changed since the step.
+        force: bool,
     },
     ResolveBlocks {
         path: PathBuf,
@@ -399,6 +403,12 @@ impl App {
                         tab.commit.commit_failed();
                     }
                 }
+                // Undoing several steps stops at the one not confirmed.
+                if matches!(purpose, Purpose::Undo { .. }) {
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.undo_queue = None;
+                    }
+                }
                 return self.restore_focus();
             }
         };
@@ -434,7 +444,11 @@ impl App {
         let check = |i: usize| checks.get(i).copied().unwrap_or(false);
         match purpose {
             Purpose::ForgetRecent(path) => self.forget_recent(&path),
-            Purpose::Discard { tracked, untracked } => {
+            Purpose::Discard {
+                tracked,
+                untracked,
+                saved,
+            } => {
                 let subs = self.submodule_paths(&tracked);
                 let scope = gf_git::Scope {
                     files: tracked
@@ -452,7 +466,11 @@ impl App {
                         names(&[tracked.clone(), untracked.clone()].concat())
                     ),
                     OpKind::Generic,
-                    Some(Record::new(scope)),
+                    Some(if saved {
+                        Record::new(scope).required()
+                    } else {
+                        Record::new(scope)
+                    }),
                     move |r| async move { r.discard(&tracked, &untracked).await },
                 )
             }
@@ -485,7 +503,7 @@ impl App {
                 self.op_recorded(
                     format!("delete branch {name}"),
                     OpKind::Generic,
-                    Some(Record::new(undo::branches(&[&name], false))),
+                    Some(Record::new(undo::branches(&[&name], false)).required()),
                     move |r| async move { r.delete_branch(&name, force).await },
                 )
             }
@@ -510,26 +528,29 @@ impl App {
             Purpose::DeleteTag(name) => self.op_recorded(
                 format!("delete tag {name}"),
                 OpKind::Generic,
-                Some(Record::new(undo::tag(&name))),
+                Some(Record::new(undo::tag(&name)).required()),
                 move |r| async move { r.delete_tag(&name).await },
             ),
             Purpose::Stash => {
                 let opts = stash_options(value(0), check(0), check(1));
-                let scope = undo::stash(self.changed_paths());
+                let record = Record::new(undo::stash(Vec::new())).with_changes(Changes::All);
                 self.op_recorded(
                     "stash changes",
                     OpKind::Generic,
-                    Some(Record::new(scope)),
+                    Some(record),
                     move |r| async move { r.stash_push(&opts).await },
                 )
             }
             Purpose::StashDrop(i) => self.op_recorded(
                 format!("drop stash@{{{i}}}"),
                 OpKind::Generic,
-                Some(Record::new(gf_git::Scope {
-                    stash: true,
-                    ..gf_git::Scope::default()
-                })),
+                Some(
+                    Record::new(gf_git::Scope {
+                        stash: true,
+                        ..gf_git::Scope::default()
+                    })
+                    .required(),
+                ),
                 move |r| async move { r.stash_drop(i).await },
             ),
             Purpose::Publish { branch } => {
@@ -600,13 +621,21 @@ impl App {
             Purpose::StashApply(i) => self.op_recorded(
                 format!("apply stash@{{{i}}}"),
                 OpKind::Generic,
-                Some(Record::new(undo::stash(self.changed_paths())).with_stash_entry(i)),
+                Some(
+                    Record::new(undo::stash(Vec::new()))
+                        .with_stash_entry(i)
+                        .with_changes(Changes::All),
+                ),
                 move |r| async move { r.stash_apply(i).await },
             ),
             Purpose::StashPop(i) => self.op_recorded(
                 format!("pop stash@{{{i}}}"),
                 OpKind::Generic,
-                Some(Record::new(undo::stash(self.changed_paths())).with_stash_entry(i)),
+                Some(
+                    Record::new(undo::stash(Vec::new()))
+                        .with_stash_entry(i)
+                        .with_changes(Changes::All),
+                ),
                 move |r| async move { r.stash_pop(i).await },
             ),
             Purpose::Pull => self.pull(PullMode::Config),
@@ -662,7 +691,7 @@ impl App {
                     r.abort_operation().await
                 })
             }
-            Purpose::Undo { redo } => self.run_undo(redo, check(0)),
+            Purpose::Undo { redo, force } => self.run_undo(redo, check(0), force),
             Purpose::Reset { to, mode } => {
                 let label = format!(
                     "reset {} to {}",
@@ -678,15 +707,11 @@ impl App {
                 let record = match mode {
                     gf_git::ResetMode::Soft => Record::head(gf_git::HeadMode::Soft),
                     gf_git::ResetMode::Mixed => Record::head(gf_git::HeadMode::Mixed),
-                    gf_git::ResetMode::Hard => {
-                        let paths = self.changed_paths();
-                        Record::new(gf_git::Scope {
-                            head: true,
-                            index: paths.clone(),
-                            files: paths,
-                            ..gf_git::Scope::default()
-                        })
-                    }
+                    // The dialog promised ⌘Z: the changes it throws away are
+                    // read fresh and saved, or the reset does not run.
+                    gf_git::ResetMode::Hard => Record::new(gf_git::Scope::head())
+                        .with_changes(Changes::Tracked)
+                        .required(),
                 };
                 self.op_recorded(label, OpKind::Generic, Some(record), move |r| async move {
                     r.reset(&to, mode).await

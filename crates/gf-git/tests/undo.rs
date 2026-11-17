@@ -39,11 +39,11 @@ async fn undo_redo(
     mode: HeadMode,
 ) {
     assert!(after.matches(&r.capture(scope).await.unwrap()));
-    r.restore(scope, before, mode).await.unwrap();
+    r.restore(scope, Some(after), before, mode).await.unwrap();
     assert!(before.matches(&r.capture(scope).await.unwrap()), "undo");
-    r.restore(scope, after, mode).await.unwrap();
+    r.restore(scope, Some(before), after, mode).await.unwrap();
     assert!(after.matches(&r.capture(scope).await.unwrap()), "redo");
-    r.restore(scope, before, mode).await.unwrap();
+    r.restore(scope, Some(after), before, mode).await.unwrap();
 }
 
 #[tokio::test]
@@ -109,7 +109,9 @@ async fn executable_bit_survives() {
         r.discard(&[], &[p("run.sh")]).await
     })
     .await;
-    r.restore(&scope, &before, HeadMode::Keep).await.unwrap();
+    r.restore(&scope, None, &before, HeadMode::Keep)
+        .await
+        .unwrap();
     let mode = std::fs::metadata(&script).unwrap().permissions().mode();
     assert_ne!(mode & 0o111, 0);
 }
@@ -158,7 +160,9 @@ async fn resolving_a_conflict_can_be_undone() {
     };
     let (before, _) = recorded(&r, &scope, || r.take_side(Path::new("f.txt"), Side::Theirs)).await;
     assert!(repo.git(&["ls-files", "-u"]).is_empty(), "resolved");
-    r.restore(&scope, &before, HeadMode::Keep).await.unwrap();
+    r.restore(&scope, None, &before, HeadMode::Keep)
+        .await
+        .unwrap();
     assert_eq!(
         repo.git(&["ls-files", "-u"]).lines().count(),
         3,
@@ -188,6 +192,136 @@ async fn undoing_a_commit_keeps_its_changes_staged() {
 }
 
 #[tokio::test]
+async fn undoing_a_commit_on_a_detached_head_keeps_its_changes_staged() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    let first = repo.commit_all("init");
+    repo.git(&["switch", "-q", "--detach"]);
+    repo.write("a.txt", "b\n");
+    repo.git(&["add", "a.txt"]);
+    let r = open(&repo).await;
+    let scope = Scope::head();
+    let rec = recorded(&r, &scope, || async {
+        r.commit("second", &CommitOptions::default())
+            .await
+            .map(|_| ())
+    })
+    .await;
+    undo_redo(&r, &scope, &rec, HeadMode::Soft).await;
+    assert_eq!(repo.head(), first);
+    assert_eq!(read(&repo, "a.txt").as_deref(), Some("b\n"));
+    assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "a.txt");
+}
+
+#[tokio::test]
+async fn restore_refuses_when_things_changed_since_the_check() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.commit_all("init");
+    repo.write("a.txt", "edited\n");
+    let r = open(&repo).await;
+    let scope = Scope {
+        files: vec![p("a.txt")],
+        ..Scope::default()
+    };
+    let (before, after) =
+        recorded(&r, &scope, || async { r.discard(&[p("a.txt")], &[]).await }).await;
+    repo.write("a.txt", "typed while the dialog was open\n");
+    let err = r
+        .restore(&scope, Some(&after), &before, HeadMode::Keep)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("a.txt changed"), "{err}");
+    assert_eq!(
+        read(&repo, "a.txt").as_deref(),
+        Some("typed while the dialog was open\n")
+    );
+}
+
+#[tokio::test]
+async fn restore_changes_nothing_when_a_saved_copy_is_gone() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.commit_all("init");
+    repo.write("b.txt", "b\n");
+    let r = open(&repo).await;
+    let scope = Scope {
+        files: vec![p("a.txt"), p("b.txt")],
+        ..Scope::default()
+    };
+    let (mut before, _) = recorded(&r, &scope, || async {
+        std::fs::remove_file(repo.path().join("b.txt"))?;
+        std::fs::write(repo.path().join("a.txt"), "z\n")?;
+        Ok(())
+    })
+    .await;
+    // As if `git gc` had pruned the copy of b.txt.
+    before.files[1].1 = Some(gf_git::FileContent::Blob {
+        oid: "1".repeat(40),
+        executable: false,
+    });
+    assert!(
+        r.restore(&scope, None, &before, HeadMode::Keep)
+            .await
+            .is_err()
+    );
+    assert_eq!(read(&repo, "a.txt").as_deref(), Some("z\n"), "untouched");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn odd_file_names_are_saved_too() {
+    let repo = TestRepo::new();
+    repo.write("README", "r\n");
+    repo.commit_all("init");
+    repo.write("we\nird", "1");
+    repo.write("\"quoted\"", "2");
+    let r = open(&repo).await;
+    let scope = Scope {
+        files: vec![p("we\nird"), p("\"quoted\"")],
+        ..Scope::default()
+    };
+    let rec = recorded(&r, &scope, || async {
+        r.discard(&[], &[p("we\nird"), p("\"quoted\"")]).await
+    })
+    .await;
+    undo_redo(&r, &scope, &rec, HeadMode::Keep).await;
+    assert_eq!(read(&repo, "we\nird").as_deref(), Some("1"));
+    assert_eq!(read(&repo, "\"quoted\"").as_deref(), Some("2"));
+}
+
+#[tokio::test]
+async fn branch_config_of_a_longer_name_is_left_alone() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.commit_all("init");
+    repo.git(&["branch", "x"]);
+    repo.git(&["branch", "x.y"]);
+    repo.git(&["config", "branch.x.remote", "origin"]);
+    repo.git(&["config", "branch.x.y.remote", "origin"]);
+    // A key with no value means true.
+    std::fs::write(
+        repo.path().join(".git/config"),
+        std::fs::read_to_string(repo.path().join(".git/config")).unwrap()
+            + "[branch \"x\"]\n\trebase\n",
+    )
+    .unwrap();
+    let r = open(&repo).await;
+    let scope = Scope {
+        refs: vec!["refs/heads/x".into()],
+        config: vec!["branch.x".into()],
+        ..Scope::default()
+    };
+    let rec = recorded(&r, &scope, || r.delete_branch("x", true)).await;
+    undo_redo(&r, &scope, &rec, HeadMode::Keep).await;
+    assert_eq!(
+        repo.git(&["config", "--get-all", "branch.x.y.remote"]),
+        "origin"
+    );
+    assert_eq!(repo.git(&["config", "--bool", "branch.x.rebase"]), "true");
+}
+
+#[tokio::test]
 async fn undoing_the_first_commit_unborns_the_branch() {
     let repo = TestRepo::new();
     repo.write("a.txt", "a\n");
@@ -200,7 +334,9 @@ async fn undoing_the_first_commit_unborns_the_branch() {
             .map(|_| ())
     })
     .await;
-    r.restore(&scope, &before, HeadMode::Soft).await.unwrap();
+    r.restore(&scope, None, &before, HeadMode::Soft)
+        .await
+        .unwrap();
     assert!(
         !repo
             .git_output(&["rev-parse", "-q", "--verify", "HEAD"])
@@ -302,7 +438,9 @@ async fn stash_push_and_drop_are_undone() {
         ..Scope::default()
     };
     let (before, _) = recorded(&r, &scope, || r.stash_drop(0)).await;
-    r.restore(&scope, &before, HeadMode::Keep).await.unwrap();
+    r.restore(&scope, None, &before, HeadMode::Keep)
+        .await
+        .unwrap();
     assert!(repo.git(&["stash", "list"]).contains("wip"));
 }
 
