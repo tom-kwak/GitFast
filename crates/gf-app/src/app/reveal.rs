@@ -594,6 +594,24 @@ mod tests {
         assert!(tab(&app).blame.is_none(), "close still closes");
     }
 
+    #[tokio::test]
+    async fn clicking_a_history_row_closes_blame_and_shows_the_commit() {
+        let (repo, main, _) = history_repo(10);
+        let (mut app, _home) = app_with(&repo, false).await;
+        app.active_tab_mut().expect("tab").blame = Some(
+            crate::features::blame_view::State::loading("f.txt".into(), None),
+        );
+        let _ = app.update(Message::History(crate::features::history::Message::Select(
+            main[2].clone(),
+        )));
+        assert!(tab(&app).blame.is_none(), "blame gave way");
+        assert_eq!(tab(&app).history.selected(), Some(&main[2]));
+        assert!(
+            app.panes().contains(&crate::nav::Pane::Files),
+            "files are back"
+        );
+    }
+
     #[test]
     fn thousands_are_grouped() {
         assert_eq!(thousands(7), "7");
