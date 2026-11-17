@@ -424,6 +424,7 @@ async fn stash_push_and_drop_are_undone() {
         message: Some("wip".into()),
         include_untracked: true,
         keep_index: false,
+        paths: Vec::new(),
     };
     let rec = recorded(&r, &scope, || r.stash_push(&opts)).await;
     undo_redo(&r, &scope, &rec, HeadMode::Keep).await;

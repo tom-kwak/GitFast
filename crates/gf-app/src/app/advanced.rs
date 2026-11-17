@@ -733,6 +733,28 @@ impl App {
         )
     }
 
+    /// Resolves a conflicted file with one side, whole (asks first).
+    pub(super) fn ask_take_side(
+        &mut self,
+        path: std::path::PathBuf,
+        side: gf_git::Side,
+    ) -> Task<Message> {
+        let (keep, lose) = match side {
+            gf_git::Side::Ours => ("your version", "incoming"),
+            gf_git::Side::Theirs => ("the incoming version", "your"),
+        };
+        self.confirm(Confirm::change(
+            "resolve",
+            "Take whole file",
+            vec![
+                format!("Keep {keep} of {} and stage it?", path.display()),
+                format!("All {lose} changes to this file are left out."),
+            ],
+            "Take",
+            Purpose::TakeSide(path, side),
+        ))
+    }
+
     pub(super) fn on_conflict_message(
         &mut self,
         m: crate::features::conflict_view::Message,
@@ -779,22 +801,7 @@ impl App {
                     },
                 ))
             }
-            Output::TakeFile(path, side) => {
-                let (keep, lose) = match side {
-                    gf_git::Side::Ours => ("your version", "incoming"),
-                    gf_git::Side::Theirs => ("the incoming version", "your"),
-                };
-                self.confirm(Confirm::change(
-                    "resolve",
-                    "Take whole file",
-                    vec![
-                        format!("Keep {keep} of {} and stage it?", path.display()),
-                        format!("All {lose} changes to this file are left out."),
-                    ],
-                    "Take",
-                    Purpose::TakeSide(path, side),
-                ))
-            }
+            Output::TakeFile(path, side) => self.ask_take_side(path, side),
             Output::MarkResolved(path) => self.confirm(Confirm::change(
                 "resolve",
                 "Mark resolved",

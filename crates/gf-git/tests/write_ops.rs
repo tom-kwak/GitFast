@@ -367,6 +367,7 @@ async fn stash_round_trip() {
         message: Some("wip login".into()),
         include_untracked: true,
         keep_index: false,
+        paths: Vec::new(),
     })
     .await
     .unwrap();
@@ -533,4 +534,41 @@ async fn unpushed_commits_of_an_unpublished_branch() {
         open(&TestRepo::new()).await.unpushed_count().await.unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn one_file_can_be_stashed_and_patterns_ignored_once() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.write("b.txt", "b\n");
+    repo.commit_all("init");
+    repo.write("a.txt", "changed a\n");
+    repo.write("b.txt", "changed b\n");
+    let r = open(&repo).await;
+
+    r.stash_push(&StashOptions {
+        paths: vec!["a.txt".into()],
+        ..StashOptions::default()
+    })
+    .await
+    .unwrap();
+    let left: Vec<_> = r
+        .status()
+        .await
+        .unwrap()
+        .entries
+        .iter()
+        .map(|e| e.path().clone())
+        .collect();
+    assert_eq!(
+        left,
+        [std::path::PathBuf::from("b.txt")],
+        "only a.txt stashed"
+    );
+
+    r.ignore("*.log").await.unwrap();
+    r.ignore("*.log").await.unwrap();
+    repo.write("x.log", "noise");
+    let text = std::fs::read_to_string(repo.path().join(".gitignore")).unwrap();
+    assert_eq!(text, "*.log\n", "added once");
 }
