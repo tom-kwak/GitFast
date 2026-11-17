@@ -49,16 +49,16 @@ pub fn build(branches: &[Branch], tags: &[Tag], head: &HeadInfo) -> Badges {
             kind: Kind::Tag,
         });
     }
-    if head.branch.is_none() {
-        if let Some(oid) = &head.oid {
-            map.entry(oid.clone()).or_default().insert(
-                0,
-                Badge {
-                    label: "HEAD".into(),
-                    kind: Kind::Head,
-                },
-            );
-        }
+    if head.branch.is_none()
+        && let Some(oid) = &head.oid
+    {
+        map.entry(oid.clone()).or_default().insert(
+            0,
+            Badge {
+                label: "HEAD".into(),
+                kind: Kind::Head,
+            },
+        );
     }
     map
 }

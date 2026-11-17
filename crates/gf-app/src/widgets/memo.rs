@@ -27,10 +27,10 @@ impl<K, V> Clone for Memo<K, V> {
 impl<K: PartialEq, V: Clone> Memo<K, V> {
     /// The value for `key`, computed by `f` only when the key changed.
     pub fn get(&self, key: K, f: impl FnOnce() -> V) -> V {
-        if let Some((k, v)) = self.0.borrow().as_ref() {
-            if *k == key {
-                return v.clone();
-            }
+        if let Some((k, v)) = self.0.borrow().as_ref()
+            && *k == key
+        {
+            return v.clone();
         }
         let v = f();
         *self.0.borrow_mut() = Some((key, v.clone()));

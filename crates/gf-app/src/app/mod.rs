@@ -1792,12 +1792,13 @@ fn shortcut(
 ) -> Option<Shortcut> {
     use keyboard::key::{Key, Named};
     // ⌃⇥ (Ctrl+Tab everywhere; on macOS ⌘ is a different key).
-    if modifiers.control() && !modifiers.logo() {
-        if let Key::Named(Named::Tab) = key.as_ref() {
-            return Some(Shortcut::CycleTab {
-                back: modifiers.shift(),
-            });
-        }
+    if modifiers.control()
+        && !modifiers.logo()
+        && let Key::Named(Named::Tab) = key.as_ref()
+    {
+        return Some(Shortcut::CycleTab {
+            back: modifiers.shift(),
+        });
     }
     if modifiers.command() {
         match key.as_ref() {

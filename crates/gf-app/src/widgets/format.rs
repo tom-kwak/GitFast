@@ -66,10 +66,10 @@ pub fn duration(d: Duration) -> String {
 
 /// Replaces the home directory prefix with `~`.
 pub fn tilde(path: &Path) -> String {
-    if let Some(home) = std::env::var_os("HOME") {
-        if let Ok(rest) = path.strip_prefix(&home) {
-            return format!("~/{}", rest.display());
-        }
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", rest.display());
     }
     path.display().to_string()
 }

@@ -92,10 +92,10 @@ impl App {
                 iced::clipboard::write(text)
             }
             changes::Output::Reveal(path) => {
-                if let Some(abs) = self.active_tab().map(|t| t.repo.cwd().join(&path)) {
-                    if let Err(e) = reveal(&abs) {
-                        self.flash(NoteKind::Error, format!("could not show it: {e}"));
-                    }
+                if let Some(abs) = self.active_tab().map(|t| t.repo.cwd().join(&path))
+                    && let Err(e) = reveal(&abs)
+                {
+                    self.flash(NoteKind::Error, format!("could not show it: {e}"));
                 }
                 Task::none()
             }

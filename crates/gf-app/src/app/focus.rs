@@ -129,17 +129,18 @@ impl App {
             return self.undo_list_key(k);
         }
         // Letter keys pick a dialog option (a dialog without text to type).
-        if let (Some(dialog), Some(context_menu::Key::Char(c))) = (self.dialog.as_mut(), k.menu) {
-            if dialog.fields.is_empty() && dialog.area.is_none() {
-                if c == 'l' && self.list_switch_blockers() {
-                    return Task::none();
-                }
-                if let Some(dialog) = self.dialog.as_mut().filter(|d| d.has_key(c)) {
-                    return match dialog.key(c) {
-                        Some(outcome) => self.on_dialog_outcome(outcome),
-                        None => Task::none(),
-                    };
-                }
+        if let (Some(dialog), Some(context_menu::Key::Char(c))) = (self.dialog.as_mut(), k.menu)
+            && dialog.fields.is_empty()
+            && dialog.area.is_none()
+        {
+            if c == 'l' && self.list_switch_blockers() {
+                return Task::none();
+            }
+            if let Some(dialog) = self.dialog.as_mut().filter(|d| d.has_key(c)) {
+                return match dialog.key(c) {
+                    Some(outcome) => self.on_dialog_outcome(outcome),
+                    None => Task::none(),
+                };
             }
         }
         if self.dialog.is_some() || self.rebase_editor.is_some() {
@@ -151,16 +152,16 @@ impl App {
             let in_prompt = field.is(PROMPT_ID);
             // Esc leaves the field (the field itself drops focus).
             self.typing = in_prompt && k.shortcut != Some(Shortcut::Escape);
-            if field.is(REFS_FILTER_ID) {
-                if let Some(n) = k.nav.filter(|n| {
+            if field.is(REFS_FILTER_ID)
+                && let Some(n) = k.nav.filter(|n| {
                     matches!(
                         n.key,
                         Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Enter
                     )
-                }) {
-                    self.focus = Pane::Sidebar;
-                    return self.nav_pane(Pane::Sidebar, n).unwrap_or_else(Task::none);
-                }
+                })
+            {
+                self.focus = Pane::Sidebar;
+                return self.nav_pane(Pane::Sidebar, n).unwrap_or_else(Task::none);
             }
             // ⌘Z / ⌘⇧Z in a text field are about its text, not the repo.
             let s = k
