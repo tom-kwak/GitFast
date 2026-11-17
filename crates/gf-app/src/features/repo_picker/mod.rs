@@ -198,6 +198,55 @@ pub struct State {
     warning: Option<String>,
     /// When the window started shaking for that refusal.
     shake: Option<Instant>,
+    /// The last folder listed: typing a name in it filters this instead of
+    /// reading the folder (and every repository's HEAD) on each key.
+    listing: Option<Listing>,
+}
+
+/// The subfolders of one folder, read once.
+#[derive(Debug, Clone, Default)]
+struct Listing {
+    dir: PathBuf,
+    folders: Vec<Listed>,
+}
+
+#[derive(Debug, Clone)]
+struct Listed {
+    path: PathBuf,
+    name: String,
+    repo: bool,
+    head: Option<String>,
+}
+
+impl Listing {
+    fn read(dir: &Path) -> Self {
+        let folders = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .take(5000)
+            .filter_map(|d| {
+                let path = d.path();
+                let name = d.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || !path.is_dir() {
+                    return None;
+                }
+                let repo = path.join(".git").exists()
+                    || (path.join("HEAD").is_file() && path.join("objects").is_dir());
+                let head = repo.then(|| read_head(&path)).flatten();
+                Some(Listed {
+                    path,
+                    name,
+                    repo,
+                    head,
+                })
+            })
+            .collect();
+        Self {
+            dir: dir.to_path_buf(),
+            folders,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -357,7 +406,7 @@ impl State {
     }
 
     fn refilter(&mut self) {
-        let (items, browsing) = matches(&self.entries, &self.filter);
+        let (items, browsing) = matches(&self.entries, &self.filter, &mut self.listing);
         self.items = items;
         self.browsing = browsing;
         self.selected = 0;
@@ -410,35 +459,29 @@ fn listed_dir(query: &str, path: &Path) -> Option<PathBuf> {
 }
 
 /// Repositories (first) and folders in `dir` whose names match `needle`.
-fn children(dir: &Path, needle: &str, skip: &Path) -> Vec<Found> {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(i32, Found)> = read
-        .filter_map(Result::ok)
-        .take(5000)
-        .filter_map(|d| {
-            let path = d.path();
-            let name = d.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || path == skip || !path.is_dir() {
-                return None;
-            }
+/// `listing` keeps the folder's contents for the next key typed in it.
+fn children(dir: &Path, needle: &str, skip: &Path, listing: &mut Option<Listing>) -> Vec<Found> {
+    if listing.as_ref().is_none_or(|l| l.dir != dir) {
+        *listing = Some(Listing::read(dir));
+    }
+    let folders = listing.as_ref().map_or(&[][..], |l| &l.folders);
+    let mut found: Vec<(i32, Found)> = folders
+        .iter()
+        .filter(|f| f.path != skip)
+        .filter_map(|f| {
             let (score, marks) = if needle.is_empty() {
                 (0, Vec::new())
             } else {
-                fuzzy(needle, &name)?
+                fuzzy(needle, &f.name)?
             };
-            let repo = path.join(".git").exists()
-                || (path.join("HEAD").is_file() && path.join("objects").is_dir());
-            let head = repo.then(|| read_head(&path)).flatten();
             Some((
                 score,
                 Found {
-                    path,
-                    name,
+                    path: f.path.clone(),
+                    name: f.name.clone(),
                     marks,
-                    repo,
-                    head,
+                    repo: f.repo,
+                    head: f.head.clone(),
                 },
             ))
         })
@@ -455,10 +498,14 @@ fn children(dir: &Path, needle: &str, skip: &Path) -> Vec<Found> {
 
 /// Items for `filter`, best first, and the folder being browsed when the
 /// filter is a path.
-fn matches(entries: &[Entry], filter: &str) -> (Vec<Item>, Option<PathBuf>) {
+fn matches(
+    entries: &[Entry],
+    filter: &str,
+    listing: &mut Option<Listing>,
+) -> (Vec<Item>, Option<PathBuf>) {
     let query = filter.trim();
     if query.starts_with('/') || query.starts_with('~') {
-        return path_items(entries, query);
+        return path_items(entries, query, listing);
     }
     let mut scored: Vec<(i32, usize, Vec<usize>)> = entries
         .iter()
@@ -483,7 +530,11 @@ fn matches(entries: &[Entry], filter: &str) -> (Vec<Item>, Option<PathBuf>) {
 }
 
 /// A typed path: the path itself, then what is in the folder it lists.
-fn path_items(entries: &[Entry], query: &str) -> (Vec<Item>, Option<PathBuf>) {
+fn path_items(
+    entries: &[Entry],
+    query: &str,
+    listing: &mut Option<Listing>,
+) -> (Vec<Item>, Option<PathBuf>) {
     let query = resolve_path(query);
     let path = format::expand_tilde(&query);
     let kind = path_kind(&path);
@@ -495,7 +546,7 @@ fn path_items(entries: &[Entry], query: &str) -> (Vec<Item>, Option<PathBuf>) {
     };
     let found = dir
         .as_deref()
-        .map(|d| children(d, needle, &path))
+        .map(|d| children(d, needle, &path, listing))
         .unwrap_or_default();
     let recent = |p: &Path| entries.iter().position(|e| e.path == p);
 

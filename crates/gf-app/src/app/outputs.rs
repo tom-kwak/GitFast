@@ -8,13 +8,14 @@ use iced::widget::operation;
 
 use super::dialogs::{Confirm, Purpose};
 use super::ops::Record;
-use super::ops::{load_diff, load_history, load_snapshot};
+use super::ops::{load_diff, load_history};
 use super::{App, Message, OpKind, Shortcut};
 use crate::features::command_log::NoteKind;
 use crate::features::diff_view::{self, Action, DiffSource};
 use crate::features::prompt::PROMPT_ID;
 use crate::features::prompt::parse::{BUILTINS, PromptCommand};
 use crate::features::{changes, commit_box, history, sidebar, toolbar};
+use crate::repo_tab::Parts;
 use crate::theme;
 use crate::undo;
 
@@ -86,6 +87,51 @@ impl App {
         tracked: Vec<std::path::PathBuf>,
         untracked: Vec<std::path::PathBuf>,
     ) -> Task<Message> {
+        // Whether a copy fits is measured off the UI thread: an untracked
+        // folder can hold thousands of files.
+        let Some((repo, workdir)) = self
+            .active_tab()
+            .map(|t| (t.repo.id(), t.repo.cwd().to_path_buf()))
+        else {
+            return Task::none();
+        };
+        let workdir = Some(workdir);
+        let files: Vec<_> = tracked.iter().chain(&untracked).cloned().collect();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut saved = gf_git::Scope {
+                        files,
+                        ..gf_git::Scope::default()
+                    };
+                    workdir.is_some_and(|w| saved.expand_files(&w).is_ok())
+                })
+                .await
+                .unwrap_or(false)
+            },
+            move |fits| Message::DiscardMeasured {
+                repo,
+                tracked: tracked.clone(),
+                untracked: untracked.clone(),
+                fits,
+            },
+        )
+    }
+
+    /// The discard confirmation, once [`Self::confirm_discard`] knows
+    /// whether a copy can be kept for undo (`fits`).
+    pub(super) fn show_discard(
+        &mut self,
+        repo: gf_core::model::RepoId,
+        tracked: Vec<std::path::PathBuf>,
+        untracked: Vec<std::path::PathBuf>,
+        fits: bool,
+    ) -> Task<Message> {
+        // The confirmation acts on the active tab: not on another one the
+        // user switched to while the size was measured.
+        if self.active_tab().map(|t| t.repo.id()) != Some(repo) {
+            return Task::none();
+        }
         let is_submodule = |p: &std::path::PathBuf| {
             self.active_tab()
                 .and_then(|t| t.snapshot.as_ref())
@@ -111,12 +157,6 @@ impl App {
         }
         body.push("Staged changes are kept.".into());
         // Discarded content is saved for undo unless there is too much.
-        let workdir = self.active_tab().map(|t| t.repo.cwd().to_path_buf());
-        let mut saved = gf_git::Scope {
-            files: tracked.iter().chain(&untracked).cloned().collect(),
-            ..gf_git::Scope::default()
-        };
-        let fits = workdir.is_some_and(|w| saved.expand_files(&w).is_ok());
         if !fits {
             body.push(
                 "Too much to keep a copy of (over 64 MB or 5000 files): this can't be undone."
@@ -287,7 +327,8 @@ impl App {
                     return Task::none();
                 };
                 tab.all_branches = !tab.all_branches;
-                load_snapshot(tab)
+                let id = tab.repo.id();
+                self.request_parts(id, Parts::HISTORY)
             }
             history::Output::LoadMore => {
                 let Some(tab) = self.active_tab_mut() else {
@@ -298,7 +339,7 @@ impl App {
                     // Coalesces with a refresh already running.
                     None => {
                         let id = tab.repo.id();
-                        self.request_refresh(id)
+                        self.request_parts(id, Parts::HISTORY)
                     }
                 }
             }

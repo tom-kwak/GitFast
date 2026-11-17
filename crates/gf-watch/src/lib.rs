@@ -3,6 +3,7 @@
 //! or config. Events are debounced so a burst of writes (a build, a checkout)
 //! produces one refresh.
 
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -15,6 +16,9 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 /// More changed paths than this in one batch are reported as a single
 /// "many files" event (an empty path list).
 const MAX_PATHS: usize = 200;
+/// Changed paths checked against `.gitignore` per batch; past this the
+/// batch is reported as "many files" unchecked.
+const MAX_CHECKED: usize = 20_000;
 
 /// What a changed path means for the repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +53,87 @@ pub fn classify(path: &Path, workdir: Option<&Path>, git_dir: &Path) -> Option<C
         return None;
     }
     Some(Change::WorkTree(rel.to_path_buf()))
+}
+
+/// `paths` without the ones `.gitignore` (and `info/exclude`, the global
+/// excludes) ignores, as `git check-ignore` decides. Tracked files are
+/// never dropped. On any error the paths are kept as they are.
+pub fn drop_ignored(workdir: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    match ignored(workdir, &paths) {
+        Ok(ignored) if !ignored.is_empty() => {
+            paths.into_iter().filter(|p| !ignored.contains(p)).collect()
+        }
+        Ok(_) => paths,
+        Err(e) => {
+            tracing::debug!(error = %e, "check-ignore failed; keeping every changed path");
+            paths
+        }
+    }
+}
+
+fn ignored(workdir: &Path, paths: &[PathBuf]) -> std::io::Result<HashSet<PathBuf>> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+    if paths.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .args(["check-ignore", "--stdin", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut input = Vec::new();
+    for p in paths {
+        input.extend_from_slice(path_bytes(p).as_ref());
+        input.push(0);
+    }
+    let mut stdin = child.stdin.take().ok_or(std::io::ErrorKind::BrokenPipe)?;
+    // Written from another thread: a long answer would otherwise fill the
+    // output pipe while the input is still being written.
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let mut out = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or(std::io::ErrorKind::BrokenPipe)?
+        .read_to_end(&mut out)?;
+    let status = child.wait()?;
+    let _ = writer.join();
+    // 0: some ignored, 1: none; anything else is an error (e.g. a path
+    // inside a submodule).
+    if !matches!(status.code(), Some(0 | 1)) {
+        return Err(std::io::Error::other(format!("git check-ignore: {status}")));
+    }
+    Ok(out
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(path_from_bytes)
+        .collect())
+}
+
+#[cfg(unix)]
+fn path_bytes(p: &Path) -> std::borrow::Cow<'_, [u8]> {
+    use std::os::unix::ffi::OsStrExt;
+    std::borrow::Cow::Borrowed(p.as_os_str().as_bytes())
+}
+
+#[cfg(not(unix))]
+fn path_bytes(p: &Path) -> std::borrow::Cow<'_, [u8]> {
+    std::borrow::Cow::Owned(p.to_string_lossy().into_owned().into_bytes())
+}
+
+#[cfg(unix)]
+fn path_from_bytes(b: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(b))
+}
+
+#[cfg(not(unix))]
+fn path_from_bytes(b: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(b).into_owned())
 }
 
 /// Keeps watching while alive; dropping it stops the watcher.
@@ -86,7 +171,7 @@ impl RepoWatcher {
             for e in events {
                 match classify(&e.path, handler_workdir.as_deref(), &handler_git_dir) {
                     Some(Change::WorkTree(p)) => {
-                        if paths.len() < MAX_PATHS {
+                        if paths.len() < MAX_CHECKED {
                             paths.push(p);
                         } else {
                             many = true;
@@ -97,6 +182,14 @@ impl RepoWatcher {
                     Some(Change::Config) => config = true,
                     None => {}
                 }
+            }
+            // Build output, `node_modules`, logs…: ignored files change
+            // nothing gf shows, so a build does not refresh it over and over.
+            if !many {
+                if let Some(w) = handler_workdir.as_deref() {
+                    paths = drop_ignored(w, paths);
+                }
+                many = paths.len() > MAX_PATHS;
             }
             if many {
                 paths.clear();
@@ -141,6 +234,30 @@ impl RepoWatcher {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn ignored_paths_are_dropped_and_tracked_ones_kept() {
+        let repo = gf_test_support::TestRepo::new();
+        repo.write(".gitignore", "target/\n*.log\n");
+        repo.write("kept.log", "tracked although it matches\n");
+        repo.git(&["add", "-f", "kept.log", ".gitignore"]);
+        repo.git(&["commit", "-qm", "init"]);
+        repo.write("target/debug/x", "");
+        repo.write("build.log", "");
+        repo.write("src/a.rs", "");
+        let p = |s: &str| PathBuf::from(s);
+        let left = drop_ignored(
+            repo.path(),
+            vec![
+                p("target"),
+                p("target/debug/x"),
+                p("build.log"),
+                p("kept.log"),
+                p("src/a.rs"),
+            ],
+        );
+        assert_eq!(left, [p("kept.log"), p("src/a.rs")]);
+    }
 
     #[test]
     fn classifies_paths() {

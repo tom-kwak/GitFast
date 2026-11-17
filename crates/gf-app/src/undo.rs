@@ -9,6 +9,7 @@
 //! The undo stack is saved in the repository's git dir (`gf/undo.json`)
 //! so a discard can still be brought back after gf restarts.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -141,22 +142,48 @@ impl History {
             .unwrap_or_default()
     }
 
+    /// Saves the undo stack in the background: it can hold thousands of
+    /// paths, too much to write on the UI thread after every operation.
+    /// Saves finish in the order they were asked for (an older one never
+    /// overwrites a newer one).
     pub fn save(&self, git_dir: &Path) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        static WRITTEN: std::sync::Mutex<Option<HashMap<PathBuf, u64>>> =
+            std::sync::Mutex::new(None);
+
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = Self::file(git_dir);
-        let result = (|| -> std::io::Result<()> {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
+        let undo = self.undo.clone();
+        std::thread::spawn(move || {
+            let mut written = WRITTEN
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let last = written.get_or_insert_with(HashMap::new);
+            if last.get(&path).is_some_and(|&l| l > seq) {
+                return;
             }
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(
-                &tmp,
-                serde_json::to_vec(self).map_err(std::io::Error::other)?,
-            )?;
-            std::fs::rename(&tmp, &path)
-        })();
-        if let Err(e) = result {
-            tracing::warn!(error = %e, "saving undo history");
+            let history = Self {
+                undo,
+                redo: Vec::new(),
+            };
+            if let Err(e) = history.write(&path) {
+                tracing::warn!(error = %e, "saving undo history");
+            }
+            last.insert(path, seq);
+        });
+    }
+
+    fn write(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
         }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(self).map_err(std::io::Error::other)?,
+        )?;
+        std::fs::rename(&tmp, path)
     }
 }
 
@@ -298,7 +325,7 @@ mod tests {
         h.push(step("a"));
         h.push(step("b"));
         h.applied(false);
-        h.save(dir.path());
+        h.write(&History::file(dir.path())).expect("write");
         let loaded = History::load(dir.path());
         assert_eq!(loaded.undo, h.undo);
         assert!(loaded.redo.is_empty());

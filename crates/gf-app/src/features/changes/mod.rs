@@ -14,6 +14,7 @@ use crate::features::diff_view::DiffSource;
 use crate::nav::{self, Key, Moved, Nav};
 use crate::repo_tab::LineStats;
 use crate::theme::Tokens;
+use crate::widgets::memo::{self, Memo};
 use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
 use crate::widgets::{self, colored, dim};
 
@@ -30,6 +31,8 @@ pub enum Group {
 pub struct State {
     selected: Option<(PathBuf, Group)>,
     scroll: ScrollPos,
+    /// Widest entry of the status shown, in columns.
+    widest: Memo<memo::Id, usize>,
 }
 
 /// One row of the flattened list: a group header or a file.
@@ -437,26 +440,28 @@ impl Feature for State {
         );
         section("UNTRACKED", t.dim, &g.untracked, Group::Untracked, None);
 
-        let cols = snap
-            .status
-            .entries
-            .iter()
-            .map(|e| {
-                let extra = match e {
-                    StatusEntry::Changed {
-                        orig_path: Some(o), ..
-                    } => columns(&o.display().to_string()) + 3,
-                    StatusEntry::Conflicted { .. } => 16,
-                    _ => 0,
-                };
-                // Widest of the groups the entry can appear in.
-                let counts = entry_counts(&snap.lines, e.path(), Group::Staged)
-                    .or_else(|| entry_counts(&snap.lines, e.path(), Group::Unstaged))
-                    .or_else(|| entry_counts(&snap.lines, e.path(), Group::Untracked));
-                widgets::file_entry_columns(e.path(), counts) + extra
-            })
-            .max()
-            .unwrap_or(0);
+        let key = memo::identity(&snap.status, snap.status.entries.len());
+        let cols = self.widest.get(key, || {
+            snap.status
+                .entries
+                .iter()
+                .map(|e| {
+                    let extra = match e {
+                        StatusEntry::Changed {
+                            orig_path: Some(o), ..
+                        } => columns(&o.display().to_string()) + 3,
+                        StatusEntry::Conflicted { .. } => 16,
+                        _ => 0,
+                    };
+                    // Widest of the groups the entry can appear in.
+                    let counts = entry_counts(&snap.lines, e.path(), Group::Staged)
+                        .or_else(|| entry_counts(&snap.lines, e.path(), Group::Unstaged))
+                        .or_else(|| entry_counts(&snap.lines, e.path(), Group::Untracked));
+                    widgets::file_entry_columns(e.path(), counts) + extra
+                })
+                .max()
+                .unwrap_or(0)
+        });
         // two action icons, the entry and padding.
         let content_width = 64.0 + t.cols(cols) + 24.0;
         let list = virtual_list(
