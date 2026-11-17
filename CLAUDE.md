@@ -11,4 +11,5 @@ Rust + iced 0.14 Git GUI 클라이언트입니다(macOS 우선).
 - 커밋은 사용자가 요청할 때만 합니다.
 - 삭제·변경 작업은 공통 확인 다이얼로그(`App::confirm`)를 거칩니다.
 - 색은 테마 토큰으로만 지정합니다.
+- 성능 규칙(DEVELOPMENT.md §7)을 지킵니다: 새로고침은 `request_parts`/`request_touched`로 요청만 하고, `view()`에서 목록 전체를 훑지 않으며, UI 스레드에서 git이나 큰 파일 I/O를 하지 않습니다.
 - 툴체인 경로: `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`

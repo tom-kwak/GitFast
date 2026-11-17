@@ -1,6 +1,7 @@
 //! gf entry point: storage paths, logging, settings, then the iced app.
 
 mod app;
+mod badges;
 mod feature;
 mod features;
 mod git_actions;

@@ -338,9 +338,17 @@ impl App {
             let runner = runner.clone();
             Task::perform(
                 async move {
+                    // Opened all at once (each asks git where the repository
+                    // is); the tabs keep their saved order.
+                    let opened = iced::futures::future::join_all(
+                        to_restore
+                            .iter()
+                            .map(|path| Repository::open(path, runner.clone())),
+                    )
+                    .await;
                     let mut repos = Vec::new();
-                    for path in to_restore {
-                        match Repository::open(&path, runner.clone()).await {
+                    for (path, result) in to_restore.iter().zip(opened) {
+                        match result {
                             Ok(r) => repos.push(r),
                             Err(e) => {
                                 tracing::warn!(path = %path.display(), error = %e, "could not restore tab")
@@ -451,6 +459,8 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        // Any message may have brought a tab to the front or queued a read.
+        let task = Task::batch([task, self.load_due()]);
         // Anything may have written to the command log (notes, git output).
         match self.log.follow() {
             follow if follow.units() == 0 => task,
@@ -615,7 +625,7 @@ impl App {
             }
             Message::Core(CoreEvent::WorkTreeChanged { repo, paths }) => {
                 let parts = self.worktree_parts(repo, &paths);
-                self.request_parts(repo, parts)
+                self.request_touched(repo, parts, crate::repo_tab::Touched::paths(&paths))
             }
             Message::Core(CoreEvent::IndexChanged(repo)) => {
                 self.request_parts(repo, crate::repo_tab::Parts::STATUS)
@@ -938,9 +948,9 @@ impl App {
         })
         .ok();
         let repo = repo.with_gix_fetch(self.settings.git.gix_fetch);
-        let mut tab = RepoTab::new(repo, watcher);
-        let load = ops::load_snapshot(&mut tab, crate::repo_tab::Parts::RELOAD);
-        self.tabs.push(tab);
+        // A new tab queues its first load; `load_due` starts it once it is
+        // the tab's turn (after every message).
+        self.tabs.push(RepoTab::new(repo, watcher));
         self.active = self.tabs.len() - 1;
         self.note_active();
         self.settings.remember_repo(&cwd);
@@ -950,7 +960,7 @@ impl App {
             format!("opened {}", widgets::format::tilde(&cwd)),
         );
         self.focus_pane(Pane::History);
-        load
+        Task::none()
     }
 
     fn select_tab(&mut self, i: usize) -> Task<Message> {

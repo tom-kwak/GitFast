@@ -216,7 +216,7 @@ tr.grp td { font-family: var(--sans); font-weight: 600; background: var(--bg); c
         <tr><td>gf가 실행한 작업이 끝남</td><td>전부 (<code>ALL</code>)</td><td>ops.rs <code>request_refresh</code></td></tr>
       </tbody>
     </table></div>
-    <p class="hint">읽는 중에 또 요청이 오면 겹쳐 실행하지 않고 <code>RepoTab.queued</code>에 모아 두었다가 끝난 뒤 한 번 더 읽습니다. 읽은 부분과 걸린 시간은 로그(<code>RUST_LOG=gf=debug</code>)의 <code>snapshot loaded</code> 줄에 남습니다.</p>
+    <p class="hint">읽는 중에 또 요청이 오면 겹쳐 실행하지 않고 <code>RepoTab.queued</code>에 모아 두었다가 끝난 뒤 한 번 더 읽습니다. 언제 읽을지는 매 메시지 뒤에 <code>App::load_due</code>가 정합니다. 보이는 탭이 먼저 읽고, 백그라운드 탭은 파일 변경을 탭이 보일 때까지 미룹니다(refs·config 변경은 바로 읽음). 열린 작업 트리 diff는 그 파일이 바뀌었을 때만(<code>Touched</code>) 다시 읽습니다. 읽은 부분과 걸린 시간은 로그(<code>RUST_LOG=gf=debug</code>)의 <code>snapshot loaded</code> 줄에 남습니다.</p>
     <p>화면을 그릴 때마다 긴 목록 전체를 훑는 계산(가장 긴 줄 너비, diff 행 목록)은 <code>widgets/memo.rs</code>의 <code>Memo</code>에 담아 데이터가 바뀔 때만 다시 합니다. 결과가 틀리면 안 되는 값은 <code>Same</code>(Arc 동일성) 키, 너비처럼 모양만 영향받는 값은 <code>Id</code>(주소·길이) 키를 씁니다.</p>
   </section>
 
@@ -343,7 +343,8 @@ const INDEX = [
   ["app/focus.rs","키 라우팅 순서, 패널 포커스 테두리","키가 엉뚱한 곳으로 갈 때",411],
   ["app/undoing.rs","⌘Z / ⌘⇧Z 흐름, 되돌리기 기록 목록","되돌리기 동작",329],
   ["gf-app / 공용"],
-  ["repo_tab.rs","저장소 탭 하나의 상태(RepoTab)와 읽어 온 데이터(Snapshot), 부분 새로고침(Parts, history_key)","탭 전환 시 유지할 것, 무엇을 다시 읽을지",648],
+  ["repo_tab.rs","저장소 탭 하나의 상태(RepoTab)와 읽어 온 데이터(Snapshot), 부분 새로고침(Parts, history_key, Touched), 백그라운드 탭 미루기(load_due)","탭 전환 시 유지할 것, 무엇을 다시 읽을지",900],
+  ["badges.rs","커밋별 브랜치·태그 배지(HEAD → main, ◆ v1). 스냅샷을 읽을 때 한 번 만듦","히스토리 배지 순서·문구",124],
   ["undo.rs","되돌리기 기록 저장·불러오기 (.git/gf/undo.json, 저장은 백그라운드)","",341],
   ["nav.rs","패널 목록(Pane)과 키보드 이동 규칙","",206],
   ["feature.rs","피처의 공통 틀(Feature, Update, Cx)","",66],

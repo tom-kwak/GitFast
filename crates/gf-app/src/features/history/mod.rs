@@ -10,14 +10,15 @@
 //! to the end, or moving the selection onto the last row, asks the app for
 //! the next page ([`Output::LoadMore`]).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use gf_core::model::{Commit, Oid, RefKind};
+use gf_core::model::{Commit, Oid};
 use gf_git::graph::GraphRow;
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, column, container, row};
 use iced::{Color, Element, Length, Padding, Task};
+
+use crate::badges::{self, Badge};
 
 use crate::feature::{Cx, Feature, Update};
 use crate::features::context_menu::{Entry, Menu};
@@ -456,35 +457,14 @@ fn row_height(t: &Tokens) -> f32 {
     (t.font_size * 1.7).round()
 }
 
-/// `oid → [(label, color)]` for branch/tag badges, HEAD first.
-fn decorations<'a>(t: &Tokens, snap: &'a Snapshot) -> HashMap<&'a Oid, Vec<(String, Color)>> {
-    let mut map: HashMap<&Oid, Vec<(String, Color)>> = HashMap::new();
-    for b in &snap.branches {
-        let (label, color) = match b.name.kind() {
-            RefKind::LocalBranch if b.is_head => (format!("HEAD → {}", b.name.short()), t.head()),
-            RefKind::LocalBranch => (b.name.short().to_owned(), t.branch()),
-            _ => (b.name.short().to_owned(), t.remote()),
-        };
-        let list = map.entry(&b.target).or_default();
-        if b.is_head {
-            list.insert(0, (label, color));
-        } else {
-            list.push((label, color));
-        }
+/// The color of a badge.
+fn badge_color(t: &Tokens, kind: badges::Kind) -> Color {
+    match kind {
+        badges::Kind::Head => t.head(),
+        badges::Kind::Branch => t.branch(),
+        badges::Kind::Remote => t.remote(),
+        badges::Kind::Tag => t.tag(),
     }
-    for tag in &snap.tags {
-        map.entry(&tag.target)
-            .or_default()
-            .push((format!("◆ {}", tag.name.short()), t.tag()));
-    }
-    if snap.status.head.branch.is_none() {
-        if let Some(oid) = &snap.status.head.oid {
-            map.entry(oid)
-                .or_default()
-                .insert(0, ("HEAD".into(), t.head()));
-        }
-    }
-    map
 }
 
 /// Columns reserved for the author and date.
@@ -497,12 +477,15 @@ const MAX_SUMMARY_COLS: usize = 110;
 /// Badges and summary as one text line, plus its width in columns.
 fn summary_line(
     c: &Commit,
-    badges: Option<&Vec<(String, Color)>>,
-) -> (Vec<(String, Option<Color>)>, usize) {
-    let mut parts: Vec<(String, Option<Color>)> = Vec::new();
+    badges: Option<&Vec<Badge>>,
+) -> (Vec<(String, Option<badges::Kind>)>, usize) {
+    let mut parts: Vec<(String, Option<badges::Kind>)> = Vec::new();
     if let Some(refs) = badges {
-        for (label, color) in refs.iter().take(MAX_BADGES) {
-            parts.push((format!("({}) ", format::truncate(label, 28)), Some(*color)));
+        for b in refs.iter().take(MAX_BADGES) {
+            parts.push((
+                format!("({}) ", format::truncate(&b.label, 28)),
+                Some(b.kind),
+            ));
         }
         if refs.len() > MAX_BADGES {
             parts.push((format!("+{} ", refs.len() - MAX_BADGES), None));
@@ -520,7 +503,7 @@ fn commit_row<'a>(
     g: Option<&'a GraphRow>,
     graph_px: f32,
     summary_px: f32,
-    badges: Option<&Vec<(String, Color)>>,
+    badges: Option<&Vec<Badge>>,
     selected: bool,
 ) -> Element<'a, Message> {
     let mut line = Row::new()
@@ -535,9 +518,9 @@ fn commit_row<'a>(
 
     let (parts, _) = summary_line(c, badges);
     let mut summary = Row::new();
-    for (text, color) in parts {
-        summary = summary.push(match color {
-            Some(color) => colored(t, text, color).wrapping(Wrapping::None),
+    for (text, kind) in parts {
+        summary = summary.push(match kind {
+            Some(kind) => colored(t, text, badge_color(t, kind)).wrapping(Wrapping::None),
             None => mono(t, text).wrapping(Wrapping::None),
         });
     }
@@ -564,7 +547,7 @@ fn commit_row<'a>(
     .into();
     match badges {
         Some(refs) if refs.len() > MAX_BADGES => {
-            let all: Vec<&str> = refs.iter().map(|(l, _)| l.as_str()).collect();
+            let all: Vec<&str> = refs.iter().map(|b| b.label.as_str()).collect();
             widgets::tip(t, row, all.join(", "))
         }
         _ => row,
@@ -901,7 +884,7 @@ impl Feature for State {
             );
         }
 
-        let decor = decorations(t, snap);
+        let decor = &snap.badges;
         // Walks every commit: once per history / refs change, not per frame.
         let key = (
             memo::identity(history, history.commits.len()),

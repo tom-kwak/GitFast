@@ -161,6 +161,57 @@ impl std::ops::BitOrAssign for Parts {
     }
 }
 
+/// Which work tree files changed since the last refresh, as far as the
+/// file watcher knows: decides whether an open work tree diff is read
+/// again. Anything but a watcher event (an operation, ⌘R, the index or
+/// refs moving) may have changed any file: [`Touched::all`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Touched {
+    all: bool,
+    paths: std::collections::BTreeSet<PathBuf>,
+}
+
+impl Touched {
+    /// More paths than this are not kept: the refresh treats every file as
+    /// changed.
+    const MAX_PATHS: usize = 256;
+
+    /// Any file may have changed.
+    pub fn all() -> Self {
+        Self {
+            all: true,
+            paths: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// These files (or folders) changed. An empty list means the watcher
+    /// saw too many to list.
+    pub fn paths(paths: &[PathBuf]) -> Self {
+        if paths.is_empty() || paths.len() > Self::MAX_PATHS {
+            return Self::all();
+        }
+        Self {
+            all: false,
+            paths: paths.iter().cloned().collect(),
+        }
+    }
+
+    /// Whether `path` (relative to the work tree) may have changed.
+    pub fn includes(&self, path: &Path) -> bool {
+        self.all || self.paths.iter().any(|p| path.starts_with(p))
+    }
+}
+
+impl std::ops::BitOrAssign for Touched {
+    fn bitor_assign(&mut self, o: Self) {
+        if self.all || o.all || self.paths.len() + o.paths.len() > Self::MAX_PATHS {
+            *self = Self::all();
+        } else {
+            self.paths.extend(o.paths);
+        }
+    }
+}
+
 /// Everything the views show for a repository. Each refresh reads the
 /// [`Parts`] asked for and keeps the others.
 #[derive(Debug, Clone, Default)]
@@ -187,6 +238,8 @@ pub struct Snapshot {
     pub submodules: Vec<Submodule>,
     /// LFS-tracked patterns; `None` when the repository does not use LFS.
     pub lfs: Option<Vec<String>>,
+    /// Branch and tag badges per commit, built with the refs they show.
+    pub badges: Arc<crate::badges::Badges>,
     /// What this snapshot's refresh read (the rest came from the last one).
     pub loaded: Parts,
 }
@@ -200,7 +253,14 @@ pub struct LineStats {
     pub unstaged: Counts,
     /// Untracked files count as all-added.
     pub untracked: Counts,
+    /// Size and modification time of each counted untracked file, so the
+    /// next refresh only reads the files that changed.
+    untracked_stamps: HashMap<PathBuf, Stamp>,
 }
+
+/// What identifies a file's content cheaply: its size and modification
+/// time. A file whose stamp did not change keeps its line count.
+type Stamp = (u64, Option<std::time::SystemTime>);
 
 /// Untracked files larger than this are not read to count lines.
 const MAX_COUNT_BYTES: u64 = 2 * 1024 * 1024;
@@ -209,8 +269,14 @@ const MAX_COUNT_FILES: usize = 2000;
 
 /// Lines in a new file (all of them are additions). `None` for binary or
 /// unreadable/huge files.
+#[cfg(test)]
 fn count_new_file(path: &Path) -> Option<LineCounts> {
-    if std::fs::metadata(path).ok()?.len() > MAX_COUNT_BYTES {
+    count_bytes(std::fs::metadata(path).ok()?.len(), path)
+}
+
+/// [`count_new_file`] for a file of `len` bytes.
+fn count_bytes(len: u64, path: &Path) -> Option<LineCounts> {
+    if len > MAX_COUNT_BYTES {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
@@ -366,7 +432,9 @@ impl Snapshot {
             // Counts are decoration: a failure must not block the refresh.
             snap.lines.staged = staged.and_then(Result::ok).unwrap_or_default();
             snap.lines.unstaged = unstaged.and_then(Result::ok).unwrap_or_default();
-            snap.lines.untracked = count_untracked(&repo, &snap.status).await;
+            let (counts, stamps) = count_untracked(&repo, &snap.status, &snap.lines).await;
+            snap.lines.untracked = counts;
+            snap.lines.untracked_stamps = stamps;
         }
         if let Some(b) = branches {
             snap.branches = b.map_err(err)?;
@@ -408,6 +476,15 @@ impl Snapshot {
                 } else {
                     None
                 };
+        }
+
+        if status_part {
+            // HEAD (detached or not) comes with the status, refs with it too.
+            snap.badges = Arc::new(crate::badges::build(
+                &snap.branches,
+                &snap.tags,
+                &snap.status.head,
+            ));
         }
 
         let key = history_key(
@@ -485,8 +562,14 @@ impl Snapshot {
 }
 
 /// Line counts of new files (they have no diff to count), read off the
-/// UI thread.
-async fn count_untracked(repo: &Repository, status: &StatusReport) -> Counts {
+/// UI thread. Files whose size and modification time match `prev` keep
+/// their count without being read again (a saved file reads one file, not
+/// every untracked one).
+async fn count_untracked(
+    repo: &Repository,
+    status: &StatusReport,
+    prev: &LineStats,
+) -> (Counts, HashMap<PathBuf, Stamp>) {
     let root = repo.cwd().to_path_buf();
     let new_files: Vec<PathBuf> = status
         .entries
@@ -497,17 +580,37 @@ async fn count_untracked(repo: &Repository, status: &StatusReport) -> Counts {
         })
         .take(MAX_COUNT_FILES)
         .collect();
-    tokio::task::spawn_blocking(move || {
-        new_files
-            .into_iter()
-            .map(|p| {
-                let counts = count_new_file(&root.join(&p));
-                (p, counts)
-            })
-            .collect::<Counts>()
-    })
-    .await
-    .unwrap_or_default()
+    let prev_counts = prev.untracked.clone();
+    let prev_stamps = prev.untracked_stamps.clone();
+    tokio::task::spawn_blocking(move || count_files(&root, new_files, &prev_counts, &prev_stamps))
+        .await
+        .unwrap_or_default()
+}
+
+/// Counts `files` (relative to `root`), reusing `prev` for unchanged ones.
+fn count_files(
+    root: &Path,
+    files: Vec<PathBuf>,
+    prev: &Counts,
+    prev_stamps: &HashMap<PathBuf, Stamp>,
+) -> (Counts, HashMap<PathBuf, Stamp>) {
+    let mut counts = Counts::with_capacity(files.len());
+    let mut stamps = HashMap::with_capacity(files.len());
+    for p in files {
+        let full = root.join(&p);
+        let Ok(meta) = std::fs::metadata(&full) else {
+            counts.insert(p, None);
+            continue;
+        };
+        let stamp = (meta.len(), meta.modified().ok());
+        let count = match (prev_stamps.get(&p), prev.get(&p)) {
+            (Some(s), Some(c)) if *s == stamp => *c,
+            _ => count_bytes(stamp.0, &full),
+        };
+        counts.insert(p.clone(), count);
+        stamps.insert(p, stamp);
+    }
+    (counts, stamps)
 }
 
 #[derive(Debug)]
@@ -515,8 +618,13 @@ pub struct RepoTab {
     pub repo: Repository,
     pub snapshot: Option<Arc<Snapshot>>,
     pub loading: bool,
-    /// Parts asked for while a refresh was running; read once it is done.
+    /// Parts asked for and not read yet: while a refresh runs, or while
+    /// the tab is in the background (see [`RepoTab::load_due`]).
     pub queued: Parts,
+    /// Files changed for the queued parts.
+    pub touched: Touched,
+    /// Files changed for the refresh that is running.
+    pub loading_touched: Touched,
     pub error: Option<String>,
     /// Show every branch in the history graph instead of HEAD only.
     pub all_branches: bool,
@@ -550,6 +658,8 @@ pub struct RepoTab {
     pub bisect: Option<BisectProgress>,
     /// Stashes of left changes whose "bring back" offer was dismissed.
     pub left_dismissed: Vec<Oid>,
+    /// The commit-graph was checked for this tab (see `App::on_loaded`).
+    pub graph_checked: bool,
 }
 
 impl RepoTab {
@@ -558,8 +668,11 @@ impl RepoTab {
         Self {
             repo,
             snapshot: None,
-            loading: true,
-            queued: Parts::default(),
+            loading: false,
+            // Read by `App::load_due` once the tab's turn comes.
+            queued: Parts::RELOAD,
+            touched: Touched::all(),
+            loading_touched: Touched::default(),
             error: None,
             all_branches: true,
             _watcher: watcher,
@@ -577,8 +690,20 @@ impl RepoTab {
             undo_queue: None,
             bisect: None,
             left_dismissed: Vec::new(),
+            graph_checked: false,
             commit: commit_box::State::default(),
         }
+    }
+
+    /// Whether the queued parts should be read now. Only one refresh runs
+    /// per tab. The shown tab reads everything at once; a background tab
+    /// reads ref and config changes right away (its tab label shows the
+    /// branch) but leaves file and index changes, the frequent ones (every
+    /// save, every build), until it is shown again.
+    pub fn load_due(&self, active: bool) -> bool {
+        !self.loading
+            && !self.queued.is_empty()
+            && (active || self.queued.refs || self.queued.config)
     }
 
     pub fn name(&self) -> String {
@@ -665,6 +790,99 @@ mod tests {
         let bin = dir.path().join("b.bin");
         std::fs::write(&bin, [0u8, 1, 2]).expect("write");
         assert_eq!(count_new_file(&bin), None);
+    }
+
+    #[test]
+    fn touched_files_decide_what_counts_as_changed() {
+        let p = |s: &str| PathBuf::from(s);
+        let saved = Touched::paths(&[p("src/a.rs"), p("new")]);
+        assert!(saved.includes(Path::new("src/a.rs")));
+        assert!(
+            saved.includes(Path::new("new/inner.txt")),
+            "inside a folder"
+        );
+        assert!(!saved.includes(Path::new("src/b.rs")));
+        assert!(
+            Touched::paths(&[]).includes(Path::new("x")),
+            "too many to list"
+        );
+        assert!(Touched::all().includes(Path::new("x")));
+        assert!(!Touched::default().includes(Path::new("x")), "nothing");
+
+        let mut both = saved.clone();
+        both |= Touched::paths(&[p("src/b.rs")]);
+        assert!(both.includes(Path::new("src/a.rs")) && both.includes(Path::new("src/b.rs")));
+        both |= Touched::all();
+        assert_eq!(both, Touched::all());
+        let many: Vec<PathBuf> = (0..=Touched::MAX_PATHS)
+            .map(|i| p(&i.to_string()))
+            .collect();
+        assert_eq!(Touched::paths(&many), Touched::all(), "capped");
+    }
+
+    #[tokio::test]
+    async fn background_tabs_wait_for_file_changes_but_not_for_refs() {
+        let repo = gf_test_support::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.commit_all("init");
+        let runner = gf_git::GitRunner::new()
+            .with_cleared_env()
+            .with_env(repo.env());
+        let r = Repository::open(repo.path(), runner).await.expect("open");
+        let mut tab = RepoTab::new(r, None);
+        assert!(
+            tab.load_due(false),
+            "a new tab loads, also in the background"
+        );
+        tab.queued = Parts::default();
+        tab.snapshot = Some(Arc::default());
+
+        tab.queued = Parts::STATUS;
+        assert!(tab.load_due(true), "shown: at once");
+        assert!(!tab.load_due(false), "background: a saved file waits");
+        tab.queued |= Parts {
+            refs: true,
+            ..Parts::default()
+        };
+        assert!(tab.load_due(false), "background: a moved branch does not");
+        tab.loading = true;
+        assert!(!tab.load_due(true), "one load at a time");
+    }
+
+    #[test]
+    fn unchanged_untracked_files_are_not_read_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "1\n2\n").expect("write");
+        std::fs::write(dir.path().join("b.txt"), "1\n").expect("write");
+        let files = || vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")];
+        let (counts, stamps) = count_files(dir.path(), files(), &Counts::new(), &HashMap::new());
+        assert_eq!(counts[Path::new("a.txt")].map(|c| c.added), Some(2));
+
+        // A count only a reuse could produce proves the file was not read.
+        let mut planted = counts.clone();
+        planted.insert(
+            "a.txt".into(),
+            Some(LineCounts {
+                added: 99,
+                removed: 0,
+            }),
+        );
+        std::fs::write(dir.path().join("b.txt"), "1\n2\n3\n").expect("write");
+        let (again, _) = count_files(dir.path(), files(), &planted, &stamps);
+        assert_eq!(
+            again[Path::new("a.txt")].map(|c| c.added),
+            Some(99),
+            "reused"
+        );
+        assert_eq!(
+            again[Path::new("b.txt")].map(|c| c.added),
+            Some(3),
+            "re-read"
+        );
+
+        // A file gone between the status and the count has no count.
+        let (gone, _) = count_files(dir.path(), vec!["c.txt".into()], &planted, &stamps);
+        assert_eq!(gone[Path::new("c.txt")], None);
     }
 
     #[tokio::test]

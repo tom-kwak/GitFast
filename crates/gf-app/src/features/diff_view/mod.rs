@@ -181,11 +181,42 @@ impl Action {
 /// grammar applies.
 pub type FileSpans = Vec<Vec<Option<Spans>>>;
 
-/// A loaded diff; `first_spans` is the highlighting of file 0.
+/// A loaded diff, with what the view needs from walking all of it
+/// computed off the UI thread (see [`LoadedDiff::new`]).
 #[derive(Debug, Default)]
 pub struct LoadedDiff {
     pub files: Vec<FileDiff>,
+    /// Highlighting of file 0 (the others are highlighted when selected).
     pub first_spans: Option<Arc<FileSpans>>,
+    /// Widest line of each file in monospace columns (for sideways scroll).
+    pub widths: Vec<usize>,
+}
+
+impl LoadedDiff {
+    /// Walks every line: call it off the UI thread. `highlight` highlights
+    /// the first file.
+    pub fn new(files: Vec<FileDiff>, highlight: bool) -> Self {
+        let first_spans = files
+            .first()
+            .filter(|_| highlight)
+            .map(|f| Arc::new(highlight_file(f)));
+        let widths = files
+            .iter()
+            .map(|f| {
+                f.hunks
+                    .iter()
+                    .flat_map(|h| &h.lines)
+                    .map(|l| columns(&l.content) + 3 * l.content.matches('\t').count())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        Self {
+            files,
+            first_spans,
+            widths,
+        }
+    }
 }
 
 /// Loads the diff for `source` and highlights its first file off the UI thread.
@@ -201,12 +232,9 @@ pub async fn load(
         ..DiffOptions::default()
     };
     let files = repo.diff(&target, &opts).await.map_err(|e| e.to_string())?;
-    tokio::task::spawn_blocking(move || {
-        let first_spans = files.first().map(|f| Arc::new(highlight_file(f)));
-        Arc::new(LoadedDiff { files, first_spans })
-    })
-    .await
-    .map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || Arc::new(LoadedDiff::new(files, true)))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Highlights one file in the background.
@@ -273,8 +301,6 @@ pub struct State {
     diff: Arc<LoadedDiff>,
     /// Highlighting of files other than the first, loaded on selection.
     spans: HashMap<usize, Arc<FileSpans>>,
-    /// Widest line of each file in monospace columns (for sideways scroll).
-    widths: Vec<usize>,
     file: usize,
     loading: bool,
     error: Option<String>,
@@ -336,7 +362,6 @@ impl State {
             source: None,
             diff: Arc::default(),
             spans: HashMap::new(),
-            widths: Vec::new(),
             file: 0,
             loading: false,
             error: None,
@@ -388,7 +413,6 @@ impl State {
             self.selection.clear();
             self.diff = Arc::default();
             self.spans.clear();
-            self.widths.clear();
             self.file = 0;
             self.scroll = ScrollPos::default();
             self.files_scroll = ScrollPos::default();
@@ -427,18 +451,6 @@ impl State {
                 if let Some(s) = &diff.first_spans {
                     self.spans.insert(0, s.clone());
                 }
-                self.widths = diff
-                    .files
-                    .iter()
-                    .map(|f| {
-                        f.hunks
-                            .iter()
-                            .flat_map(|h| &h.lines)
-                            .map(|l| columns(&l.content) + 3 * l.content.matches('\t').count())
-                            .max()
-                            .unwrap_or(0)
-                    })
-                    .collect();
                 self.diff = diff;
                 self.error = None;
             }
@@ -1003,7 +1015,7 @@ impl State {
             let key = (memo::Same(self.diff.clone()), self.file);
             let rows = self.rows.get(key, || Self::rows(f).into());
             // two line-number columns, marker, then the widest line.
-            let line_cols = self.widths.get(self.file).copied().unwrap_or(0);
+            let line_cols = self.diff.widths.get(self.file).copied().unwrap_or(0);
             let content_width = t.cols(13 + line_cols + 2);
             virtual_list(
                 self.role.list_id(),
@@ -1060,14 +1072,18 @@ index 1111111..2222222 100644
         let mut s = State::new(source.role());
         s.show(source.clone());
         let files = parse_diff(DIFF.as_bytes()).expect("parse");
-        s.loaded(
-            &source,
-            Ok(Arc::new(LoadedDiff {
-                files,
-                first_spans: None,
-            })),
-        );
+        s.loaded(&source, Ok(Arc::new(LoadedDiff::new(files, false))));
         s
+    }
+
+    #[test]
+    fn widths_count_wide_characters_and_tabs() {
+        let diff =
+            "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-x\n+\t한글\n";
+        let files = parse_diff(diff.as_bytes()).expect("parse");
+        // A tab counts as 4 columns, each Hangul syllable as 2.
+        assert_eq!(LoadedDiff::new(files, false).widths, [8]);
+        assert!(LoadedDiff::new(Vec::new(), true).first_spans.is_none());
     }
 
     #[test]

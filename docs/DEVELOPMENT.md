@@ -8,7 +8,7 @@
 ## 0. 작업 시작 전 체크리스트
 
 1. `PLAN.md`에서 §2 아키텍처 원칙, §4-1 터미널 스타일, §4-2 상호작용 원칙, §8 마일스톤을 읽습니다.
-2. 이 문서의 §2 구조와 §3 피처 템플릿을 읽습니다.
+2. 이 문서의 §2 구조, §3 피처 템플릿, §7 성능 규칙을 읽습니다.
 3. 비슷한 기존 피처를 하나 골라 그대로 따라 합니다.
    - 상태가 있는 목록 → `features/changes`
    - 순수 뷰 → `features/op_banner`
@@ -23,7 +23,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-- 새 로직(상태 변경, 파서, git 연산)에는 반드시 테스트를 붙입니다(§6).
+- 새 로직(상태 변경, 파서, git 연산)에는 반드시 테스트를 붙입니다(§8).
 - UI는 테스트로 확인할 수 없는 부분(배치, 색, 실제 키 입력)이 있습니다. 앱을 띄워 확인하지 않았다면 결과 보고에 **"화면 미확인"**을 명시합니다.
 - 커밋은 사용자가 요청할 때만 합니다.
 
@@ -193,25 +193,57 @@ mod tests { /* update/nav 단위 테스트 */ }
 5. 실제 저장소가 필요한 시나리오는 `crates/gf-git/tests/*.rs`에 `gf-test-support`의 임시 저장소로 테스트합니다(예: `advanced_ops.rs`).
 6. 새 모델 타입이 여러 크레이트에서 쓰이면 `gf-core::model`에 둡니다.
 
-## 7. 테스트 작성법
+## 7. 성능 규칙 (가볍고 빠르게 — 위반 시 리뷰 반려)
+
+gf는 성능이 가장 중요합니다. 새 코드는 아래 규칙을 지킵니다. 규칙마다 기준이 되는 기존 코드가 있으니 그대로 따라 합니다.
+
+1. **새로고침은 요청만 합니다.**
+   - 저장소 데이터를 다시 읽을 때는 `App::request_parts(id, Parts::…)`를 부릅니다.
+   - 감시기가 바뀐 파일을 알 때는 `App::request_touched(id, parts, Touched::paths(..))`를 부릅니다.
+   - `load_snapshot`을 직접 부르지 않습니다. 실제 로드는 매 메시지 뒤에 도는 `App::load_due`가 정합니다(`app/ops.rs`).
+     - 탭당 로드는 하나만 돕니다.
+     - 화면에 보이는 탭이 먼저 읽습니다. 복원된 다른 탭은 하나씩 첫 로드를 합니다.
+     - 백그라운드 탭은 파일·index 변경을 탭이 보일 때까지 미룹니다. refs·config 변경은 바로 읽습니다(탭에 브랜치 이름이 보이므로).
+2. **필요한 부분만 다시 읽습니다.**
+   - 바뀐 것에 맞는 `Parts`만 요청합니다. 히스토리는 `history_key`가 같으면 다시 읽지 않습니다.
+   - 열린 작업 트리 diff는 그 파일이 바뀌었을 때만(`Touched::includes`) 다시 읽습니다.
+   - 같은 데이터를 다시 읽는 반복 작업에는 캐시를 둡니다. 키는 내용이 같음을 보장하는 값(크기+수정 시각, `Arc` 동일성)으로 정합니다. 예: untracked 줄 수(`count_files`), ignore 판정(`gf_watch::IgnoreCache`).
+3. **`view()`에서는 화면에 보이는 것만 계산합니다.** iced는 메시지마다 화면 전체를 다시 만듭니다(스피너 동작 중에는 초당 10번).
+   - 목록 전체를 훑는 계산은 로드할 때 백그라운드에서 끝내 데이터에 담습니다. 예: `Snapshot.badges`, `LoadedDiff::new`(줄 너비·하이라이트).
+   - 그럴 수 없으면 `widgets::memo::Memo`에 담습니다.
+   - 긴 목록은 `virtual_list`로 그립니다.
+4. **canvas는 캐시합니다.** `canvas::Cache`를 쓰고, 내용으로 키를 잡습니다. virtual list는 스크롤할 때 위젯을 다른 행에 재사용하므로 위젯 기준 키는 틀립니다. 예: `widgets/graph_canvas.rs`의 `RowCache`.
+5. **UI 스레드에서 git·큰 파일 I/O를 하지 않습니다.**
+   - git 실행은 `Task::perform`으로 합니다.
+   - 파일을 훑는 작업은 `tokio::task::spawn_blocking`으로 합니다.
+6. **git 프로세스 수를 줄입니다.**
+   - 빠르고 결과가 같으면 gix를 씁니다([GIX_MIGRATION.md](GIX_MIGRATION.md)).
+   - 독립된 읽기는 `tokio::join!` / `join_all`로 동시에 실행합니다.
+   - 반복 이벤트(감시기)마다 프로세스를 띄우지 않습니다.
+7. **측정합니다.**
+   - 로드 시간은 `RUST_LOG=gf=debug`의 `snapshot loaded` 줄에서 봅니다.
+   - gix와 CLI 비교는 `tests/gix_bench.rs`로 합니다.
+   - 최적화는 결과가 같다는 테스트와 함께 넣습니다.
+
+## 8. 테스트 작성법
 
 - **gf-app**: UI 없이 `State::update` / `nav`를 호출하고 `Update.output` 또는 `Moved.message`를 `matches!`로 검사합니다.
   - 토큰이 필요하면 `crate::theme::preset("gf-dark")`를 씁니다.
 - **경로 비교**: `p.as_path() == Path::new("x")`처럼 씁니다. clippy `cmp_owned`를 피하기 위해서입니다.
 - **테스트 이름**은 동작을 문장으로 씁니다. 예: `arrows_skip_headers_and_space_stages`.
 
-## 8. 코드 스타일
+## 9. 코드 스타일
 
 - 모듈 맨 위에 `//!` 문서 주석으로 목적을 적습니다. 공개 항목에는 `///`로 "왜"를 적습니다.
 - `unwrap()`은 테스트 외에 쓰지 않습니다(workspace lint). 실패 가능한 곳은 `?` 또는 `expect("이유")`를 씁니다.
 - 한 줄 최대 100자(`rustfmt.toml`)입니다.
 - 파일이 커지면(약 800줄 이상) 역할별 하위 모듈로 나눕니다. 예: `app/`가 `outputs.rs`, `advanced.rs`, `focus.rs`로 나뉘어 있습니다.
 
-## 9. AI에게 작업을 맡길 때 프롬프트 형식
+## 10. AI에게 작업을 맡길 때 프롬프트 형식
 
 ```
 작업: <피처/수정 한 줄>
-참고: docs/DEVELOPMENT.md, PLAN.md §<번호>, 비슷한 기존 피처 <경로>
+참고: docs/DEVELOPMENT.md(§7 성능 규칙 포함), PLAN.md §<번호>, 비슷한 기존 피처 <경로>
 범위: <건드릴 파일/크레이트>, 범위 밖은 수정 금지
 완료 기준: §1 명령 3개 통과 + 새 로직 테스트 + 화면 확인 여부 보고
 금지: 커밋/푸시, 확인 다이얼로그 생략, 토큰 외 색상
