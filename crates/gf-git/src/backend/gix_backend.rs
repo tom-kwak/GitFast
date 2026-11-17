@@ -103,8 +103,18 @@ impl GixBackend {
 
 impl Opened {
     fn open(git_dir: &std::path::Path) -> Result<Self> {
-        let repo = gix::ThreadSafeRepository::open(git_dir).map_err(err)?;
-        let config = repo.to_thread_local().common_dir().join("config");
+        let mut local = gix::ThreadSafeRepository::open(git_dir)
+            .map_err(err)?
+            .to_thread_local();
+        // Ref edits write a reflog entry, which needs a committer. Without
+        // user.name/email (a new Mac) git falls back to the login name;
+        // gix refuses instead, so give it the same kind of fallback.
+        let user = std::env::var("USER").unwrap_or_else(|_| "gf".into());
+        local
+            .committer_or_set_fallback(user.as_str(), format!("{user}@localhost").as_str())
+            .map_err(err)?;
+        let config = local.common_dir().join("config");
+        let repo = local.into_sync();
         Ok(Self {
             stamp: modified(&config),
             repo,
