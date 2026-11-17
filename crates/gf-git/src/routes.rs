@@ -315,6 +315,12 @@ impl Repository {
 
     // ---- LfsOps
     /// Whether `git lfs` is installed.
+    // ---- MaintenanceOps
+    /// See [`MaintenanceOps::write_commit_graph_if_missing`].
+    pub async fn write_commit_graph_if_missing(&self) -> Result<bool> {
+        MaintenanceOps::write_commit_graph_if_missing(&self.cli).await
+    }
+
     pub async fn lfs_available(&self) -> bool {
         LfsOps::lfs_available(&self.cli).await
     }

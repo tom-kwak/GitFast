@@ -55,6 +55,55 @@ pub fn classify(path: &Path, workdir: Option<&Path>, git_dir: &Path) -> Option<C
     Some(Change::WorkTree(rel.to_path_buf()))
 }
 
+/// Paths `git check-ignore` already reported as ignored, so a build that
+/// rewrites the same outputs every few hundred milliseconds does not start
+/// a git process for each batch. Forgotten whenever what decides it may
+/// have changed: a `.gitignore`, `info/exclude` or the index (a file added
+/// with `git add -f` is no longer ignored).
+#[derive(Debug, Default)]
+pub struct IgnoreCache {
+    ignored: HashSet<PathBuf>,
+}
+
+impl IgnoreCache {
+    /// Entries kept at most; past this the cache starts over.
+    const MAX: usize = 50_000;
+
+    /// `paths` without ignored ones, asking git only about paths not
+    /// known to be ignored.
+    pub fn drop_ignored(&mut self, workdir: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let unknown: Vec<PathBuf> = paths
+            .iter()
+            .filter(|p| !self.ignored.contains(*p))
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            let kept = drop_ignored(workdir, unknown.clone());
+            let kept: HashSet<&PathBuf> = kept.iter().collect();
+            if self.ignored.len() + unknown.len() > Self::MAX {
+                self.ignored.clear();
+            }
+            self.ignored
+                .extend(unknown.iter().filter(|p| !kept.contains(p)).cloned());
+        }
+        paths
+            .into_iter()
+            .filter(|p| !self.ignored.contains(p))
+            .collect()
+    }
+
+    /// Forgets everything (the ignore rules or the index changed).
+    pub fn clear(&mut self) {
+        self.ignored.clear();
+    }
+
+    /// Whether a change to `path` (relative to the work tree) can change
+    /// what is ignored.
+    fn is_rule_file(path: &Path) -> bool {
+        path.file_name().is_some_and(|n| n == ".gitignore")
+    }
+}
+
 /// `paths` without the ones `.gitignore` (and `info/exclude`, the global
 /// excludes) ignores, as `git check-ignore` decides. Tracked files are
 /// never dropped. On any error the paths are kept as they are.
@@ -158,6 +207,7 @@ impl RepoWatcher {
     ) -> Result<Self> {
         let handler_git_dir = git_dir.clone();
         let handler_workdir = workdir.clone();
+        let mut ignore_cache = IgnoreCache::default();
         let mut debouncer = new_debouncer(DEBOUNCE, move |result: DebounceEventResult| {
             let events = match result {
                 Ok(events) => events,
@@ -168,7 +218,7 @@ impl RepoWatcher {
             };
             let (mut paths, mut index, mut refs, mut config, mut many) =
                 (Vec::new(), false, false, false, false);
-            for e in events {
+            for e in &events {
                 match classify(&e.path, handler_workdir.as_deref(), &handler_git_dir) {
                     Some(Change::WorkTree(p)) => {
                         if paths.len() < MAX_CHECKED {
@@ -183,11 +233,19 @@ impl RepoWatcher {
                     None => {}
                 }
             }
+            let exclude = handler_git_dir.join("info").join("exclude");
+            if index
+                || events
+                    .iter()
+                    .any(|e| IgnoreCache::is_rule_file(&e.path) || e.path == exclude)
+            {
+                ignore_cache.clear();
+            }
             // Build output, `node_modules`, logs…: ignored files change
             // nothing gf shows, so a build does not refresh it over and over.
             if !many {
                 if let Some(w) = handler_workdir.as_deref() {
-                    paths = drop_ignored(w, paths);
+                    paths = ignore_cache.drop_ignored(w, paths);
                 }
                 many = paths.len() > MAX_PATHS;
             }
@@ -257,6 +315,27 @@ mod tests {
             ],
         );
         assert_eq!(left, [p("kept.log"), p("src/a.rs")]);
+    }
+
+    #[test]
+    fn ignored_paths_are_remembered_until_cleared() {
+        let repo = gf_test_support::TestRepo::new();
+        repo.write(".gitignore", "*.log\n");
+        repo.git(&["add", ".gitignore"]);
+        repo.git(&["commit", "-qm", "init"]);
+        let p = |s: &str| PathBuf::from(s);
+        let mut cache = IgnoreCache::default();
+        let left = cache.drop_ignored(repo.path(), vec![p("a.log"), p("a.rs")]);
+        assert_eq!(left, [p("a.rs")]);
+
+        // Without git: the rules no longer ignore `*.log`, the cache still does.
+        repo.write(".gitignore", "");
+        let left = cache.drop_ignored(repo.path(), vec![p("a.log")]);
+        assert!(left.is_empty(), "answered from the cache");
+        cache.clear();
+        let left = cache.drop_ignored(repo.path(), vec![p("a.log")]);
+        assert_eq!(left, [p("a.log")], "asked git again");
+        assert!(IgnoreCache::is_rule_file(Path::new("sub/.gitignore")));
     }
 
     #[test]

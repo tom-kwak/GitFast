@@ -4,10 +4,15 @@
 //! row, so lines join seamlessly with the rows above and below. Lane
 //! changes are smooth curves; lanes are only [`LANE_SPACING`] px apart, far
 //! narrower than the two characters per lane of a text graph.
+//!
+//! The drawn geometry is cached per row widget ([`RowCache`]): the window
+//! redraws on every message and hover, and tessellating each visible row's
+//! curves every time is wasted work while the rows stay the same.
 
 use gf_git::graph::{Anchor, GraphRow};
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
+use std::cell::RefCell;
 
 /// Horizontal distance between lanes.
 pub const LANE_SPACING: f32 = 11.0;
@@ -42,19 +47,49 @@ fn x(lane: usize) -> f32 {
     PAD + lane * LANE_SPACING
 }
 
+/// Geometry drawn for one row, and what it was drawn from. The virtual
+/// list reuses row widgets for other rows as it scrolls, so the cache is
+/// keyed by the row's content, not by the widget.
+#[derive(Default)]
+struct RowCache {
+    cache: canvas::Cache,
+    drawn: RefCell<Option<Key>>,
+}
+
+/// Everything the drawing depends on besides the size (the cache itself
+/// redraws when the size changes).
+type Key = (GraphRow, [Color; 6], Color);
+
 impl<M> canvas::Program<M> for RowGraph<'_> {
-    type State = ();
+    type State = RowCache;
 
     fn draw(
         &self,
-        _: &(),
+        state: &RowCache,
         renderer: &Renderer,
         _: &Theme,
         bounds: Rectangle,
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        let h = bounds.height;
+        let same = state
+            .drawn
+            .borrow()
+            .as_ref()
+            .is_some_and(|(row, colors, bg)| {
+                row == self.row && *colors == self.colors && *bg == self.background
+            });
+        if !same {
+            state.cache.clear();
+            *state.drawn.borrow_mut() = Some((self.row.clone(), self.colors, self.background));
+        }
+        vec![state.cache.draw(renderer, bounds.size(), |frame| {
+            self.draw_row(frame, bounds.height)
+        })]
+    }
+}
+
+impl RowGraph<'_> {
+    fn draw_row(&self, frame: &mut Frame, h: f32) {
         let y = |a: Anchor| match a {
             Anchor::Top => 0.0,
             Anchor::Center => h / 2.0,
@@ -97,7 +132,6 @@ impl<M> canvas::Program<M> for RowGraph<'_> {
                 frame.fill(&Path::circle(center, 3.6), color);
             }
         }
-        vec![frame.into_geometry()]
     }
 }
 

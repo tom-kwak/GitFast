@@ -233,6 +233,13 @@ pub trait IntegrateOps {
 }
 
 /// Git LFS.
+/// Housekeeping that speeds up later reads (see `ops/maintenance.rs`).
+pub trait MaintenanceOps {
+    /// Writes the commit-graph file when the repository has none (and is
+    /// not shallow, and `core.commitGraph` is not off). `true` when written.
+    fn write_commit_graph_if_missing(&self) -> impl Future<Output = Result<bool>> + Send;
+}
+
 pub trait LfsOps {
     /// Whether `git lfs` is installed.
     fn lfs_available(&self) -> impl Future<Output = bool> + Send;

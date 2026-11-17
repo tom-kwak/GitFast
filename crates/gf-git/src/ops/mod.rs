@@ -12,6 +12,7 @@ pub mod index;
 pub mod integrate;
 pub mod lfs;
 pub mod log;
+pub mod maintenance;
 pub mod rebase_interactive;
 pub mod reflog;
 pub mod refs;

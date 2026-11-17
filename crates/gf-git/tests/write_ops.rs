@@ -572,3 +572,17 @@ async fn one_file_can_be_stashed_and_patterns_ignored_once() {
     let text = std::fs::read_to_string(repo.path().join(".gitignore")).unwrap();
     assert_eq!(text, "*.log\n", "added once");
 }
+
+#[tokio::test]
+async fn a_missing_commit_graph_is_written_once() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.commit_all("init");
+    let r = open(&repo).await;
+    assert!(r.write_commit_graph_if_missing().await.expect("first"));
+    assert!(repo.path().join(".git/objects/info/commit-graph").exists());
+    assert!(
+        !r.write_commit_graph_if_missing().await.expect("second"),
+        "already there"
+    );
+}

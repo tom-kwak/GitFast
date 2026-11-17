@@ -17,17 +17,18 @@ use crate::features::dialog::Dialog;
 use crate::features::diff_view::{self, DiffSource};
 use crate::features::toolbar;
 use crate::git_actions;
-use crate::repo_tab::{History, Parts, RepoTab, Snapshot};
+use crate::repo_tab::{History, Parts, RepoTab, Snapshot, Touched};
 use crate::undo::Step;
 use crate::widgets::format::truncate;
 use gf_git::{Capture, HeadMode, Scope};
 
-/// Reads `parts` of the tab's repository (plus any queued ones). Only
-/// one load runs per tab: each starts from the last snapshot, so a load
-/// finishing after a newer one would put old parts back. Go through
-/// `App::request_parts` unless the tab is new.
-pub fn load_snapshot(tab: &mut RepoTab, parts: Parts) -> Task<Message> {
-    let parts = parts | std::mem::take(&mut tab.queued);
+/// Reads the tab's queued parts. Only one load runs per tab: each starts
+/// from the last snapshot, so a load finishing after a newer one would put
+/// old parts back. Only [`App::load_due`] calls this; everything else
+/// queues parts with [`App::request_parts`].
+fn load_snapshot(tab: &mut RepoTab) -> Task<Message> {
+    let parts = std::mem::take(&mut tab.queued);
+    tab.loading_touched = std::mem::take(&mut tab.touched);
     tab.loading = true;
     let repo = tab.repo.clone();
     let id = repo.id();
@@ -38,6 +39,17 @@ pub fn load_snapshot(tab: &mut RepoTab, parts: Parts) -> Task<Message> {
         Snapshot::load(repo, prev, parts, all, limit),
         move |result| Message::Loaded(id, result),
     )
+}
+
+/// Writes a missing commit-graph (git logs the command, a failure only
+/// leaves the history as fast as it was).
+fn write_commit_graph(repo: Repository) -> Task<Message> {
+    Task::future(async move {
+        if let Err(e) = repo.write_commit_graph_if_missing().await {
+            tracing::warn!(error = %e, "could not write a commit-graph");
+        }
+    })
+    .discard()
 }
 
 pub fn load_history(tab: &RepoTab, revision: String) -> Task<Message> {
@@ -80,17 +92,59 @@ impl App {
         self.request_parts(id, Parts::ALL)
     }
 
-    /// Reads `parts` again; coalesced while a load is running.
+    /// Reads `parts` again (any file may have changed); see
+    /// [`Self::request_touched`].
     pub(super) fn request_parts(&mut self, id: RepoId, parts: Parts) -> Task<Message> {
+        self.request_touched(id, parts, Touched::all())
+    }
+
+    /// Queues `parts` for reading because `touched` changed, and starts
+    /// whatever load is due. Requests coalesce: while a load runs (or the
+    /// tab is in the background) they wait in `RepoTab::queued`.
+    pub(super) fn request_touched(
+        &mut self,
+        id: RepoId,
+        parts: Parts,
+        touched: Touched,
+    ) -> Task<Message> {
         let Some(tab) = self.tab_mut(id) else {
             return Task::none();
         };
-        if tab.loading {
-            tab.queued |= parts;
-            Task::none()
-        } else {
-            load_snapshot(tab, parts)
+        tab.queued |= parts;
+        tab.touched |= touched;
+        self.load_due()
+    }
+
+    /// Starts the loads that are due (see [`RepoTab::load_due`]). Runs after
+    /// every message, so a tab that comes to the front reads what it missed
+    /// in the background, however it was brought there.
+    ///
+    /// A tab that has never loaded (restored at startup) waits while any
+    /// other tab loads: the shown tab first, then the others one at a time,
+    /// so they do not compete with it for the disk and the CPU.
+    pub(super) fn load_due(&mut self) -> Task<Message> {
+        let active = self.active;
+        let mut busy = false;
+        let mut tasks = Vec::new();
+        if let Some(tab) = self.tabs.get_mut(active) {
+            if tab.load_due(true) {
+                tasks.push(load_snapshot(tab));
+            }
         }
+        busy |= self.tabs.iter().any(|t| t.loading);
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if i == active || !tab.load_due(false) {
+                continue;
+            }
+            if tab.snapshot.is_none() {
+                if busy {
+                    continue;
+                }
+                busy = true;
+            }
+            tasks.push(load_snapshot(tab));
+        }
+        Task::batch(tasks)
     }
 
     /// What changed work tree files need read again: the status, and the
@@ -133,6 +187,7 @@ impl App {
             return Task::none();
         };
         tab.loading = false;
+        let touched = std::mem::take(&mut tab.loading_touched);
         // A page requested while this load ran arrives with the next one.
         if tab.queued.is_empty() {
             tab.history.snapshot_loaded();
@@ -145,7 +200,9 @@ impl App {
                     tab.history.set_revision(None);
                 }
                 // A file that moved between groups keeps its diff visible.
-                if let Some(source) = tab.changes.follow(&snap.status.entries) {
+                let followed = tab.changes.follow(&snap.status.entries);
+                let moved = followed.is_some();
+                if let Some(source) = followed {
                     tab.local_diff.show(source);
                 }
                 // Keep an open conflict resolver in sync: reload it while the
@@ -186,6 +243,12 @@ impl App {
                 }
                 // A commit waiting for a longer history (`reveal`).
                 reveal = snap.loaded.history;
+                // A long history (a full page) loads much faster with a
+                // commit-graph: write one in the background if missing.
+                if !tab.graph_checked && snap.history.more {
+                    tab.graph_checked = true;
+                    tasks.push(write_commit_graph(tab.repo.clone()));
+                }
                 // The branch shown instead of HEAD only moves with refs.
                 let refs = snap.loaded.refs;
                 let status = snap.loaded.status;
@@ -196,13 +259,22 @@ impl App {
                         tasks.push(load_history(tab, rev));
                     }
                 }
-                // Work tree diffs may have changed on disk.
-                if let Some(
-                    source @ (DiffSource::WorkTree(_)
-                    | DiffSource::Staged(_)
-                    | DiffSource::Untracked(_)),
-                ) = tab.local_diff.source().cloned().filter(|_| status)
-                {
+                // Work tree diffs may have changed on disk: read the shown
+                // one again if it moved between groups or its file changed
+                // (not on every saved file).
+                let stale = tab
+                    .local_diff
+                    .source()
+                    .filter(|_| status)
+                    .and_then(|s| match s {
+                        DiffSource::WorkTree(p)
+                        | DiffSource::Staged(p)
+                        | DiffSource::Untracked(p) => {
+                            (moved || touched.includes(p)).then(|| s.clone())
+                        }
+                        _ => None,
+                    });
+                if let Some(source) = stale {
                     tab.local_diff.show(source);
                     tasks.push(load_diff(tab, diff_view::Role::Local));
                 }
@@ -212,11 +284,7 @@ impl App {
                 self.log.note(NoteKind::Error, "refresh failed", vec![e]);
             }
         }
-        if let Some(tab) = self.tab_mut(id) {
-            if !tab.queued.is_empty() {
-                tasks.push(load_snapshot(tab, Parts::default()));
-            }
-        }
+        tasks.push(self.load_due());
         if reveal {
             tasks.push(self.reveal_pending(id));
         }
@@ -764,6 +832,59 @@ mod tests {
         Repository::open(repo.path(), runner)
             .await
             .expect("open repository")
+    }
+
+    /// Restored tabs: the shown one loads first, the others one at a
+    /// time after it; a background tab's saved files wait until it is shown.
+    #[tokio::test]
+    async fn the_shown_tab_loads_first_and_background_tabs_wait() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.commit_all("init");
+        let home = tempfile::tempdir().expect("home");
+        let (mut app, _) = App::boot(
+            gf_config::AppPaths::under(home.path()),
+            gf_config::Settings::default(),
+        );
+        for _ in 0..3 {
+            app.tabs.push(RepoTab::new(open(&repo).await, None));
+        }
+        app.active = 1;
+        let loading = |app: &App| app.tabs.iter().map(|t| t.loading).collect::<Vec<_>>();
+
+        let _ = app.load_due();
+        assert_eq!(loading(&app), [false, true, false], "the shown tab alone");
+        let _ = app.load_due();
+        assert_eq!(
+            loading(&app),
+            [false, true, false],
+            "nothing more meanwhile"
+        );
+
+        // The shown tab's load finishes: one background tab starts.
+        let id = app.tabs[1].repo.id();
+        let _ = app.on_loaded(id, Ok(Arc::default()));
+        assert_eq!(loading(&app), [true, false, false]);
+        let id = app.tabs[0].repo.id();
+        let _ = app.on_loaded(id, Ok(Arc::default()));
+        assert_eq!(loading(&app), [false, false, true]);
+        let id = app.tabs[2].repo.id();
+        let _ = app.on_loaded(id, Ok(Arc::default()));
+        assert_eq!(loading(&app), [false, false, false]);
+
+        // A saved file in a background tab waits for the tab to be shown.
+        let id = app.tabs[0].repo.id();
+        let _ = app.request_touched(id, Parts::STATUS, Touched::paths(&["a.txt".into()]));
+        assert_eq!(loading(&app), [false, false, false]);
+        assert_eq!(app.tabs[0].queued, Parts::STATUS);
+        app.active = 0;
+        let _ = app.load_due();
+        assert_eq!(loading(&app), [true, false, false], "read once shown");
+        assert!(
+            app.tabs[0]
+                .loading_touched
+                .includes(std::path::Path::new("a.txt"))
+        );
     }
 
     #[tokio::test]
