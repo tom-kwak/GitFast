@@ -11,15 +11,17 @@
 //! diffs stay responsive. Syntax highlighting runs off the UI thread: the
 //! first file when the diff loads, others when they are first selected.
 
+mod select;
+
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gf_core::model::{FileChange, FileDiff, LineKind, Oid};
+use gf_core::model::{DiffLine, FileChange, FileDiff, LineKind, Oid};
 use gf_git::{DiffOptions, DiffTarget, Repository, patch};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row};
+use iced::widget::{column, container, row};
 use iced::{Color, Element, Length, Padding, Task};
 
 use crate::feature::{Cx, Update};
@@ -62,6 +64,16 @@ impl Role {
             Self::Commit => "gf-commit-diff",
         }
     }
+}
+
+/// The line under a diff's header: the hint, or the selection's buttons
+/// once lines are selected. Always the same height, so selecting the first
+/// line of a drag does not push the code down under the mouse.
+fn bar_line<'a>(t: &Tokens, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .height(Length::Fixed((t.font_size * 1.9).round()))
+        .align_y(iced::Alignment::Center)
+        .into()
 }
 
 /// A diff panel's header title in three parts: `lead` (`commit abc123 · `),
@@ -339,8 +351,7 @@ fn highlight_file(f: &FileDiff) -> FileSpans {
         .collect()
 }
 
-/// `(file, hunk, line)` index of a selected line.
-type LineKey = (usize, usize, usize);
+use select::{LineKey, Pos, Range};
 
 /// One rendered row of the selected file.
 #[derive(Debug, Clone, Copy)]
@@ -361,7 +372,14 @@ pub struct State {
     file: usize,
     loading: bool,
     error: Option<String>,
-    selection: BTreeSet<LineKey>,
+    /// Selected text, as in a text viewer: copied with ⌘C; the changed
+    /// lines it touches can be staged / unstaged. Several with ⌘.
+    ranges: Vec<Range>,
+    /// The mouse button is down after a press on a line: moving extends
+    /// the last range.
+    dragging: bool,
+    /// Where the mouse last went down: where ⇧-click extends from.
+    caret: Option<Pos>,
     ignore_whitespace: bool,
     scroll: ScrollPos,
     files_scroll: ScrollPos,
@@ -372,7 +390,21 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    ToggleLine(LineKey),
+    /// Mouse down in a line's text: a new selection starts there.
+    LinePressed(Pos),
+    /// ⌘ + mouse down: another selection starts there, keeping the others.
+    LinePressedAdd(Pos),
+    /// ⇧ + mouse down: the selection now runs from where it started (or
+    /// the last press) to here.
+    LinePressedRange(Pos),
+    /// The mouse moved to `Pos` while the button is down.
+    LineDragged(Pos),
+    /// Mouse up, or the mouse left the diff.
+    DragEnd,
+    /// ⌘A: all the text of the shown file.
+    SelectAll,
+    /// The `copy` button: the selection, or the whole file's diff.
+    Copy,
     ClearSelection,
     Hunk {
         hunk: usize,
@@ -410,6 +442,8 @@ pub enum Output {
     /// File `n` needs highlighting; the app calls [`highlight`] and
     /// [`State::highlighted`].
     Highlight(usize, Box<FileDiff>),
+    /// Put `text` on the clipboard; `what` says what it is (`3 lines`).
+    Copy { text: String, what: String },
 }
 
 impl State {
@@ -422,7 +456,9 @@ impl State {
             file: 0,
             loading: false,
             error: None,
-            selection: BTreeSet::new(),
+            ranges: Vec::new(),
+            dragging: false,
+            caret: None,
             ignore_whitespace: false,
             scroll: ScrollPos::default(),
             files_scroll: ScrollPos::default(),
@@ -467,7 +503,7 @@ impl State {
     /// Starts showing `source`; the app loads it and calls [`Self::loaded`].
     pub fn show(&mut self, source: DiffSource) {
         if self.source.as_ref() != Some(&source) {
-            self.selection.clear();
+            self.clear_selection();
             self.diff = Arc::default();
             self.spans.clear();
             self.file = 0;
@@ -493,14 +529,16 @@ impl State {
         self.loading = false;
         match result {
             Ok(diff) => {
-                // Drop selections that no longer point at a changed line.
-                self.selection.retain(|(f, h, l)| {
+                // Keep the selection while its lines are still there (the
+                // file was saved again, say).
+                let exists = |((f, h, l), _): Pos| {
                     diff.files
-                        .get(*f)
-                        .and_then(|f| f.hunks.get(*h))
-                        .and_then(|h| h.lines.get(*l))
-                        .is_some_and(|l| l.kind != LineKind::Context)
-                });
+                        .get(f)
+                        .and_then(|f| f.hunks.get(h))
+                        .is_some_and(|h| l < h.lines.len())
+                };
+                self.ranges.retain(|r| exists(r.anchor) && exists(r.head));
+                self.dragging = false;
                 if self.file >= diff.files.len() {
                     self.file = 0;
                 }
@@ -534,9 +572,131 @@ impl State {
         .collect()
     }
 
+    fn clear_selection(&mut self) {
+        self.ranges.clear();
+        self.dragging = false;
+        self.caret = None;
+    }
+
+    /// Lines with selected text (or whose line break is selected).
+    fn selected_lines(&self) -> BTreeSet<LineKey> {
+        let mut out = BTreeSet::new();
+        for r in &self.ranges {
+            let ((a, _), (b, _)) = r.ordered();
+            for key in self.lines_between(a, b) {
+                let len = self.line_at(key).map_or(1, |l| select::len(&l.content));
+                if r.span(key, len).is_some() {
+                    out.insert(key);
+                }
+            }
+        }
+        out
+    }
+
+    /// Selected lines that are changes (what stage / unstage act on):
+    /// context lines are selected for copying only.
+    fn selected_changes(&self) -> Vec<LineKey> {
+        self.selected_lines()
+            .into_iter()
+            .filter(|&k| self.line_at(k).is_some_and(|l| l.kind != LineKind::Context))
+            .collect()
+    }
+
+    fn line_at(&self, (f, h, l): LineKey) -> Option<&DiffLine> {
+        self.diff.files.get(f)?.hunks.get(h)?.lines.get(l)
+    }
+
+    /// Lines of the shown file from `a` to `b` (either order), in the
+    /// order they are shown.
+    fn lines_between(&self, a: LineKey, b: LineKey) -> Vec<LineKey> {
+        let Some(f) = self.diff.files.get(self.file) else {
+            return Vec::new();
+        };
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        f.hunks
+            .iter()
+            .enumerate()
+            .flat_map(|(h, hunk)| (0..hunk.lines.len()).map(move |l| (self.file, h, l)))
+            .filter(|k| *k >= a && *k <= b)
+            .collect()
+    }
+
+    /// Exactly the selected text, as shown (`+` / `-` markers included,
+    /// line numbers not); `None` when nothing is selected.
+    pub fn selected_text(&self) -> Option<(String, String)> {
+        let mut ranges: Vec<&Range> = self.ranges.iter().filter(|r| !r.is_empty()).collect();
+        if ranges.is_empty() {
+            return None;
+        }
+        ranges.sort_by_key(|r| r.ordered().0);
+        let mut text = String::new();
+        for r in ranges {
+            let ((a, _), (b, _)) = r.ordered();
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&select::range_text(
+                r,
+                self.lines_between(a, b)
+                    .into_iter()
+                    .filter_map(|k| self.line_at(k).map(|l| (k, l.kind, l.content.as_str()))),
+            ));
+        }
+        let lines = self.selected_lines().len();
+        let what = match (lines, text.chars().count()) {
+            (1, 1) => "1 character".to_owned(),
+            (1, n) => format!("{n} characters"),
+            (n, _) => format!("{n} lines"),
+        };
+        Some((text, what))
+    }
+
+    /// The shown file's diff as text (`--- a/…`, `+++ b/…`, hunks).
+    fn file_diff_text(&self) -> Option<(String, String)> {
+        let f = self.diff.files.get(self.file)?;
+        if f.hunks.is_empty() {
+            return None;
+        }
+        let side = |p: Option<&PathBuf>, prefix: &str| {
+            p.map_or_else(
+                || "/dev/null".to_owned(),
+                |p| format!("{prefix}{}", p.display()),
+            )
+        };
+        let mut out = format!(
+            "--- {}\n+++ {}\n",
+            side(f.old_path.as_ref(), "a/"),
+            side(f.new_path.as_ref(), "b/")
+        );
+        for h in &f.hunks {
+            out.push_str(&format!(
+                "@@ -{},{} +{},{} @@{}{}\n",
+                h.old_start,
+                h.old_lines,
+                h.new_start,
+                h.new_lines,
+                if h.section.is_empty() { "" } else { " " },
+                h.section
+            ));
+            for l in &h.lines {
+                out.push(select::marker(l.kind));
+                out.push_str(&l.content);
+                out.push('\n');
+                if l.no_newline_at_eof {
+                    out.push_str("\\ No newline at end of file\n");
+                }
+            }
+        }
+        let name = f
+            .display_path()
+            .and_then(|p| p.file_name())
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        Some((out, format!("the diff of {name}")))
+    }
+
     fn selection_by_hunk(&self) -> Vec<(usize, usize, Option<BTreeSet<usize>>)> {
         let mut out: Vec<(usize, usize, Option<BTreeSet<usize>>)> = Vec::new();
-        for &(f, h, l) in &self.selection {
+        for (f, h, l) in self.selected_changes() {
             match out.last_mut() {
                 Some((lf, lh, Some(lines))) if *lf == f && *lh == h => {
                     lines.insert(l);
@@ -685,33 +845,46 @@ impl State {
                             .into()
                     }
                 };
+                // The gutter has fixed widths, so the marker and the code
+                // start where the selectable line expects them.
+                let cell = |s: Element<'a, Message>, cols: usize| {
+                    container(s).width(Length::Fixed(t.cols(cols))).clip(true)
+                };
                 let mut text_row = row![
-                    dim(t, num(line.old_lineno)),
-                    dim(t, num(line.new_lineno)),
-                    colored(t, format!(" {marker} "), marker_color),
+                    cell(dim(t, num(line.old_lineno)).into(), 5),
+                    cell(dim(t, num(line.new_lineno)).into(), 5),
+                    cell(colored(t, format!(" {marker} "), marker_color).into(), 3),
                     content,
-                ];
+                ]
+                .align_y(iced::Alignment::Center);
                 if line.no_newline_at_eof {
                     text_row =
                         text_row.push(dim(t, "  ⏎̸ no newline at end").wrapping(Wrapping::None));
                 }
+                // Text selection as in a text viewer: press, drag, ⌘C.
                 let key = (fi, hi, li);
-                if partial && line.kind != LineKind::Context {
-                    let selected = self.selection.contains(&key);
-                    button(text_row)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .padding(0)
-                        .style(style::diff_line_button(t, line.kind, selected))
-                        .on_press(Message::ToggleLine(key))
-                        .into()
-                } else {
-                    container(text_row)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .style(style::diff_line(t, line.kind))
-                        .into()
-                }
+                let len = select::len(&line.content);
+                let spans = self
+                    .ranges
+                    .iter()
+                    .filter_map(|r| r.span(key, len))
+                    .collect();
+                let geometry = widgets::selectable_line::Geometry {
+                    marker_x: t.cols(11),
+                    code_x: t.cols(13),
+                    cell: t.char_width(),
+                    size: t.font_size,
+                };
+                widgets::selectable_line::selectable_line(
+                    container(text_row).width(Length::Fill).height(Length::Fill),
+                    &line.content,
+                    geometry,
+                    move |pos| Message::LinePressed((key, pos)),
+                )
+                .background(style::diff_line_color(t, line.kind))
+                .selected(spans, t.selection)
+                .on_drag(self.dragging, move |pos| Message::LineDragged((key, pos)))
+                .into()
             }
         }
     }
@@ -785,14 +958,67 @@ impl State {
 
     pub fn update(&mut self, message: Message) -> Update<Message, Output> {
         match message {
-            Message::ToggleLine(key) => {
-                if !self.selection.remove(&key) {
-                    self.selection.insert(key);
+            Message::LinePressed(at) => {
+                self.ranges = vec![Range::caret(at)];
+                self.caret = Some(at);
+                self.dragging = true;
+                Update::none()
+            }
+            Message::LinePressedAdd(at) => {
+                self.ranges.push(Range::caret(at));
+                self.caret = Some(at);
+                self.dragging = true;
+                Update::none()
+            }
+            Message::LinePressedRange(at) => {
+                let anchor = self
+                    .ranges
+                    .last()
+                    .map(|r| r.anchor)
+                    .or(self.caret)
+                    .filter(|((f, _, _), _)| *f == self.file)
+                    .unwrap_or(at);
+                self.ranges.pop();
+                self.ranges.push(Range { anchor, head: at });
+                self.dragging = true;
+                Update::none()
+            }
+            Message::LineDragged(at) => {
+                if self.dragging {
+                    if let Some(r) = self.ranges.last_mut() {
+                        r.head = at;
+                    }
                 }
                 Update::none()
             }
+            Message::DragEnd => {
+                self.dragging = false;
+                // A click without a drag only places the caret.
+                self.ranges.retain(|r| !r.is_empty());
+                Update::none()
+            }
+            Message::SelectAll => {
+                if let Some(f) = self.diff.files.get(self.file) {
+                    let fi = self.file;
+                    let first = f.hunks.iter().position(|h| !h.lines.is_empty());
+                    let last = f.hunks.iter().rposition(|h| !h.lines.is_empty());
+                    if let (Some(a), Some(b)) = (first, last) {
+                        let end = f.hunks[b].lines.len() - 1;
+                        let len = select::len(&f.hunks[b].lines[end].content);
+                        self.ranges = vec![Range {
+                            anchor: ((fi, a, 0), 0),
+                            head: ((fi, b, end), len),
+                        }];
+                    }
+                }
+                Update::none()
+            }
+            Message::Copy => match self.selected_text().or_else(|| self.file_diff_text()) {
+                Some((text, what)) => Update::output(Output::Copy { text, what }),
+                None => Update::none(),
+            },
             Message::ClearSelection => {
-                self.selection.clear();
+                self.clear_selection();
                 Update::none()
             }
             Message::Hunk { hunk, action } => {
@@ -811,12 +1037,12 @@ impl State {
                 None => Update::none(),
             },
             Message::Selected(action) => {
-                let count = self.selection.len();
+                let count = self.selected_changes().len();
                 let patches = self.patches(self.selection_by_hunk().into_iter(), action);
                 if patches.is_empty() {
                     return Update::none();
                 }
-                self.selection.clear();
+                self.clear_selection();
                 Update::output(Output::Apply {
                     patches,
                     action,
@@ -832,7 +1058,7 @@ impl State {
                     return Update::none();
                 }
                 self.file = i;
-                self.selection.clear();
+                self.clear_selection();
                 self.scroll = ScrollPos::default();
                 if self.spans.contains_key(&i) {
                     Update::none()
@@ -1026,6 +1252,14 @@ impl State {
                     "commits that touched this file (follows renames)".into(),
                 ));
         }
+        if files.get(self.file).is_some_and(|f| !f.hunks.is_empty()) {
+            header = header.push(widgets::tip(
+                t,
+                widgets::text_button(t, "copy", None, Some(Message::Copy)),
+                "copy the selected text (⌘C), or this file's whole diff · drag to select, ⌘A all"
+                    .into(),
+            ));
+        }
         header = header
             .push(widgets::tip(
                 t,
@@ -1044,21 +1278,40 @@ impl State {
             .push(widgets::icon_button(t, "✕", t.dim, "close", Message::Close));
 
         let mut toolbar = column![header];
-        if !self.selection.is_empty() {
+        let selected = self.selected_lines().len();
+        if self.ranges.iter().any(|r| !r.is_empty()) {
             let mut sel = row![colored(
                 t,
-                format!("{} selected", self.selection.len()),
+                format!(
+                    "{selected} line{} selected",
+                    if selected == 1 { "" } else { "s" }
+                ),
                 t.accent()
             )]
             .spacing(4)
             .align_y(iced::Alignment::Center);
-            for &a in source.actions() {
-                let label = format!("{} lines", a.label());
-                sel = sel.push(if a == Action::Discard {
-                    widgets::danger_button(t, &label, Some(Message::Selected(a)))
-                } else {
-                    widgets::text_button(t, &label, None, Some(Message::Selected(a)))
-                });
+            sel = sel.push(widgets::tip(
+                t,
+                widgets::text_button(t, "copy", Some("⌘C"), Some(Message::Copy)),
+                "copy exactly the selected text, + / − included (line numbers are not)".into(),
+            ));
+            // Stage / unstage the changed lines the selection touches (no
+            // discard here: a selection is for reading and copying, and
+            // hunks keep their own discard).
+            let changes = self.selected_changes().len();
+            let partial = files.get(self.file).is_some_and(patch::supports_partial);
+            for &a in source
+                .actions()
+                .iter()
+                .filter(|a| **a != Action::Discard && partial && changes > 0)
+            {
+                let label = format!("{} {changes} changed", a.label());
+                sel = sel.push(widgets::text_button(
+                    t,
+                    &label,
+                    None,
+                    Some(Message::Selected(a)),
+                ));
             }
             sel = sel.push(widgets::text_button(
                 t,
@@ -1066,12 +1319,14 @@ impl State {
                 None,
                 Some(Message::ClearSelection),
             ));
-            toolbar = toolbar.push(sel);
-        } else if !source.actions().is_empty() && !files.is_empty() {
-            toolbar = toolbar.push(dim(
-                t,
-                "click lines to select them, then stage/discard just those",
-            ));
+            toolbar = toolbar.push(bar_line(t, sel));
+        } else if !files.is_empty() {
+            let hint = if source.actions().is_empty() {
+                "drag to select text · ⌘ adds · ⇧ extends · ⌘C copies · ⌘A all"
+            } else {
+                "drag to select text · ⌘ adds · ⇧ extends · ⌘C copies · stage the changed lines"
+            };
+            toolbar = toolbar.push(bar_line(t, dim(t, hint)));
         }
 
         let body: Element<'a, Message> = if let Some(e) = &self.error {
@@ -1084,7 +1339,9 @@ impl State {
             // two line-number columns, marker, then the widest line.
             let line_cols = self.diff.widths.get(self.file).copied().unwrap_or(0);
             let content_width = t.cols(13 + line_cols + 2);
-            virtual_list(
+            // A drag over lines ends when the button is let go anywhere
+            // over the diff, or the mouse leaves it.
+            iced::widget::mouse_area(virtual_list(
                 self.role.list_id(),
                 rows.len(),
                 Self::row_height(t),
@@ -1092,7 +1349,10 @@ impl State {
                 self.scroll,
                 move |i| self.row_view(t, f, rows[i]),
                 Message::Scrolled,
-            )
+            ))
+            .on_release(Message::DragEnd)
+            .on_exit(Message::DragEnd)
+            .into()
         } else {
             let hint = match source {
                 DiffSource::WorkTree(_) => "no unstaged changes left in this file",
@@ -1167,10 +1427,114 @@ index 1111111..2222222 100644
         );
     }
 
+    /// f.txt's hunk: ` a`, `-b`, `+B`, ` c`.
+    fn line(l: usize) -> LineKey {
+        (0, 0, l)
+    }
+
+    fn drag(s: &mut State, press: Message, to: Pos) {
+        let _ = s.update(press);
+        let _ = s.update(Message::LineDragged(to));
+        let _ = s.update(Message::DragEnd);
+    }
+
     #[test]
-    fn line_selection_builds_a_partial_patch_and_clears() {
+    fn exactly_the_dragged_over_text_is_copied() {
+        let oid: Oid = "a".repeat(40).parse().expect("oid");
+        let mut s = state(DiffSource::Commit(oid));
+        // From the code of ` a` (position 1) to after the `+` of `+B`.
+        drag(&mut s, Message::LinePressed((line(0), 1)), (line(2), 1));
+        assert_eq!(
+            s.selected_text(),
+            Some(("a\n-b\n+".to_owned(), "3 lines".to_owned()))
+        );
+        match s.update(Message::Copy).output {
+            Some(Output::Copy { text, .. }) => assert_eq!(text, "a\n-b\n+"),
+            other => panic!("unexpected {other:?}"),
+        }
+        // Dragging upwards selects the same way; from the gutter (0) the
+        // marker is included.
+        drag(&mut s, Message::LinePressed((line(3), 2)), (line(1), 0));
+        assert_eq!(
+            s.selected_text().map(|t| t.0),
+            Some("-b\n+B\n c".to_owned())
+        );
+        // Within one line: just those characters.
+        drag(&mut s, Message::LinePressed((line(2), 0)), (line(2), 1));
+        assert_eq!(
+            s.selected_text(),
+            Some(("+".to_owned(), "1 character".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_new_drag_replaces_the_selection_and_modifiers_add_or_extend() {
+        let oid: Oid = "a".repeat(40).parse().expect("oid");
+        let mut s = state(DiffSource::Commit(oid));
+        drag(&mut s, Message::LinePressed((line(0), 0)), (line(0), 2));
+        // A second plain drag starts over: no leftover block.
+        drag(&mut s, Message::LinePressed((line(3), 0)), (line(3), 2));
+        assert_eq!(s.selected_text().map(|t| t.0), Some(" c".to_owned()));
+        // ⌘ keeps what was selected and adds another stretch.
+        drag(&mut s, Message::LinePressedAdd((line(0), 0)), (line(0), 2));
+        assert_eq!(s.selected_text().map(|t| t.0), Some(" a\n c".to_owned()));
+        // ⇧ runs the last stretch from where it started to here.
+        let _ = s.update(Message::LinePressedRange((line(1), 2)));
+        let _ = s.update(Message::DragEnd);
+        assert_eq!(
+            s.selected_text().map(|t| t.0),
+            Some(" a\n-b\n c".to_owned())
+        );
+        // A click without a drag selects nothing.
+        let _ = s.update(Message::LinePressed((line(1), 1)));
+        let _ = s.update(Message::DragEnd);
+        assert_eq!(s.selected_text(), None);
+        // Moving after the button was let go changes nothing.
+        let _ = s.update(Message::LineDragged((line(3), 2)));
+        assert_eq!(s.selected_text(), None);
+    }
+
+    #[test]
+    fn copy_without_a_selection_takes_the_whole_file_diff() {
+        let oid: Oid = "a".repeat(40).parse().expect("oid");
+        let mut s = state(DiffSource::Commit(oid));
+        assert_eq!(s.selected_text(), None, "⌘C copies nothing");
+        match s.update(Message::Copy).output {
+            Some(Output::Copy { text, what }) => {
+                assert_eq!(
+                    text,
+                    "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+                );
+                assert_eq!(what, "the diff of f.txt");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let _ = s.update(Message::SelectAll);
+        assert_eq!(
+            s.selected_text().map(|t| t.0),
+            Some(" a\n-b\n+B\n c".to_owned())
+        );
+        let _ = s.update(Message::SelectFile(1));
+        assert_eq!(s.selected_text(), None, "another file starts unselected");
+    }
+
+    #[test]
+    fn staging_a_selection_takes_the_changed_lines_it_touches() {
         let mut s = state(DiffSource::WorkTree("f.txt".into()));
-        let _ = s.update(Message::ToggleLine((0, 0, 2)));
+        // Part of ` a` through part of `+B`: the changed lines are -b, +B.
+        drag(&mut s, Message::LinePressed((line(0), 1)), (line(2), 1));
+        match s.update(Message::Selected(Action::Stage)).output {
+            Some(Output::Apply { description, .. }) => {
+                assert_eq!(
+                    description, "stage 2 lines",
+                    "context lines are not counted"
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(s.selected_text(), None, "cleared");
+        // Only +B: a partial patch.
+        drag(&mut s, Message::LinePressed((line(2), 0)), (line(2), 2));
         match s.update(Message::Selected(Action::Stage)).output {
             Some(Output::Apply {
                 patches,
@@ -1182,7 +1546,6 @@ index 1111111..2222222 100644
             }
             other => panic!("unexpected {other:?}"),
         }
-        assert!(s.selection.is_empty());
     }
 
     #[test]

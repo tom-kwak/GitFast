@@ -269,6 +269,7 @@ impl App {
                     Message::DiffHighlighted(id, source.clone(), file, spans)
                 })
             }
+            diff_view::Output::Copy { text, what } => self.copy_text(text, &what),
             diff_view::Output::DiscardSubmodule(path) => {
                 self.confirm_discard(vec![path], Vec::new())
             }
@@ -992,6 +993,27 @@ impl App {
             .pending_tags
             .clone()
             .filter(|t| !t.names.is_empty())
+    }
+
+    /// ⌘C: the selected lines of the diff on screen (nothing selected:
+    /// nothing copied, so a text field's own ⌘C is never overwritten).
+    pub(super) fn copy_diff_selection(&mut self) -> Task<Message> {
+        let Some(tab) = self.active_tab() else {
+            return Task::none();
+        };
+        let diff = match tab.code_view {
+            diff_view::Role::Local => &tab.local_diff,
+            diff_view::Role::Commit => &tab.commit_diff,
+        };
+        match diff.selected_text() {
+            Some((text, what)) => self.copy_text(text, &what),
+            None => Task::none(),
+        }
+    }
+
+    fn copy_text(&mut self, text: String, what: &str) -> Task<Message> {
+        self.flash(NoteKind::Info, format!("copied {what}"));
+        iced::clipboard::write(text)
     }
 
     /// Whether the active repository has any remote configured.
