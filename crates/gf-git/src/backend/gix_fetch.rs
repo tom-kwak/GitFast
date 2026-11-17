@@ -58,7 +58,11 @@ fn prune_prefixes(remote: &gix::Remote<'_>) -> Result<Vec<String>> {
 fn git_follows_remote_head(git: &std::path::Path) -> bool {
     static FOLLOWS: OnceLock<bool> = OnceLock::new();
     *FOLLOWS.get_or_init(|| {
-        let Ok(out) = std::process::Command::new(git).arg("--version").output() else {
+        let Ok(out) = std::process::Command::new(git)
+            .env("PATH", gf_core::tool_path())
+            .arg("--version")
+            .output()
+        else {
             return false;
         };
         // `git version 2.50.1 (Apple Git-155)`

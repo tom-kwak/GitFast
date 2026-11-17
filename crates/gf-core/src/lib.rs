@@ -6,6 +6,8 @@
 pub mod error;
 pub mod event;
 pub mod model;
+pub mod tool_path;
 
 pub use error::{GfError, Result};
 pub use event::{CommandEvent, CommandPhase, CoreEvent, EventBus};
+pub use tool_path::tool_path;

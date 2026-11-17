@@ -127,6 +127,7 @@ fn ignored(workdir: &Path, paths: &[PathBuf]) -> std::io::Result<HashSet<PathBuf
         return Ok(HashSet::new());
     }
     let mut child = Command::new("git")
+        .env("PATH", gf_core::tool_path())
         .arg("-C")
         .arg(workdir)
         .args(["check-ignore", "--stdin", "-z"])

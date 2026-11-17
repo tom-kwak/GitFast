@@ -1,9 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  # Pushes to main run this from release.yml, before releasing.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
