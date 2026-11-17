@@ -18,6 +18,7 @@ pub mod conflict;
 pub mod graph;
 pub mod ops;
 pub mod patch;
+mod remote_tags;
 mod repository;
 mod routes;
 

@@ -212,6 +212,46 @@ impl std::ops::BitOrAssign for Touched {
     }
 }
 
+/// Local tags no remote has: the user's own, not yet published. A tag
+/// fetched from any remote (an `upstream` the fork tracks, say) does not
+/// count, so push never sends another project's tags to `remote`. Each
+/// remote's tag list is what `gf_git` recorded at the last listing, fetch or
+/// push (see `remote_tags.rs`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingTags {
+    /// The remote pushes go to: the upstream's, else `origin`, else the first.
+    pub remote: String,
+    pub names: Vec<String>,
+}
+
+/// Local tag names that none of the `known` remote tag lists contains.
+pub fn tags_on_no_remote<'a>(
+    local: impl IntoIterator<Item = &'a str>,
+    known: &[std::collections::BTreeSet<String>],
+) -> Vec<String> {
+    local
+        .into_iter()
+        .filter(|n| !known.iter().any(|k| k.contains(*n)))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The remote a push of HEAD goes to: its upstream's remote, else
+/// `origin`, else the first one. `None` without remotes.
+pub fn push_remote(upstream: Option<&str>, remotes: &[Remote]) -> Option<String> {
+    upstream
+        .and_then(|up| {
+            // Remote names may contain `/`: match the configured ones.
+            remotes
+                .iter()
+                .filter(|r| up.starts_with(&format!("{}/", r.name)))
+                .max_by_key(|r| r.name.len())
+        })
+        .or_else(|| remotes.iter().find(|r| r.name == "origin"))
+        .or_else(|| remotes.first())
+        .map(|r| r.name.clone())
+}
+
 /// Everything the views show for a repository. Each refresh reads the
 /// [`Parts`] asked for and keeps the others.
 #[derive(Debug, Clone, Default)]
@@ -230,6 +270,12 @@ pub struct Snapshot {
     /// For a branch without upstream: commits no remote has yet (what a
     /// first push would publish). `None` when the branch has an upstream.
     pub unpublished: Option<u32>,
+    /// Local tags the push remote does not have (see [`PendingTags`]);
+    /// `None` when gf does not know that remote's tags yet.
+    pub pending_tags: Option<PendingTags>,
+    /// Remotes whose tags gf has never listed: until they are, which
+    /// tags are unpublished is unknown (`pending_tags` is `None`).
+    pub unlisted_remotes: Vec<String>,
     /// When the repository was last fetched (`FETCH_HEAD`'s timestamp).
     pub last_fetch: Option<std::time::SystemTime>,
     /// Merge / rebase / cherry-pick / revert / bisect in progress.
@@ -478,6 +524,25 @@ impl Snapshot {
                 };
         }
 
+        if refs_part {
+            // Tags, remotes and the upstream only change with the refs or
+            // the config: a saved file does not read the list again.
+            let mut known = Vec::new();
+            snap.unlisted_remotes.clear();
+            for r in &snap.remotes {
+                match repo.known_remote_tags(&r.name).await {
+                    Some(k) => known.push(k),
+                    None => snap.unlisted_remotes.push(r.name.clone()),
+                }
+            }
+            snap.pending_tags = push_remote(snap.status.head.upstream.as_deref(), &snap.remotes)
+                .filter(|_| snap.unlisted_remotes.is_empty())
+                .map(|remote| PendingTags {
+                    remote,
+                    names: tags_on_no_remote(snap.tags.iter().map(|t| t.name.short()), &known),
+                });
+        }
+
         if status_part {
             // HEAD (detached or not) comes with the status, refs with it too.
             snap.badges = Arc::new(crate::badges::build(
@@ -660,6 +725,9 @@ pub struct RepoTab {
     pub left_dismissed: Vec<Oid>,
     /// The commit-graph was checked for this tab (see `App::on_loaded`).
     pub graph_checked: bool,
+    /// Remotes whose tags this session listed (see `App::on_loaded`):
+    /// each once, so a remote added later is listed too.
+    pub remote_tags_listed: std::collections::HashSet<String>,
 }
 
 impl RepoTab {
@@ -691,6 +759,7 @@ impl RepoTab {
             bisect: None,
             left_dismissed: Vec::new(),
             graph_checked: false,
+            remote_tags_listed: std::collections::HashSet::new(),
             commit: commit_box::State::default(),
         }
     }
@@ -946,5 +1015,119 @@ mod tests {
         let names: Vec<_> = after.tags.iter().map(|t| t.name.short()).collect();
         assert_eq!(names, ["v1", "v2"]);
         assert!(after.badges.values().flatten().any(|b| b.label == "◆ v2"));
+    }
+
+    #[test]
+    fn push_goes_to_the_upstream_remote_else_origin() {
+        let r = |n: &str| Remote {
+            name: n.into(),
+            fetch_url: String::new(),
+            push_url: None,
+        };
+        let remotes = [r("fork"), r("origin"), r("team/a")];
+        assert_eq!(
+            push_remote(Some("fork/main"), &remotes).as_deref(),
+            Some("fork")
+        );
+        assert_eq!(
+            push_remote(Some("team/a/x"), &remotes).as_deref(),
+            Some("team/a")
+        );
+        assert_eq!(push_remote(None, &remotes).as_deref(), Some("origin"));
+        assert_eq!(push_remote(None, &remotes[..1]).as_deref(), Some("fork"));
+        assert_eq!(push_remote(None, &[]), None);
+    }
+
+    #[test]
+    fn only_tags_no_remote_has_are_unpublished() {
+        let set = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect();
+        // A fork: `origin` has few tags, `upstream` the project's releases.
+        let known = [set(&["mine-1"]), set(&["release-1", "release-2"])];
+        let local = ["release-1", "release-2", "mine-1", "mine-2"];
+        assert_eq!(tags_on_no_remote(local, &known), ["mine-2"]);
+        assert_eq!(tags_on_no_remote(local, &[]).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn only_tags_on_no_remote_count_and_pushing_clears_them() {
+        use gf_test_support::TestRepo;
+        let origin = TestRepo::new_bare();
+        let upstream = TestRepo::new_bare();
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.commit_all("init");
+        repo.git(&[
+            "remote",
+            "add",
+            "origin",
+            origin.path().to_str().expect("utf-8 path"),
+        ]);
+        repo.git(&[
+            "remote",
+            "add",
+            "upstream",
+            upstream.path().to_str().expect("utf-8 path"),
+        ]);
+        repo.git(&["push", "-q", "-u", "origin", "main"]);
+        // The project's release lives on `upstream` only; `mine` nowhere.
+        repo.git(&["tag", "release-1"]);
+        repo.git(&["push", "-q", "upstream", "release-1"]);
+        repo.git(&["tag", "mine"]);
+        let runner = gf_git::GitRunner::new()
+            .with_cleared_env()
+            .with_env(repo.env());
+        let r = Repository::open(repo.path(), runner).await.expect("open");
+        let load = |prev, parts| Snapshot::load(r.clone(), prev, parts, false, 100);
+
+        let first = load(None, Parts::RELOAD).await.expect("load");
+        assert_eq!(first.pending_tags, None, "unknown before any listing");
+        assert_eq!(first.unlisted_remotes, ["origin", "upstream"]);
+
+        r.record_remote_tags("origin").await.expect("origin");
+        let half = load(Some(first), Parts::ALL).await.expect("load");
+        assert_eq!(half.pending_tags, None, "still unknown: upstream unlisted");
+        assert_eq!(half.unlisted_remotes, ["upstream"]);
+
+        r.record_remote_tags("upstream").await.expect("upstream");
+        let listed = load(Some(half), Parts::ALL).await.expect("load");
+        let pending = listed.pending_tags.clone().expect("known");
+        assert_eq!(pending.remote, "origin", "the upstream branch's remote");
+        assert_eq!(pending.names, ["mine"], "upstream's release is not ours");
+
+        // A tag on another branch counts the same.
+        repo.git(&["checkout", "-q", "-b", "side"]);
+        repo.write("b.txt", "b\n");
+        repo.commit_all("side");
+        repo.git(&["tag", "on-side"]);
+        repo.git(&["checkout", "-q", "main"]);
+        let more = load(Some(listed), Parts::ALL).await.expect("load");
+        assert_eq!(
+            more.pending_tags.clone().expect("known").names,
+            ["mine", "on-side"]
+        );
+
+        // Pushed through gf: recorded, no longer counted.
+        r.push_tags("origin", &["mine".into(), "on-side".into()])
+            .await
+            .expect("push");
+        let pushed = load(Some(more), Parts::ALL).await.expect("load");
+        assert!(
+            pushed
+                .pending_tags
+                .as_ref()
+                .expect("known")
+                .names
+                .is_empty()
+        );
+
+        // Pushed from a terminal: counted until the list is read again
+        // (fetch, or the next time the repository is opened).
+        repo.git(&["tag", "cli"]);
+        repo.git(&["push", "-q", "origin", "cli"]);
+        let stale = load(Some(pushed), Parts::ALL).await.expect("load");
+        assert_eq!(stale.pending_tags.clone().expect("known").names, ["cli"]);
+        r.record_remote_tags("origin").await.expect("relist");
+        let fresh = load(Some(stale), Parts::ALL).await.expect("load");
+        assert!(fresh.pending_tags.as_ref().expect("known").names.is_empty());
     }
 }

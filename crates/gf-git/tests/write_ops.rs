@@ -396,6 +396,79 @@ async fn stash_round_trip() {
 // ---------------------------------------------------------------- sync
 
 #[tokio::test]
+async fn remote_tags_are_known_after_listing_and_pushing() {
+    let remote = TestRepo::new_bare();
+    let a = TestRepo::new();
+    a.write("f.txt", "1\n");
+    a.commit_all("one");
+    a.git(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    a.git(&["push", "-q", "origin", "main"]);
+    a.git(&["tag", "on-remote"]);
+    a.git(&["push", "-q", "origin", "on-remote"]);
+    let ra = open(&a).await;
+
+    assert_eq!(ra.known_remote_tags("origin").await, None, "never listed");
+    // Pushing before any listing records nothing: the rest is unknown.
+    ra.add_remote_tags("origin", &["x".into()]).await.unwrap();
+    assert_eq!(ra.known_remote_tags("origin").await, None);
+
+    ra.record_remote_tags("origin").await.unwrap();
+    let known = ra.known_remote_tags("origin").await.unwrap();
+    assert_eq!(known.into_iter().collect::<Vec<_>>(), ["on-remote"]);
+
+    a.git(&["tag", "local-only"]);
+    ra.push_tags("origin", &["local-only".into()])
+        .await
+        .unwrap();
+    assert!(remote.git(&["tag"]).contains("local-only"), "pushed");
+    let known = ra.known_remote_tags("origin").await.unwrap();
+    assert!(known.contains("local-only"), "recorded as on the remote");
+}
+
+#[tokio::test]
+async fn remote_tag_lists_are_shared_by_worktrees_and_survive_odd_names() {
+    let remote = TestRepo::new_bare();
+    let a = TestRepo::new();
+    a.write("f.txt", "1\n");
+    a.commit_all("one");
+    let url = remote.path().to_str().unwrap();
+    a.git(&["remote", "add", "team/a.b", url]);
+    a.git(&["remote", "add", "team", url]);
+    a.git(&["push", "-q", "team", "main", "refs/heads/main:refs/tags/t1"]);
+    let ra = open(&a).await;
+
+    // Concurrent writes (fetch and a background listing) both succeed.
+    let (x, y) = tokio::join!(
+        ra.record_remote_tags("team/a.b"),
+        ra.record_remote_tags("team/a.b")
+    );
+    x.unwrap();
+    y.unwrap();
+    ra.record_remote_tags("team").await.unwrap();
+    let names =
+        |k: Option<std::collections::BTreeSet<String>>| k.unwrap().into_iter().collect::<Vec<_>>();
+    assert_eq!(names(ra.known_remote_tags("team/a.b").await), ["t1"]);
+    assert_eq!(names(ra.known_remote_tags("team").await), ["t1"]);
+
+    // A linked worktree reads the same list.
+    let wt = tempfile::tempdir().unwrap();
+    let wt_path = wt.path().join("wt");
+    a.git(&[
+        "worktree",
+        "add",
+        "-q",
+        wt_path.to_str().unwrap(),
+        "-b",
+        "side",
+    ]);
+    let runner = gf_git::GitRunner::new()
+        .with_cleared_env()
+        .with_env(a.env());
+    let rw = gf_git::Repository::open(&wt_path, runner).await.unwrap();
+    assert_eq!(names(rw.known_remote_tags("team").await), ["t1"]);
+}
+
+#[tokio::test]
 async fn fetch_pull_push_with_a_bare_remote() {
     let remote = TestRepo::new_bare();
     let a = TestRepo::new();

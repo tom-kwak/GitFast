@@ -30,6 +30,7 @@ use super::outputs::{names, stash_options};
 use super::{App, Message, OpKind};
 use crate::features::dialog::{Dialog, FIRST_FIELD_ID, Outcome, Severity};
 use crate::features::diff_view::Action;
+use crate::repo_tab::PendingTags;
 use crate::undo;
 
 /// What a dialog is for; carried through the dialog and acted on at submit.
@@ -67,6 +68,8 @@ pub enum Purpose {
     StashDrop(usize),
     Publish {
         branch: String,
+        /// Tags the remote does not have, sent along to that remote.
+        tags: Option<PendingTags>,
     },
     ForcePush {
         branch: Option<String>,
@@ -90,6 +93,8 @@ pub enum Purpose {
         branch: String,
         /// Set for a branch that is not checked out.
         to: Option<super::PushTo>,
+        /// Tags the remote does not have, sent along (checked-out branch).
+        tags: Option<PendingTags>,
     },
     PushTag {
         remote: String,
@@ -589,7 +594,9 @@ impl App {
                 ),
                 move |r| async move { r.stash_drop(i).await },
             ),
-            Purpose::Publish { branch } => {
+            Purpose::Publish { branch, tags } => {
+                // The tags go along when they are for the remote chosen.
+                let tags = tags.filter(|t| t.remote == value(0));
                 let opts = PushOptions {
                     remote: Some(value(0)),
                     branch: Some(branch.clone()),
@@ -607,7 +614,10 @@ impl App {
                         branch: Some(branch),
                         to,
                     },
-                    move |r, run| async move { r.push(&opts, run).await },
+                    move |r, run| async move {
+                        r.push(&opts, run).await?;
+                        push_tags(&r, tags).await
+                    },
                 )
             }
             Purpose::ForcePush { branch, to } => {
@@ -695,7 +705,7 @@ impl App {
                 move |r| async move { r.stash_pop(i).await },
             ),
             Purpose::Pull => self.pull(PullMode::Config),
-            Purpose::Push { branch, to } => {
+            Purpose::Push { branch, to, tags } => {
                 let opts = push_options(to.as_ref());
                 self.sync_op(
                     format!("push {branch}"),
@@ -703,13 +713,17 @@ impl App {
                         branch: Some(branch),
                         to,
                     },
-                    move |r, run| async move { r.push(&opts, run).await },
+                    move |r, run| async move {
+                        r.push(&opts, run).await?;
+                        push_tags(&r, tags).await
+                    },
                 )
             }
             Purpose::PushTag { remote, name } => self.op(
                 format!("push tag {name}"),
                 OpKind::Generic,
-                move |r| async move { r.push_tag(&remote, &name).await },
+                // Recorded as on the remote, so push stops counting it.
+                move |r| async move { r.push_tags(&remote, &[name]).await },
             ),
             Purpose::Merge { branch } => self.run_merge(branch, check(0)),
             Purpose::RebaseOnto { onto } => self.run_rebase_onto(onto),
@@ -923,6 +937,14 @@ fn validate(purpose: &Purpose, values: &[String]) -> Option<String> {
             Some("the squashed commit needs a summary".into())
         }
         _ => None,
+    }
+}
+
+/// Sends the tags a push carries along (none: nothing to do).
+async fn push_tags(r: &gf_git::Repository, tags: Option<PendingTags>) -> gf_core::Result<()> {
+    match tags {
+        Some(t) => r.push_tags(&t.remote, &t.names).await,
+        None => Ok(()),
     }
 }
 

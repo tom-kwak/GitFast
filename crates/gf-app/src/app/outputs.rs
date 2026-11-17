@@ -610,7 +610,16 @@ impl App {
         match m {
             toolbar::Message::Fetch => {
                 self.sync_op("fetch all remotes", OpKind::Fetch, |r, opts| async move {
-                    r.fetch(None, opts).await
+                    r.fetch(None, opts).await?;
+                    // Which tags each remote has: what push compares with.
+                    // Only a count depends on it, so a failure is logged.
+                    // The fetch itself succeeded: nothing here fails it.
+                    for remote in r.remotes().await.unwrap_or_default() {
+                        if let Err(e) = r.record_remote_tags(&remote.name).await {
+                            tracing::warn!(remote = %remote.name, error = %e, "could not list remote tags");
+                        }
+                    }
+                    Ok(())
                 })
             }
             toolbar::Message::Pull => {
@@ -694,7 +703,10 @@ impl App {
                         "Push it and track it as upstream:".into(),
                     ],
                     "Publish",
-                    Purpose::Publish { branch },
+                    Purpose::Publish {
+                        branch,
+                        tags: self.pending_tags(),
+                    },
                 )
                 .field("remote", remote, "origin"),
             );
@@ -707,14 +719,30 @@ impl App {
         // `git push` alone pushes the checked-out branch; any other branch
         // needs its remote and name spelled out.
         let to = (!b.is_head).then(|| self.push_target(b)).flatten();
+        // Tags go with the checked-out branch, as the toolbar counts them.
+        let tags = b.is_head.then(|| self.pending_tags()).flatten();
+        let mut body = Vec::new();
+        if ahead > 0 || tags.is_none() {
+            body.push(format!("Send {ahead} commit(s) from `{branch}` to `{up}`."));
+        }
+        if let Some(t) = &tags {
+            body.push(format!(
+                "Send tag(s) {} to `{}`.",
+                t.names
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                t.remote
+            ));
+        }
+        body.push("Others will see them.".into());
         self.confirm(Confirm::change(
             "push",
             "Push",
-            vec![format!(
-                "Send {ahead} commit(s) from `{branch}` to `{up}`? Others will see them."
-            )],
+            body,
             "Push",
-            Purpose::Push { branch, to },
+            Purpose::Push { branch, to, tags },
         ))
     }
 
@@ -955,6 +983,17 @@ impl App {
     }
 
     /// First configured remote, preferring `origin`.
+    /// Local tags the push remote does not have; `None` when there are
+    /// none or gf does not know that remote's tags.
+    fn pending_tags(&self) -> Option<crate::repo_tab::PendingTags> {
+        self.active_tab()?
+            .snapshot
+            .as_ref()?
+            .pending_tags
+            .clone()
+            .filter(|t| !t.names.is_empty())
+    }
+
     /// Whether the active repository has any remote configured.
     pub(super) fn has_remote(&self) -> bool {
         self.active_tab()
