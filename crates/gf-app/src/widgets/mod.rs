@@ -347,11 +347,18 @@ pub fn highlighted_line<'a, M: 'a>(
     t: &'a Tokens,
     spans: &'a crate::highlight::Spans,
 ) -> Element<'a, M> {
+    let last = spans.len().saturating_sub(1);
     iced::widget::rich_text(
         spans
             .iter()
-            .map(|(tone, s)| {
-                iced::widget::span::<(), iced::Font>(s.replace('\t', "    ")).color(t.tone(*tone))
+            .enumerate()
+            .map(|(i, (tone, s))| {
+                let s = if i == last {
+                    format::code_line(s)
+                } else {
+                    format::code_text(s)
+                };
+                iced::widget::span::<(), iced::Font>(s).color(t.tone(*tone))
             })
             .collect::<Vec<_>>(),
     )

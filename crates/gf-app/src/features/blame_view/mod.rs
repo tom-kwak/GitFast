@@ -167,7 +167,7 @@ impl State {
                             dim(t, format!("{:>5}", l.line)),
                             match spans.and_then(|s| s.get(i)) {
                                 Some(s) => widgets::highlighted_line(t, s),
-                                None => widgets::mono(t, l.content.replace('\t', "    "))
+                                None => widgets::mono(t, format::code_line(&l.content))
                                     .wrapping(Wrapping::None)
                                     .into(),
                             },

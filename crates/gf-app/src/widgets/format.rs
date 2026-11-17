@@ -93,9 +93,67 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// A line of file content ready to draw: tabs expanded, the line's own
+/// trailing `\r` (CRLF files) dropped, other control characters shown as
+/// their Unicode pictures (`␜`, `␍` …).
+///
+/// Drawn raw, line and paragraph separators (`\r`, `\x1c`–`\x1e`, U+0085,
+/// U+2028/9) split one line into several bidi paragraphs, and cosmic-text
+/// panics when they differ in direction — a blamed binary file or a
+/// right-to-left text file with CRLF endings crashed the whole app.
+pub fn code_line(s: &str) -> String {
+    code_text(s.strip_suffix('\r').unwrap_or(s))
+}
+
+/// [`code_line`] for a piece of a line (a highlighted span): keeps `\r`
+/// visible wherever it is.
+pub fn code_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\t' => out.push_str("    "),
+            '\0'..='\x1f' => {
+                out.push(char::from_u32(0x2400 + u32::from(c)).unwrap_or('\u{fffd}'));
+            }
+            '\x7f' => out.push('␡'),
+            '\u{85}' | '\u{2028}' | '\u{2029}' => out.push('␤'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_lines_have_no_control_characters() {
+        assert_eq!(code_line("a\tb\r"), "a    b");
+        assert_eq!(code_line("a\rb\x1c\u{85}\u{2029}\x7f\0"), "a␍b␜␤␤␡␀");
+        assert_eq!(code_text("x\r"), "x␍");
+        assert_eq!(code_line("한글 שלום"), "한글 שלום");
+    }
+
+    /// The text renderer must accept whatever a binary file's bytes decode
+    /// to (it asserted on mixed-direction paragraphs before).
+    #[test]
+    fn binary_looking_lines_render_without_panicking() {
+        use iced::advanced::graphics::text::cosmic_text::{
+            Attrs, Buffer, FontSystem, Metrics, Shaping,
+        };
+        let raw = "abc\x1cשלום\x1dxyz\rמה";
+        let mut fonts = FontSystem::new();
+        let mut buf = Buffer::new(&mut fonts, Metrics::new(14.0, 20.0));
+        buf.set_text(
+            &mut fonts,
+            &code_line(raw),
+            &Attrs::new(),
+            Shaping::Advanced,
+            None,
+        );
+        buf.shape_until_scroll(&mut fonts, false);
+    }
 
     #[test]
     fn formats_dates_in_their_offset() {
