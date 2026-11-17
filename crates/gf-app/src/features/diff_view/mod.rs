@@ -64,6 +64,61 @@ impl Role {
     }
 }
 
+/// A diff panel's header title in three parts: `lead` (`commit abc123 · `),
+/// the file `name`, and the dimmed `rest` (its folder, and for the work
+/// tree whether it is staged). Drawn in that order and clipped, so a long
+/// folder is cut before the file name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Title {
+    lead: String,
+    name: String,
+    rest: String,
+}
+
+impl Title {
+    fn of(source: &DiffSource, path: Option<&std::path::Path>) -> Self {
+        let Some(path) = path else {
+            return Self {
+                lead: source.label(),
+                name: String::new(),
+                rest: String::new(),
+            };
+        };
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into(),
+        );
+        let dir = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(|d| format!("  {}/", d.display()))
+            .unwrap_or_default();
+        match source {
+            DiffSource::WorkTree(_) => Self::local(name, dir, "unstaged"),
+            DiffSource::Staged(_) => Self::local(name, dir, "staged"),
+            DiffSource::Untracked(_) => Self::local(name, dir, "new file"),
+            _ => Self {
+                lead: format!("{} · ", source.label()),
+                name,
+                rest: dir,
+            },
+        }
+    }
+
+    fn local(name: String, dir: String, state: &str) -> Self {
+        Self {
+            lead: String::new(),
+            name,
+            rest: format!("{dir} · {state}"),
+        }
+    }
+
+    /// The whole title on one line (the hover text).
+    fn full(&self) -> String {
+        format!("{}{}{}", self.lead, self.name, self.rest)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffSource {
     WorkTree(PathBuf),
@@ -121,7 +176,9 @@ impl DiffSource {
         }
     }
 
-    pub fn title(&self) -> String {
+    /// What is shown (`commit abc123`, `a.rs · staged`), without the
+    /// file a commit's diff is on.
+    fn label(&self) -> String {
         match self {
             Self::WorkTree(p) => format!("{} · unstaged", p.display()),
             Self::Staged(p) => format!("{} · staged", p.display()),
@@ -912,17 +969,27 @@ impl State {
         };
 
         let files = &self.diff.files;
-        let mut title = source.title();
-        if self.role == Role::Commit {
-            if let Some(f) = files.get(self.file) {
-                let path = f
-                    .display_path()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-                title = format!("{title} · {path}");
+        let shown_path = match source {
+            DiffSource::WorkTree(p) | DiffSource::Staged(p) | DiffSource::Untracked(p) => {
+                Some(p.clone())
             }
-        }
-        let mut header = row![mono(t, title).wrapping(Wrapping::None).width(Length::Fill)]
+            _ => files.get(self.file).and_then(|f| f.display_path().cloned()),
+        };
+        let title = Title::of(source, shown_path.as_deref());
+        // The title gives way to the buttons: clipped to its cell, file
+        // name first so the folder is what gets cut; the whole of it on
+        // hover.
+        let title_cell = container(
+            row![
+                mono(t, title.lead.clone()).wrapping(Wrapping::None),
+                mono(t, title.name.clone()).wrapping(Wrapping::None),
+                dim(t, title.rest.clone()).wrapping(Wrapping::None),
+            ]
+            .align_y(iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .clip(true);
+        let mut header = row![widgets::tip(t, title_cell, title.full())]
             .spacing(4)
             .align_y(iced::Alignment::Center);
         if files.len() > 1 {
@@ -1167,5 +1234,31 @@ index 1111111..2222222 100644
         s.show(DiffSource::WorkTree("b".into()));
         s.loaded(&DiffSource::WorkTree("a".into()), Ok(Arc::default()));
         assert!(s.loading);
+    }
+
+    #[test]
+    fn titles_put_the_file_name_before_its_folder() {
+        let oid: gf_core::model::Oid = "a".repeat(40).parse().expect("oid");
+        let path = std::path::Path::new("crates/gf-app/src/mod.rs");
+        let t = Title::of(&DiffSource::Commit(oid.clone()), Some(path));
+        assert_eq!(t.lead, format!("commit {} · ", oid.short()));
+        assert_eq!(t.name, "mod.rs");
+        assert_eq!(t.rest, "  crates/gf-app/src/");
+        assert_eq!(
+            t.full(),
+            format!("commit {} · mod.rs  crates/gf-app/src/", oid.short())
+        );
+
+        let t = Title::of(&DiffSource::Staged(path.into()), Some(path));
+        assert_eq!(
+            (t.name.as_str(), t.rest.as_str()),
+            ("mod.rs", "  crates/gf-app/src/ · staged")
+        );
+        let top = std::path::Path::new("a.rs");
+        let t = Title::of(&DiffSource::WorkTree(top.into()), Some(top));
+        assert_eq!(t.full(), "a.rs · unstaged");
+        // Nothing to split: the label as before.
+        let t = Title::of(&DiffSource::Commit(oid.clone()), None);
+        assert_eq!(t.full(), format!("commit {}", oid.short()));
     }
 }
