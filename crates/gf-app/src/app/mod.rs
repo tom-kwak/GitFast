@@ -586,6 +586,18 @@ impl App {
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
+                // Picking a commit in the history (click or arrow keys)
+                // asks for its changes: blame gives way. A blame line
+                // revealing its commit selects without this message, so
+                // blame stays open then.
+                if matches!(
+                    m,
+                    history::Message::Select(_)
+                        | history::Message::SelectRange(_)
+                        | history::Message::ToggleMark(_)
+                ) {
+                    tab.blame = None;
+                }
                 let snap = tab.snapshot.clone();
                 let Update { task, output } = tab.history.update_with(m, snap.as_deref());
                 let task = task.map(Message::History);
