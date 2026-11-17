@@ -1,0 +1,81 @@
+name: Release
+
+# Every push to main (a merge or a direct push): check, then publish a
+# release with the macOS .dmg.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  macos:
+    name: Package and release (macOS)
+    needs: ci
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Version
+        id: version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # release-<version>; a later push before the version is bumped
+          # gets release-<version>-build.<run> (tags are never reused).
+          tag="release-$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            tag="$tag-build.$GITHUB_RUN_NUMBER"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build gf.app and .dmg (Apple silicon + Intel)
+        id: package
+        env:
+          UNIVERSAL: "1"
+        run: |
+          dmg="$(scripts/package-macos.sh "${{ steps.version.outputs.version }}" | tail -1)"
+          # A fixed name, so .../releases/latest/download/<name> always
+          # gets the newest one (scripts/install.sh relies on it).
+          fixed="$(dirname "$dmg")/gf-macos-universal.dmg"
+          mv "$dmg" "$fixed"
+          (cd "$(dirname "$fixed")" && shasum -a 256 gf-macos-universal.dmg > gf-macos-universal.dmg.sha256)
+          echo "dmg=$fixed" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DMG: ${{ steps.package.outputs.dmg }}
+        run: |
+          cat > notes.md <<NOTES
+          ## Install
+
+          Paste in Terminal (installs or updates gf in Applications):
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
+          \`\`\`
+
+          Universal build (Apple silicon + Intel), macOS 11+.
+          NOTES
+          gh release create "$TAG" "$DMG" "$DMG.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "gf ${TAG#release-}" \
+            --notes-file notes.md \
+            --generate-notes \
+            --latest

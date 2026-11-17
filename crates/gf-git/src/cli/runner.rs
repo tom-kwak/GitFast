@@ -199,6 +199,8 @@ impl GitRunner {
             process.env_clear();
         }
         process
+            // Before the runner's and command's own: those may set it.
+            .env("PATH", gf_core::tool_path())
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .envs(cmd.env.iter().map(|(k, v)| (k, v)))
             // Never block on an interactive prompt; auth goes through askpass.
