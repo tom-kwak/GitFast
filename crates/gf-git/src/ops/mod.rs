@@ -22,4 +22,5 @@ pub mod status;
 pub mod submodule;
 pub mod sync;
 pub mod tag;
+pub mod undo;
 pub mod worktree;

@@ -24,8 +24,12 @@ pub enum PromptCommand {
     Quit,
     /// `pwd`: show the active repository's path.
     Pwd,
-    /// `:undo`: undo the last undoable step.
-    Undo,
+    /// `:undo`: undo the last step; `:undo list` shows the history.
+    Undo {
+        list: bool,
+    },
+    /// `:redo`: redo the last undone step.
+    Redo,
     /// `:confirm` lists skipped confirmations; `:confirm reset` asks again.
     Confirms {
         reset: bool,
@@ -62,8 +66,9 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ),
     (
         ":undo",
-        "undo the last commit / merge / rebase / pull made in gf",
+        ":undo [list] — undo the last change made in gf (⌘Z), or list them",
     ),
+    (":redo", "redo the last undone change                  ⌘⇧Z"),
     (":local", "open/close the working tree (else history)    ⌘E"),
     (
         ":gix-fetch",
@@ -142,7 +147,14 @@ pub fn parse(line: &str) -> Result<Option<PromptCommand>, String> {
             "theme" => PromptCommand::Theme(arg),
             "log" => PromptCommand::ToggleLog,
             "refs" => PromptCommand::ToggleRefs,
-            "undo" | "u" => PromptCommand::Undo,
+            "undo" | "u" => match arg.as_deref() {
+                None => PromptCommand::Undo { list: false },
+                Some("list") => PromptCommand::Undo { list: true },
+                Some(other) => {
+                    return Err(format!("unknown option `{other}` — use `:undo list`"));
+                }
+            },
+            "redo" => PromptCommand::Redo,
             "confirm" => match arg.as_deref() {
                 None => PromptCommand::Confirms { reset: false },
                 Some("reset") => PromptCommand::Confirms { reset: true },

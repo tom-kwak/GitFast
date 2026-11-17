@@ -31,6 +31,7 @@ use crate::ops::stash::StashOptions;
 use crate::ops::state::RepoState;
 use crate::ops::submodule::Submodule;
 use crate::ops::sync::{PullMode, PushOptions};
+use crate::ops::undo::{Capture, HeadMode, Scope};
 use crate::ops::worktree::Worktree;
 
 /// Calls `Trait::method(args)` on gix when it is available, else (or when
@@ -459,5 +460,21 @@ impl Repository {
     }
     pub async fn prune_worktrees(&self) -> Result<()> {
         WorktreeOps::prune_worktrees(&self.cli).await
+    }
+}
+
+impl Repository {
+    // ---- UndoOps (CLI)
+    /// Files a stash entry changes (what applying it touches).
+    pub async fn stash_paths(&self, index: usize) -> Result<Vec<PathBuf>> {
+        UndoOps::stash_paths(&self.cli, index).await
+    }
+    /// The state of everything `scope` covers, for undo / redo.
+    pub async fn capture(&self, scope: &Scope) -> Result<Capture> {
+        UndoOps::capture(&self.cli, scope).await
+    }
+    /// Puts back a captured state (see `ops::undo`).
+    pub async fn restore(&self, scope: &Scope, to: &Capture, mode: HeadMode) -> Result<()> {
+        UndoOps::restore(&self.cli, scope, to, mode).await
     }
 }

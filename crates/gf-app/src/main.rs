@@ -9,6 +9,7 @@ mod logging;
 mod nav;
 mod repo_tab;
 mod theme;
+mod undo;
 mod widgets;
 
 use anyhow::Context;
