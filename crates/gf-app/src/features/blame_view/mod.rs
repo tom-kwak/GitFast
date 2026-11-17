@@ -1,6 +1,7 @@
 //! Blame: who last changed each line of a file. Consecutive lines from the
 //! same commit form a block (commit info shown once, colored per commit);
-//! clicking a line opens that commit's changes.
+//! clicking a line finds that commit in the history (blame stays open).
+//! Lines not committed yet (working tree blame) are not clickable.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,6 +47,34 @@ pub enum Output {
 /// Lane-palette index for a commit, so neighbouring blocks differ in color.
 fn color_index(id: &Oid) -> usize {
     usize::from(id.as_str().as_bytes().first().copied().unwrap_or(0))
+}
+
+/// What hovering a committed line shows: the commit, who wrote it and when.
+///
+/// ```text
+/// c956bdc · main 700
+/// Kim Jihoon <jihoon@example.com>
+/// 2023-11-15 09:53 · 2y ago
+/// ```
+fn hover(l: &BlameLine, now: i64) -> String {
+    let who = if l.author_email.is_empty() {
+        l.author.clone()
+    } else {
+        format!("{} <{}>", l.author, l.author_email)
+    };
+    let ago = u64::try_from(now - l.time.seconds).map_or_else(
+        |_| "in the future".to_owned(),
+        |s| match format::age(std::time::Duration::from_secs(s)).as_str() {
+            "now" => "just now".to_owned(),
+            a => format!("{a} ago"),
+        },
+    );
+    format!(
+        "{} · {}\n{who}\n{} · {ago}",
+        l.commit.short(),
+        l.summary,
+        format::datetime(l.time)
+    )
 }
 
 /// Files longer than this are shown without highlighting.
@@ -127,13 +156,16 @@ impl State {
             colored(t, format!("{} @ {at}", self.path.display()), t.fg)
                 .wrapping(Wrapping::None)
                 .width(Length::Fill),
-            dim(t, "click a line to see its commit"),
+            dim(t, "click a line to find its commit in the history"),
             widgets::icon_button(t, "✕", t.dim, "close blame", Message::Close),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center);
 
         let spans = self.spans.as_deref();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
         let body: Element<'a, Message> = match (&self.lines, &self.error) {
             (_, Some(e)) => colored(t, format!("  ⚠ {e}"), t.error()).into(),
             (None, None) => widgets::empty_hint(t, "running blame…"),
@@ -149,7 +181,10 @@ impl State {
                     move |i| {
                         let l = &lines[i];
                         let first_of_block = i == 0 || lines[i - 1].commit != l.commit;
-                        let info: Element<'a, Message> = if first_of_block {
+                        let uncommitted = l.commit.is_null();
+                        let info: Element<'a, Message> = if first_of_block && uncommitted {
+                            dim(t, "not committed yet").into()
+                        } else if first_of_block {
                             row![
                                 colored(t, l.commit.short(), t.lane(color_index(&l.commit))),
                                 dim(t, format::truncate(&l.author, 12))
@@ -178,13 +213,20 @@ impl State {
                             },
                         ]
                         .spacing(8);
+                        if uncommitted {
+                            // Nothing to find: a local change, not a commit.
+                            return iced::widget::container(line)
+                                .padding(iced::Padding::from([1, 6]))
+                                .width(Length::Fill)
+                                .into();
+                        }
                         let row =
                             widgets::list_row(t, line, false, Message::Select(l.commit.clone()));
-                        if first_of_block {
-                            widgets::tip(t, row, format!("{} · {}", l.commit.short(), l.summary))
-                        } else {
-                            row
-                        }
+                        // Every committed line says who wrote it, not only
+                        // the first of its block. The row is as wide as the
+                        // longest line, so the tip follows the mouse instead
+                        // of sitting under the row's middle.
+                        widgets::tip_at_cursor(t, row, hover(l, now))
                     },
                     Message::Scrolled,
                 )
@@ -211,6 +253,43 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert!(spans[0].len() > 1, "keyword and name get separate spans");
         assert!(highlight_lines(Path::new("notes.unknown-ext"), &lines).is_none());
+    }
+
+    fn line(author: &str, email: &str, seconds: i64) -> BlameLine {
+        BlameLine {
+            commit: "c956bdcabe00fc3430c440c570037b38a77d8676"
+                .parse()
+                .expect("oid"),
+            line: 1,
+            content: String::new(),
+            author: author.into(),
+            author_email: email.into(),
+            time: gf_core::model::Timestamp {
+                seconds,
+                offset_minutes: 0,
+            },
+            summary: "main 700".into(),
+        }
+    }
+
+    #[test]
+    fn hover_says_the_commit_who_and_when() {
+        let at = 1_700_000_000; // 2023-11-14 22:13 UTC
+        let year = 365 * 86_400;
+        assert_eq!(
+            hover(
+                &line("Kim Jihoon", "jihoon@example.com", at),
+                at + 2 * year + 86_400
+            ),
+            "c956bdc · main 700\nKim Jihoon <jihoon@example.com>\n2023-11-14 22:13 · 2y ago"
+        );
+        let h = hover(&line("Kim", "", at), at + 3);
+        assert!(h.contains("\nKim\n"), "no empty <>: {h}");
+        assert!(h.ends_with("just now"), "{h}");
+        assert!(
+            hover(&line("Kim", "", at), at - 60).ends_with("in the future"),
+            "clock skew"
+        );
     }
 
     #[test]

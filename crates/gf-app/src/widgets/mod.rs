@@ -149,6 +149,23 @@ pub fn tip<'a, M: 'a>(
     .into()
 }
 
+/// Like [`tip`], but shown at the mouse and moving with it. For wide rows
+/// (a line of code), where "below the middle" lands far from the pointer.
+pub fn tip_at_cursor<'a, M: 'a>(
+    t: &'a Tokens,
+    content: impl Into<Element<'a, M>>,
+    hint: String,
+) -> Element<'a, M> {
+    tooltip(
+        content,
+        container(dim(t, hint))
+            .padding(Padding::from([2, 6]))
+            .style(style::tooltip(t)),
+        tooltip::Position::FollowCursor,
+    )
+    .into()
+}
+
 /// A titled, bordered panel: `─ TITLE ─────` header over its content.
 pub fn panel<'a, M: 'a>(
     t: &'a Tokens,

@@ -15,6 +15,8 @@ pub struct BlameLine {
     pub line: u32,
     pub content: String,
     pub author: String,
+    /// Without the `<>` git writes around it; empty when git gave none.
+    pub author_email: String,
     pub time: Timestamp,
     pub summary: String,
 }
@@ -22,6 +24,7 @@ pub struct BlameLine {
 #[derive(Debug, Clone, Default)]
 struct CommitInfo {
     author: String,
+    email: String,
     time: i64,
     tz: i32,
     summary: String,
@@ -53,6 +56,7 @@ pub fn parse_blame(out: &[u8]) -> Result<Vec<BlameLine>> {
                 line,
                 content: content.to_owned(),
                 author: info.author,
+                author_email: info.email,
                 time: Timestamp {
                     seconds: info.time,
                     offset_minutes: info.tz,
@@ -81,6 +85,13 @@ pub fn parse_blame(out: &[u8]) -> Result<Vec<BlameLine>> {
             let info = infos.entry(id.clone()).or_default();
             match first {
                 "author" => info.author = value.to_owned(),
+                "author-mail" => {
+                    info.email = value
+                        .trim()
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .to_owned();
+                }
                 "author-time" => info.time = value.parse().unwrap_or(0),
                 "author-tz" => info.tz = parse_tz(value),
                 "summary" => info.summary = value.to_owned(),
@@ -110,7 +121,7 @@ mod tests {
         let a = "a".repeat(40);
         let b = "b".repeat(40);
         let out = format!(
-            "{a} 1 1 2\nauthor Kim\nauthor-time 1704067200\nauthor-tz +0900\nsummary first\nfilename f\n\tline one\n\
+            "{a} 1 1 2\nauthor Kim\nauthor-mail <kim@example.com>\nauthor-time 1704067200\nauthor-tz +0900\nsummary first\nfilename f\n\tline one\n\
              {a} 2 2\n\tline two\n\
              {b} 3 3 1\nauthor Lee\nauthor-time 1704067300\nauthor-tz -0130\nsummary second\nfilename f\n\tline three\n"
         );
@@ -121,6 +132,8 @@ mod tests {
             "details carried from the first header"
         );
         assert_eq!(lines[1].content, "line two");
+        assert_eq!(lines[1].author_email, "kim@example.com", "brackets removed");
+        assert_eq!(lines[2].author_email, "", "none given");
         assert_eq!(lines[2].time.offset_minutes, -90);
         assert_eq!(lines[2].line, 3);
     }

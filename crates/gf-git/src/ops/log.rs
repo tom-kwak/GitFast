@@ -106,6 +106,50 @@ impl LogQuery {
     }
 }
 
+impl LogQuery {
+    /// `git rev-list` arguments walking the same commits in the same order
+    /// as this query's `git log` (ids only, no limit).
+    fn rev_list_args(&self) -> Vec<String> {
+        let mut args = vec!["rev-list".to_owned()];
+        match self.order {
+            LogOrder::Default => {}
+            LogOrder::Topo => args.push("--topo-order".into()),
+            LogOrder::Date => args.push("--date-order".into()),
+        }
+        if self.first_parent {
+            args.push("--first-parent".into());
+        }
+        if self.all_refs {
+            args.push("--all".into());
+        }
+        args.push("--end-of-options".into());
+        if self.revisions.is_empty() && !self.all_refs {
+            // `git log` walks HEAD by default; `rev-list` needs it said.
+            args.push("HEAD".into());
+        }
+        args.extend(self.revisions.iter().cloned());
+        args
+    }
+}
+
+impl CliBackend {
+    /// Row of `oid` in `query`'s history (0 = first), reading ids only and
+    /// stopping at it; `None` when the walk never reaches it. The query's
+    /// limit, skip and filters are ignored: plain histories only.
+    pub(crate) async fn log_position(&self, query: &LogQuery, oid: &str) -> Result<Option<usize>> {
+        let cmd = self.command(query.rev_list_args()).read_only();
+        let opts = crate::cli::RunOptions {
+            stop_at: Some(oid.as_bytes().to_vec()),
+            ..crate::cli::RunOptions::default()
+        };
+        let out = self.runner().run_with(&cmd, opts).await?;
+        Ok(out
+            .stdout
+            .split(|b| *b == b'\n')
+            .position(|line| line == oid.as_bytes()))
+    }
+}
+
 impl LogOps for CliBackend {
     async fn log(&self, query: &LogQuery) -> Result<Vec<Commit>> {
         let cmd = self
