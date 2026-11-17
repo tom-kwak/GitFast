@@ -23,8 +23,12 @@ pub struct BisectProgress {
     pub first_bad: Option<Oid>,
 }
 
+/// How git names the result: `bad` before 2.56, `'bad'` since (quoted,
+/// as custom terms are).
+const FIRST_BAD: [&str; 2] = ["first bad commit", "first 'bad' commit"];
+
 /// Parses `Bisecting: 6 revisions left to test after this (roughly 3 steps)`
-/// and `<oid> is the first bad commit`.
+/// and `<oid> is the first bad commit` (or `first 'bad' commit`).
 pub fn parse_progress(out: &str) -> BisectProgress {
     let mut p = BisectProgress::default();
     for line in out.lines() {
@@ -35,17 +39,25 @@ pub fn parse_progress(out: &str) -> BisectProgress {
                 .nth(1)
                 .and_then(|s| s.split_whitespace().next())
                 .and_then(|n| n.parse().ok());
-        } else if let Some(id) = line.strip_suffix(" is the first bad commit") {
+        } else if let Some(id) = FIRST_BAD
+            .iter()
+            .find_map(|f| line.strip_suffix(&format!(" is the {f}")))
+        {
             p.first_bad = id.trim().parse().ok();
         }
     }
     p
 }
 
-/// The `# first bad commit: [<oid>] <subject>` line of `git bisect log`.
+/// The `# first bad commit: [<oid>] <subject>` line of `git bisect log`
+/// (`first 'bad' commit` since git 2.56).
 pub fn first_bad_in_log(log: &str) -> Option<Oid> {
     log.lines()
-        .find_map(|l| l.strip_prefix("# first bad commit: ["))
+        .find_map(|l| {
+            FIRST_BAD
+                .iter()
+                .find_map(|f| l.strip_prefix(&format!("# {f}: [")))
+        })
         .and_then(|rest| rest.split(']').next())
         .and_then(|id| id.parse().ok())
 }
@@ -71,12 +83,10 @@ impl BisectOps for CliBackend {
             Verdict::Skip => "skip",
         };
         let out = self.exec(self.command(["bisect", word])).await?;
-        // Where git prints each line has changed between versions: read
-        // both streams.
-        let mut p = parse_progress(&format!("{}\n{}", out.stdout_str(), out.stderr));
+        let mut p = parse_progress(&out.stdout_str());
         if p.first_bad.is_none() && p.remaining.is_none() {
-            // Neither "Bisecting:" nor a result: the bisect log, whose
-            // format is stable, records the result once there is one.
+            // Neither "Bisecting:" nor a result (wording git changed
+            // again?): the bisect log records the result too.
             let log = self.exec(self.command(["bisect", "log"])).await?;
             p.first_bad = first_bad_in_log(&log.stdout_str());
         }
@@ -106,7 +116,15 @@ mod tests {
         let p = parse_progress(&format!("{id} is the first bad commit\ncommit {id}\n"));
         assert_eq!(p.first_bad.map(|o| o.to_string()), Some(id.clone()));
         let log = format!("git bisect good abc\n# first bad commit: [{id}] c5\n");
-        assert_eq!(first_bad_in_log(&log).map(|o| o.to_string()), Some(id));
+        assert_eq!(
+            first_bad_in_log(&log).map(|o| o.to_string()),
+            Some(id.clone())
+        );
         assert_eq!(first_bad_in_log("git bisect start\n"), None);
+        // git 2.56 quotes the term.
+        let p = parse_progress(&format!("{id} is the first 'bad' commit\ncommit {id}\n"));
+        assert_eq!(p.first_bad.map(|o| o.to_string()), Some(id.clone()));
+        let log = format!("# first 'bad' commit: [{id}] c5\n");
+        assert_eq!(first_bad_in_log(&log).map(|o| o.to_string()), Some(id));
     }
 }
