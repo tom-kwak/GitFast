@@ -136,6 +136,7 @@ impl Repository {
             message: Some(message.clone()),
             include_untracked: true,
             keep_index: false,
+            paths: Vec::new(),
         };
         StashOps::stash_push(&self.cli, &opts).await?;
         // `git stash` saves nothing (and says so) when there was nothing to
@@ -154,6 +155,23 @@ impl Repository {
             }
             return Err(e);
         }
+        Ok(())
+    }
+    /// Adds `pattern` as a line of the work tree's `.gitignore` (made when
+    /// missing), unless it is there already.
+    pub async fn ignore(&self, pattern: &str) -> Result<()> {
+        let file = self.cwd().join(".gitignore");
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        if text.lines().any(|l| l.trim() == pattern) {
+            return Ok(());
+        }
+        let mut out = text;
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(pattern);
+        out.push('\n');
+        std::fs::write(&file, out)?;
         Ok(())
     }
     /// Checks out a commit without a branch (detached HEAD).

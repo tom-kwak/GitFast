@@ -202,6 +202,7 @@ impl App {
                     message: Some(stash_message),
                     include_untracked: true,
                     keep_index: false,
+                    paths: Vec::new(),
                 })
                 .await?;
             }

@@ -76,6 +76,50 @@ impl App {
             changes::Output::Discard { tracked, untracked } => {
                 self.confirm_discard(tracked, untracked)
             }
+            changes::Output::Menu { show, menu } => {
+                // A right-clicked file shows its diff like a click.
+                let shown = show.map_or_else(Task::none, |s| {
+                    self.on_changes(changes::Output::ShowDiff(s))
+                });
+                let open = self.open_menu(menu.map(Message::Changes));
+                Task::batch([shown, open])
+            }
+            changes::Output::FileHistory(path) => self.open_file_history(path),
+            changes::Output::Blame(path) => self.open_blame(path, None),
+            changes::Output::CopyPath(path) => {
+                let text = path.display().to_string();
+                self.flash(NoteKind::Info, format!("copied {text}"));
+                iced::clipboard::write(text)
+            }
+            changes::Output::Reveal(path) => {
+                if let Some(abs) = self.active_tab().map(|t| t.repo.cwd().join(&path)) {
+                    if let Err(e) = reveal(&abs) {
+                        self.flash(NoteKind::Error, format!("could not show it: {e}"));
+                    }
+                }
+                Task::none()
+            }
+            changes::Output::StashFile(path) => {
+                let label = format!("stash {}", path.display());
+                let record = Record::new(undo::stash(vec![path.clone()]));
+                let opts = StashOptions {
+                    message: None,
+                    include_untracked: false,
+                    keep_index: false,
+                    paths: vec![path],
+                };
+                self.op_recorded(label, OpKind::Generic, Some(record), move |r| async move {
+                    r.stash_push(&opts).await
+                })
+            }
+            changes::Output::Ignore(pattern) => {
+                let label = format!("ignore {pattern}");
+                let record = Record::new(undo::files(vec![".gitignore".into()]));
+                self.op_recorded(label, OpKind::Generic, Some(record), move |r| async move {
+                    r.ignore(&pattern).await
+                })
+            }
+            changes::Output::TakeSide(path, side) => self.ask_take_side(path, side),
         }
     }
 
@@ -1083,7 +1127,29 @@ pub(super) fn stash_options(
         message: (!message.is_empty()).then_some(message),
         include_untracked,
         keep_index,
+        paths: Vec::new(),
     }
+}
+
+/// Shows `path` selected in the file manager (Finder on macOS).
+fn reveal(path: &std::path::Path) -> std::io::Result<()> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    let mut child = cmd.spawn()?;
+    // Reaped in the background so it never lingers as a zombie.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// `a.rs, b.rs, c.rs  +11 more  [l] list`: the first few blocking files.

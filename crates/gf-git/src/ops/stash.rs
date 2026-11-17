@@ -12,6 +12,8 @@ pub struct StashOptions {
     pub include_untracked: bool,
     /// Leave staged changes in the index.
     pub keep_index: bool,
+    /// Only these paths (all changes when empty).
+    pub paths: Vec<std::path::PathBuf>,
 }
 
 /// `%gd` reflog selector, hash, subject, committer time (unix seconds).
@@ -65,7 +67,7 @@ impl StashOps for CliBackend {
         if let Some(m) = opts.message.as_deref().filter(|m| !m.trim().is_empty()) {
             cmd = cmd.args(["-m", m]);
         }
-        self.exec(cmd).await?;
+        self.exec(cmd.paths(&opts.paths)).await?;
         Ok(())
     }
 

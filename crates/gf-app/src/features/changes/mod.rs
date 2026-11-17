@@ -1,6 +1,7 @@
 //! Working tree changes grouped like `git status` (conflicts, staged,
 //! unstaged, untracked) with per-row and per-group actions. Clicking a row
-//! shows its diff.
+//! shows its diff; right-click (or `.`) opens the file's actions, which
+//! depend on its group.
 
 use std::path::PathBuf;
 
@@ -10,6 +11,7 @@ use iced::widget::{container, row};
 use iced::{Color, Element, Length};
 
 use crate::feature::{Cx, Feature, Update};
+use crate::features::context_menu::{Entry, Menu};
 use crate::features::diff_view::DiffSource;
 use crate::nav::{self, Key, Moved, Nav};
 use crate::repo_tab::LineStats;
@@ -63,6 +65,12 @@ pub enum Message {
     StageAll,
     UnstageAll,
     Scrolled(ScrollPos),
+    /// Selects the row and opens its actions.
+    RightClick(PathBuf, Group),
+    /// `.`: the selected row's actions.
+    OpenActions,
+    /// A menu action (a request to the app).
+    Act(Output),
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +87,160 @@ pub enum Output {
     },
     StageAll,
     UnstageAll,
+    /// Open the actions menu; `show` is the diff of a newly selected row.
+    Menu {
+        show: Option<DiffSource>,
+        menu: Menu<Message>,
+    },
+    FileHistory(PathBuf),
+    Blame(PathBuf),
+    CopyPath(PathBuf),
+    Reveal(PathBuf),
+    /// Stash only this file's changes.
+    StashFile(PathBuf),
+    /// Add a line to `.gitignore`.
+    Ignore(String),
+    TakeSide(PathBuf, gf_git::Side),
+}
+
+/// `.gitignore` lines offered for an untracked `path`: the file itself,
+/// every file with its extension, and its folder.
+pub fn ignore_patterns(path: &std::path::Path) -> Vec<(char, String, String)> {
+    let shown = path.display().to_string();
+    let mut out = vec![('i', "ignore this file".to_owned(), format!("/{shown}"))];
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        out.push(('e', format!("ignore all *.{ext}"), format!("*.{ext}")));
+    }
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        out.push((
+            'g',
+            "ignore its folder".to_owned(),
+            format!("/{}/", dir.display()),
+        ));
+    }
+    out
+}
+
+/// The actions for `path` as listed in `group`, with the git command each
+/// runs as its hint.
+fn file_menu(path: &std::path::Path, group: Group) -> Menu<Message> {
+    let p = path.display().to_string();
+    let act = |o: Output| Message::Act(o);
+    let pb = path.to_path_buf();
+    let mut entries = match group {
+        Group::Unstaged => vec![
+            Entry::item(
+                's',
+                "stage",
+                format!("git add -- {p}"),
+                Message::Stage(pb.clone()),
+            ),
+            Entry::item(
+                'z',
+                "stash just this file",
+                format!("git stash push -- {p}"),
+                act(Output::StashFile(pb.clone())),
+            ),
+            Entry::caution(
+                'd',
+                "discard changes…",
+                format!("git restore -- {p}"),
+                Message::Discard(pb.clone(), group),
+            ),
+        ],
+        Group::Staged => vec![
+            Entry::item(
+                'u',
+                "unstage",
+                format!("git restore --staged -- {p}"),
+                Message::Unstage(pb.clone()),
+            ),
+            Entry::item(
+                'z',
+                "stash just this file",
+                format!("git stash push -- {p}"),
+                act(Output::StashFile(pb.clone())),
+            ),
+        ],
+        Group::Untracked => {
+            let mut v = vec![Entry::item(
+                's',
+                "stage",
+                format!("git add -- {p}"),
+                Message::Stage(pb.clone()),
+            )];
+            v.extend(ignore_patterns(path).into_iter().map(|(k, label, pat)| {
+                Entry::item(
+                    k,
+                    label,
+                    format!("+ {pat} in .gitignore"),
+                    act(Output::Ignore(pat)),
+                )
+            }));
+            v.push(Entry::caution(
+                'd',
+                "delete file…",
+                format!("rm {p}"),
+                Message::Discard(pb.clone(), group),
+            ));
+            v
+        }
+        Group::Conflicts => vec![
+            Entry::item(
+                'r',
+                "open resolver",
+                "pick block by block",
+                Message::Select(pb.clone(), group),
+            ),
+            Entry::item(
+                'o',
+                "take ours",
+                format!("git checkout --ours -- {p}"),
+                act(Output::TakeSide(pb.clone(), gf_git::Side::Ours)),
+            ),
+            Entry::item(
+                't',
+                "take theirs",
+                format!("git checkout --theirs -- {p}"),
+                act(Output::TakeSide(pb.clone(), gf_git::Side::Theirs)),
+            ),
+            Entry::item(
+                's',
+                "mark resolved",
+                format!("git add -- {p}"),
+                Message::Stage(pb.clone()),
+            ),
+        ],
+    };
+    entries.push(Entry::Separator);
+    // A new file has no history or blame yet.
+    if matches!(group, Group::Staged | Group::Unstaged) {
+        entries.push(Entry::item(
+            'h',
+            "file history",
+            format!("git log --follow -- {p}"),
+            act(Output::FileHistory(pb.clone())),
+        ));
+        entries.push(Entry::item(
+            'b',
+            "blame",
+            "who changed each line",
+            act(Output::Blame(pb.clone())),
+        ));
+    }
+    entries.push(Entry::item(
+        'y',
+        "copy path",
+        p.clone(),
+        act(Output::CopyPath(pb.clone())),
+    ));
+    entries.push(Entry::item(
+        'f',
+        "reveal in Finder",
+        "show it in its folder",
+        act(Output::Reveal(pb)),
+    ));
+    Menu { title: p, entries }
 }
 
 fn code(kind: ChangeKind) -> char {
@@ -240,6 +402,12 @@ impl State {
                     Group::Conflicts => return Some(Moved::stay()),
                 }));
             }
+            Key::Char('.') => {
+                return self
+                    .selected
+                    .as_ref()
+                    .map(|_| Moved::message(Message::OpenActions));
+            }
             Key::Char('d') => {
                 let (path, group) = selected?;
                 return Some(match group {
@@ -306,7 +474,13 @@ impl State {
             .selected
             .as_ref()
             .is_some_and(|(p, g)| p == path && *g == group);
-        let main = widgets::list_row(t, line, selected, Message::Select(path.clone(), group));
+        let main = iced::widget::mouse_area(widgets::list_row(
+            t,
+            line,
+            selected,
+            Message::Select(path.clone(), group),
+        ))
+        .on_right_press(Message::RightClick(path.clone(), group));
 
         let actions: Element<'a, Message> = match group {
             Group::Staged => widgets::icon_button(
@@ -387,6 +561,26 @@ impl Feature for State {
                 self.scroll = pos;
                 Update::none()
             }
+            Message::RightClick(path, group) => {
+                // Right-click selects like a click (the diff follows).
+                let sel = (path.clone(), group);
+                let changed = self.selected.as_ref() != Some(&sel);
+                self.selected = Some(sel);
+                let show = (changed && group != Group::Conflicts)
+                    .then(|| diff_source(path.clone(), group));
+                Update::output(Output::Menu {
+                    show,
+                    menu: file_menu(&path, group),
+                })
+            }
+            Message::OpenActions => match self.selected.clone() {
+                Some((path, group)) => Update::output(Output::Menu {
+                    show: None,
+                    menu: file_menu(&path, group),
+                }),
+                None => Update::none(),
+            },
+            Message::Act(output) => Update::output(output),
         }
     }
 
@@ -512,6 +706,67 @@ mod tests {
             index,
             worktree,
         }
+    }
+
+    fn keys(menu: &Menu<Message>) -> String {
+        menu.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Item { key, .. } => Some(*key),
+                Entry::Separator => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn right_click_selects_and_offers_the_groups_actions() {
+        let mut s = State::default();
+        let Some(Output::Menu { show, menu }) = s
+            .update(Message::RightClick("src/a.rs".into(), Group::Unstaged))
+            .output
+        else {
+            panic!("menu");
+        };
+        assert_eq!(
+            show,
+            Some(DiffSource::WorkTree("src/a.rs".into())),
+            "diff follows"
+        );
+        assert_eq!(keys(&menu), "szdhbyf");
+        // Again on the same row: nothing new to show.
+        let out = s
+            .update(Message::RightClick("src/a.rs".into(), Group::Unstaged))
+            .output;
+        assert!(matches!(out, Some(Output::Menu { show: None, .. })));
+        // `.` opens the same menu for the selection.
+        assert!(matches!(
+            s.update(Message::OpenActions).output,
+            Some(Output::Menu { show: None, .. })
+        ));
+
+        assert_eq!(keys(&file_menu("a.rs".as_ref(), Group::Staged)), "uzhbyf");
+        assert_eq!(
+            keys(&file_menu("a.rs".as_ref(), Group::Conflicts)),
+            "rotsyf"
+        );
+        assert_eq!(
+            keys(&file_menu("logs/x.log".as_ref(), Group::Untracked)),
+            "siegdyf"
+        );
+    }
+
+    #[test]
+    fn ignore_offers_the_file_its_extension_and_folder() {
+        let pats: Vec<String> = ignore_patterns("build/out.o".as_ref())
+            .into_iter()
+            .map(|(_, _, p)| p)
+            .collect();
+        assert_eq!(pats, ["/build/out.o", "*.o", "/build/"]);
+        let pats: Vec<String> = ignore_patterns("Makefile".as_ref())
+            .into_iter()
+            .map(|(_, _, p)| p)
+            .collect();
+        assert_eq!(pats, ["/Makefile"], "no extension, no folder");
     }
 
     #[test]
