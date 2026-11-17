@@ -222,6 +222,14 @@ pub enum Message {
     Redo,
     /// The undo history list (status line).
     UndoList(crate::features::undo_list::Message),
+    /// The discard confirmation can be shown: `fits` says whether a copy
+    /// of what it throws away can be kept for undo.
+    DiscardMeasured {
+        repo: RepoId,
+        tracked: Vec<std::path::PathBuf>,
+        untracked: Vec<std::path::PathBuf>,
+        fits: bool,
+    },
     /// A drag on the file list / diff divider starts.
     ResizeListStart,
     /// The divider is being dragged: pixels from where the drag started.
@@ -578,12 +586,29 @@ impl App {
                 self.log.on_command_event(&e);
                 Task::none()
             }
-            Message::Core(
-                CoreEvent::WorkTreeChanged { repo, .. }
-                | CoreEvent::IndexChanged(repo)
-                | CoreEvent::RefsChanged(repo)
-                | CoreEvent::ConfigChanged(repo),
-            ) => self.request_refresh(repo),
+            Message::Core(CoreEvent::WorkTreeChanged { repo, paths }) => {
+                let parts = self.worktree_parts(repo, &paths);
+                self.request_parts(repo, parts)
+            }
+            Message::Core(CoreEvent::IndexChanged(repo)) => {
+                self.request_parts(repo, crate::repo_tab::Parts::STATUS)
+            }
+            // A checkout or fetch can also move submodules' recorded commits.
+            Message::Core(CoreEvent::RefsChanged(repo)) => self.request_parts(
+                repo,
+                crate::repo_tab::Parts {
+                    refs: true,
+                    modules: true,
+                    ..crate::repo_tab::Parts::STATUS
+                },
+            ),
+            Message::Core(CoreEvent::ConfigChanged(repo)) => self.request_parts(
+                repo,
+                crate::repo_tab::Parts {
+                    config: true,
+                    ..crate::repo_tab::Parts::STATUS
+                },
+            ),
             Message::Core(_) => Task::none(),
             Message::Key(k) => self.on_shortcut(k),
             Message::KeyInput(k) => self.on_key_input(k),
@@ -747,6 +772,12 @@ impl App {
                 record,
             } => self.on_integrate_done(repo, label, result, record),
             Message::UndoChecked { repo, redo, now } => self.on_undo_checked(repo, redo, now),
+            Message::DiscardMeasured {
+                repo,
+                tracked,
+                untracked,
+                fits,
+            } => self.show_discard(repo, tracked, untracked, fits),
             Message::Banner(m) => self.on_banner(m),
             Message::Conflict(m) => self.on_conflict_message(m),
             Message::Blame(m) => self.on_blame_message(m),
@@ -870,7 +901,7 @@ impl App {
         .ok();
         let repo = repo.with_gix_fetch(self.settings.git.gix_fetch);
         let mut tab = RepoTab::new(repo, watcher);
-        let load = ops::load_snapshot(&mut tab);
+        let load = ops::load_snapshot(&mut tab, crate::repo_tab::Parts::RELOAD);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.note_active();

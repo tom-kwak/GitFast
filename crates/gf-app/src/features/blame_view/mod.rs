@@ -22,6 +22,8 @@ pub struct State {
     /// Revision blamed; `None` = the working tree file.
     pub rev: Option<String>,
     lines: Option<Vec<BlameLine>>,
+    /// Widest line, in columns (measured once, when the lines arrive).
+    widest: usize,
     /// Syntax highlighting per line, filled in after the lines arrive.
     spans: Option<Arc<Vec<Spans>>>,
     error: Option<String>,
@@ -73,6 +75,7 @@ impl State {
             path,
             rev,
             lines: None,
+            widest: 0,
             spans: None,
             error: None,
             scroll: ScrollPos::default(),
@@ -84,7 +87,10 @@ impl State {
             return;
         }
         match result {
-            Ok(l) => self.lines = Some(l),
+            Ok(l) => {
+                self.widest = l.iter().map(|l| columns(&l.content)).max().unwrap_or(0);
+                self.lines = Some(l);
+            }
             Err(e) => self.error = Some(e),
         }
     }
@@ -133,8 +139,7 @@ impl State {
             (None, None) => widgets::empty_hint(t, "running blame…"),
             (Some(lines), None) if lines.is_empty() => widgets::empty_hint(t, "empty file"),
             (Some(lines), None) => {
-                let widest = lines.iter().map(|l| columns(&l.content)).max().unwrap_or(0);
-                let content_width = t.cols(widest + 50) + 24.0;
+                let content_width = t.cols(self.widest + 50) + 24.0;
                 virtual_list(
                     "gf-blame",
                     lines.len(),

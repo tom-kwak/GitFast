@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gf_core::model::{FileChange, FileDiff, LineKind, Oid};
@@ -25,6 +26,7 @@ use crate::feature::{Cx, Update};
 use crate::highlight::{self, Spans};
 use crate::nav::{self, Key, Moved, Nav};
 use crate::theme::{Tokens, style};
+use crate::widgets::memo::{self, Memo};
 use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
 use crate::widgets::{self, colored, dim, mono};
 
@@ -280,6 +282,9 @@ pub struct State {
     ignore_whitespace: bool,
     scroll: ScrollPos,
     files_scroll: ScrollPos,
+    /// Rows of the file shown, per loaded diff and file.
+    /// The rows index into the diff's hunks: keyed by the diff itself.
+    rows: Memo<(memo::Same<LoadedDiff>, usize), Rc<[DiffRow]>>,
 }
 
 #[derive(Debug, Clone)]
@@ -339,6 +344,7 @@ impl State {
             ignore_whitespace: false,
             scroll: ScrollPos::default(),
             files_scroll: ScrollPos::default(),
+            rows: Memo::default(),
         }
     }
 
@@ -994,7 +1000,8 @@ impl State {
         } else if self.loading && files.is_empty() {
             widgets::empty_hint(t, "loading diff…")
         } else if let Some(f) = files.get(self.file) {
-            let rows = Self::rows(f);
+            let key = (memo::Same(self.diff.clone()), self.file);
+            let rows = self.rows.get(key, || Self::rows(f).into());
             // two line-number columns, marker, then the widest line.
             let line_cols = self.widths.get(self.file).copied().unwrap_or(0);
             let content_width = t.cols(13 + line_cols + 2);

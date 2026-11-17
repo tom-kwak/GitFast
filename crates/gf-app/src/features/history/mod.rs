@@ -25,6 +25,7 @@ use crate::nav::{self, Key, Moved, Nav};
 use crate::repo_tab::{HISTORY_PAGE, History, Snapshot};
 use crate::theme::{Tokens, style};
 use crate::widgets::graph_canvas;
+use crate::widgets::memo::{self, Memo};
 use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
 use crate::widgets::{self, colored, dim, format, mono};
 
@@ -59,6 +60,8 @@ pub struct State {
     revision_limit: usize,
     /// The next page was requested and has not arrived yet.
     loading_more: bool,
+    /// Lanes and widest summary of the history shown (see `view`).
+    widths: Memo<(memo::Id, memo::Id), (usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -848,15 +851,23 @@ impl Feature for State {
         }
 
         let decor = decorations(t, snap);
-        let lanes = history.graph.iter().map(|g| g.width).max().unwrap_or(1);
+        // Walks every commit: once per history / refs change, not per frame.
+        let key = (
+            memo::identity(history, history.commits.len()),
+            memo::identity(snap, snap.branches.len() + snap.tags.len()),
+        );
+        let (lanes, summary_cols) = self.widths.get(key, || {
+            let lanes = history.graph.iter().map(|g| g.width).max().unwrap_or(1);
+            let summary = history
+                .commits
+                .iter()
+                .map(|c| summary_line(c, decor.get(&c.id)).1)
+                .max()
+                .unwrap_or(0)
+                .clamp(20, MAX_SUMMARY_COLS);
+            (lanes, summary)
+        });
         let graph_px = graph_canvas::width_for(lanes);
-        let summary_cols = history
-            .commits
-            .iter()
-            .map(|c| summary_line(c, decor.get(&c.id)).1)
-            .max()
-            .unwrap_or(0)
-            .clamp(20, MAX_SUMMARY_COLS);
         let summary_px = t.cols(summary_cols);
         // graph, hash, summary, author, date + gaps and padding.
         let content_width =

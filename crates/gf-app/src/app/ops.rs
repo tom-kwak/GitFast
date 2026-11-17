@@ -17,21 +17,27 @@ use crate::features::dialog::Dialog;
 use crate::features::diff_view::{self, DiffSource};
 use crate::features::toolbar;
 use crate::git_actions;
-use crate::repo_tab::{History, RepoTab, Snapshot};
+use crate::repo_tab::{History, Parts, RepoTab, Snapshot};
 use crate::undo::Step;
 use crate::widgets::format::truncate;
 use gf_git::{Capture, HeadMode, Scope};
 
-pub fn load_snapshot(tab: &mut RepoTab) -> Task<Message> {
+/// Reads `parts` of the tab's repository (plus any queued ones). Only
+/// one load runs per tab: each starts from the last snapshot, so a load
+/// finishing after a newer one would put old parts back. Go through
+/// `App::request_parts` unless the tab is new.
+pub fn load_snapshot(tab: &mut RepoTab, parts: Parts) -> Task<Message> {
+    let parts = parts | std::mem::take(&mut tab.queued);
     tab.loading = true;
-    tab.reload_pending = false;
     let repo = tab.repo.clone();
     let id = repo.id();
     let all = tab.all_branches;
     let limit = tab.history.head_limit();
-    Task::perform(Snapshot::load(repo, all, limit), move |result| {
-        Message::Loaded(id, result)
-    })
+    let prev = tab.snapshot.clone();
+    Task::perform(
+        Snapshot::load(repo, prev, parts, all, limit),
+        move |result| Message::Loaded(id, result),
+    )
 }
 
 pub fn load_history(tab: &RepoTab, revision: String) -> Task<Message> {
@@ -68,23 +74,52 @@ pub fn load_diff(tab: &RepoTab, role: diff_view::Role) -> Task<Message> {
 }
 
 impl App {
-    /// Refresh requested by the file watcher or after an operation;
-    /// coalesced while a load is running.
+    /// Refresh after an operation: everything (the history only if its
+    /// refs moved).
     pub(super) fn request_refresh(&mut self, id: RepoId) -> Task<Message> {
+        self.request_parts(id, Parts::ALL)
+    }
+
+    /// Reads `parts` again; coalesced while a load is running.
+    pub(super) fn request_parts(&mut self, id: RepoId, parts: Parts) -> Task<Message> {
         let Some(tab) = self.tab_mut(id) else {
             return Task::none();
         };
         if tab.loading {
-            tab.reload_pending = true;
+            tab.queued |= parts;
             Task::none()
         } else {
-            load_snapshot(tab)
+            load_snapshot(tab, parts)
         }
     }
 
+    /// What changed work tree files need read again: the status, and the
+    /// submodules when a file in one of them (or `.gitmodules`,
+    /// `.gitattributes`) changed. No paths means too many to list.
+    pub(super) fn worktree_parts(&self, id: RepoId, paths: &[PathBuf]) -> Parts {
+        let subs = self
+            .tabs
+            .iter()
+            .find(|t| t.repo.id() == id)
+            .and_then(|t| t.snapshot.as_ref())
+            .map(|s| s.submodules.as_slice())
+            .unwrap_or_default();
+        let modules = paths.is_empty()
+            || paths.iter().any(|p| {
+                p.as_path() == std::path::Path::new(".gitmodules")
+                    || p.as_path() == std::path::Path::new(".gitattributes")
+                    || subs.iter().any(|s| p.starts_with(&s.path))
+            });
+        Parts {
+            modules,
+            ..Parts::STATUS
+        }
+    }
+
+    /// ⌘R: everything, the history included.
     pub(super) fn refresh_active(&mut self) -> Task<Message> {
-        match self.active_tab_mut() {
-            Some(tab) => load_snapshot(tab),
+        match self.active_tab().map(|t| t.repo.id()) {
+            Some(id) => self.request_parts(id, Parts::RELOAD),
             None => Task::none(),
         }
     }
@@ -99,7 +134,7 @@ impl App {
         };
         tab.loading = false;
         // A page requested while this load ran arrives with the next one.
-        if !tab.reload_pending {
+        if tab.queued.is_empty() {
             tab.history.snapshot_loaded();
         }
         let mut tasks = Vec::new();
@@ -114,7 +149,11 @@ impl App {
                 }
                 // Keep an open conflict resolver in sync: reload it while the
                 // file is still conflicted, close it once resolved.
-                let conflict_path = tab.conflict.as_ref().map(|c| c.path.clone());
+                let conflict_path = tab
+                    .conflict
+                    .as_ref()
+                    .filter(|_| snap.loaded.status)
+                    .map(|c| c.path.clone());
                 if let Some(path) = conflict_path {
                     let still = snap.status.entries.iter().any(|e| {
                         matches!(e, gf_core::model::StatusEntry::Conflicted { path: p, .. } if *p == path)
@@ -144,17 +183,22 @@ impl App {
                 if snap.state.is_clean() {
                     tab.pending = None;
                 }
+                // The branch shown instead of HEAD only moves with refs.
+                let refs = snap.loaded.refs;
+                let status = snap.loaded.status;
                 tab.snapshot = Some(snap);
                 tab.error = None;
                 if let Some(rev) = tab.history.revision().map(str::to_owned) {
-                    tasks.push(load_history(tab, rev));
+                    if refs {
+                        tasks.push(load_history(tab, rev));
+                    }
                 }
                 // Work tree diffs may have changed on disk.
                 if let Some(
                     source @ (DiffSource::WorkTree(_)
                     | DiffSource::Staged(_)
                     | DiffSource::Untracked(_)),
-                ) = tab.local_diff.source().cloned()
+                ) = tab.local_diff.source().cloned().filter(|_| status)
                 {
                     tab.local_diff.show(source);
                     tasks.push(load_diff(tab, diff_view::Role::Local));
@@ -166,8 +210,8 @@ impl App {
             }
         }
         if let Some(tab) = self.tab_mut(id) {
-            if tab.reload_pending {
-                tasks.push(load_snapshot(tab));
+            if !tab.queued.is_empty() {
+                tasks.push(load_snapshot(tab, Parts::default()));
             }
         }
         Task::batch(tasks)
