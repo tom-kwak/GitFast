@@ -443,6 +443,16 @@ impl App {
                 }
                 Task::none()
             }
+            // Same as popping it from the sidebar (same confirmation).
+            op_banner::Message::PopLeft(i) => {
+                self.on_sidebar(crate::features::sidebar::Output::StashPop(i))
+            }
+            op_banner::Message::DismissLeft(id) => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.left_dismissed.push(id);
+                }
+                Task::none()
+            }
             op_banner::Message::Bisect(v) => {
                 self.bisect_step(move |r| async move { r.bisect_mark(v).await })
             }

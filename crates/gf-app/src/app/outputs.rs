@@ -15,7 +15,7 @@ use crate::features::diff_view::{self, Action, DiffSource};
 use crate::features::prompt::PROMPT_ID;
 use crate::features::prompt::parse::{BUILTINS, PromptCommand};
 use crate::features::{changes, commit_box, history, sidebar, toolbar};
-use crate::repo_tab::Parts;
+use crate::repo_tab::{Parts, Snapshot};
 use crate::theme;
 use crate::undo;
 
@@ -617,7 +617,6 @@ impl App {
                     }
                 }
             }
-            toolbar::Message::NewBranch => self.new_branch_dialog(None),
             toolbar::Message::Stash => self.stash_dialog(),
             toolbar::Message::Refresh => self.refresh_active(),
             toolbar::Message::Cancel => self.on_shortcut(Shortcut::Escape),
@@ -697,6 +696,21 @@ impl App {
     fn checkout(&mut self, b: Branch) -> Task<Message> {
         let remote = b.name.kind() == RefKind::RemoteBranch;
         let name = b.name.short().to_owned();
+        // Changes, a branch to leave them on and nothing in progress: ask
+        // whether to leave them there (stash) or carry them over, after
+        // checking which files would keep them from coming along.
+        let leave = self
+            .active_tab()
+            .and_then(|t| t.snapshot.as_deref())
+            .filter(|s| s.state.is_clean())
+            .and_then(|s| {
+                let from = s.status.head.branch.clone()?;
+                let changed = undo::changed_paths(&s.status);
+                (!changed.is_empty()).then_some((from, changed))
+            });
+        if let Some((from, changed)) = leave {
+            return self.measure_switch(name, remote, from, changed);
+        }
         let body = if remote {
             vec![
                 format!("Create a local branch tracking `{name}` and switch to it?"),
@@ -709,13 +723,185 @@ impl App {
                 "unless they conflict (then git refuses and nothing changes).".into(),
             ]
         };
-        self.confirm(Confirm::change(
-            "checkout",
-            "Switch branch",
-            body,
-            "Switch",
-            Purpose::Checkout { name, remote },
-        ))
+        // Nothing to bring along or to leave behind: just switch (⌘Z goes
+        // back). A remote branch also creates a local one, so it asks.
+        let quiet = !remote
+            && self
+                .active_tab()
+                .and_then(|t| t.snapshot.as_deref())
+                .is_some_and(Snapshot::can_switch_quietly);
+        self.confirm(
+            Confirm::change(
+                "checkout",
+                "Switch branch",
+                body,
+                "Switch",
+                Purpose::Checkout {
+                    name,
+                    remote,
+                    leave_from: None,
+                    blocked: Vec::new(),
+                },
+            )
+            .undoable()
+            .skip_if(quiet),
+        )
+    }
+
+    fn measure_switch(
+        &mut self,
+        name: String,
+        remote: bool,
+        from: String,
+        changed: Vec<std::path::PathBuf>,
+    ) -> Task<Message> {
+        let Some(tab) = self.active_tab() else {
+            return Task::none();
+        };
+        let (repo, r) = (tab.repo.id(), tab.repo.clone());
+        let target = name.clone();
+        let count = changed.len();
+        Task::perform(
+            async move {
+                r.switch_blockers(&target, &changed)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |blocked| Message::SwitchMeasured {
+                repo,
+                name: name.clone(),
+                remote,
+                from: from.clone(),
+                changed: count,
+                blocked,
+            },
+        )
+    }
+
+    /// Asks what to do with the changes when switching branch: leave them
+    /// here (stash) or carry them over, each with the git commands it runs.
+    pub(super) fn show_switch(
+        &mut self,
+        repo: gf_core::model::RepoId,
+        name: String,
+        remote: bool,
+        from: String,
+        changed: usize,
+        blocked: Result<Vec<std::path::PathBuf>, String>,
+    ) -> Task<Message> {
+        use crate::features::dialog::{Dialog, Opt, Severity, Tone};
+        if self.active_tab().map(|t| t.repo.id()) != Some(repo) {
+            return Task::none();
+        }
+        let switch = if remote {
+            let local = name.split_once('/').map_or(name.as_str(), |(_, b)| b);
+            format!("$ git switch --track -c {local} {name}")
+        } else {
+            format!("$ git switch {name}")
+        };
+        let earlier = self
+            .active_tab()
+            .and_then(|t| t.snapshot.as_deref())
+            .map_or(0, |s| {
+                s.stashes
+                    .iter()
+                    .filter(|e| gf_git::left_on_branch(&e.message) == Some(from.as_str()))
+                    .count()
+            });
+
+        let mut leave = Opt::new("stash, then switch")
+            .key('s')
+            .line(
+                format!("$ git stash push -u -m \"{}\"", gf_git::left_on(&from)),
+                Tone::Command,
+            )
+            .line(&switch, Tone::Command)
+            .line(
+                format!("offered back when you return to {from}"),
+                Tone::Hint,
+            );
+        if earlier > 0 {
+            leave = leave.line(
+                format!("{earlier} earlier stash(es) left on {from} stay in the list"),
+                Tone::Hint,
+            );
+        }
+        let mut carry = Opt::new("carry changes over")
+            .key('c')
+            .line(&switch, Tone::Command);
+        let blocked = match blocked {
+            Ok(b) if b.is_empty() => {
+                carry = carry.line("✓ nothing in the way", Tone::Hint);
+                b
+            }
+            Ok(b) => {
+                carry = carry
+                    .line(
+                        format!("✗ {} file(s) would block it — git would refuse", b.len()),
+                        Tone::Problem,
+                    )
+                    .line(blocker_summary(&b), Tone::Problem)
+                    .disabled(true);
+                b
+            }
+            Err(e) => {
+                carry = carry.line(
+                    format!("could not check what is in the way: {e}"),
+                    Tone::Hint,
+                );
+                Vec::new()
+            }
+        };
+
+        let to = if remote {
+            format!("{name} (as a new tracking branch)")
+        } else {
+            name.clone()
+        };
+        let body = vec![
+            format!("{changed} changed file(s) on `{from}`"),
+            "⌘Z undoes it afterwards (stash and switch together)".into(),
+        ];
+        self.open_dialog(
+            Dialog::confirm(
+                format!("switch {from} → {to}"),
+                body,
+                "Switch",
+                Purpose::Checkout {
+                    name,
+                    remote,
+                    leave_from: Some(from),
+                    blocked,
+                },
+            )
+            .severity(Severity::Change)
+            .options("your changes:", vec![leave, carry], 0)
+            .undoable(),
+        )
+    }
+
+    /// `l` in the switch dialog: every blocking file, in the command log.
+    pub(super) fn list_switch_blockers(&mut self) -> bool {
+        let Some(crate::features::dialog::Dialog {
+            purpose: Purpose::Checkout { name, blocked, .. },
+            ..
+        }) = self.dialog.as_ref()
+        else {
+            return false;
+        };
+        if blocked.is_empty() {
+            return false;
+        }
+        let title = format!(
+            "{} file(s) keep changes from coming to {name}",
+            blocked.len()
+        );
+        let lines = blocked.iter().map(|p| p.display().to_string()).collect();
+        self.log.note(NoteKind::Info, title, lines);
+        if !self.settings.appearance.show_command_log {
+            self.flash(NoteKind::Info, "listed in the command log (⌘J to show it)");
+        }
+        true
     }
 
     /// First configured remote, preferring `origin`.
@@ -897,5 +1083,36 @@ pub(super) fn stash_options(
         message: (!message.is_empty()).then_some(message),
         include_untracked,
         keep_index,
+    }
+}
+
+/// `a.rs, b.rs, c.rs  +11 more  [l] list`: the first few blocking files.
+fn blocker_summary(blocked: &[std::path::PathBuf]) -> String {
+    const SHOWN: usize = 3;
+    let names: Vec<String> = blocked
+        .iter()
+        .take(SHOWN)
+        .map(|p| p.display().to_string())
+        .collect();
+    let mut s = names.join(", ");
+    if blocked.len() > SHOWN {
+        s.push_str(&format!("  +{} more  [l] list", blocked.len() - SHOWN));
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn many_blockers_show_three_and_a_count() {
+        let p = |s: &str| std::path::PathBuf::from(s);
+        assert_eq!(blocker_summary(&[p("a.rs")]), "a.rs");
+        let many: Vec<_> = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"].map(p).into();
+        assert_eq!(
+            blocker_summary(&many),
+            "a.rs, b.rs, c.rs  +2 more  [l] list"
+        );
     }
 }

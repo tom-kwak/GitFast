@@ -117,6 +117,45 @@ impl Repository {
     pub async fn switch_branch(&self, name: &str, remote: bool) -> Result<()> {
         BranchOps::switch_branch(&self.cli, name, remote).await
     }
+    /// Changed `paths` that keep `git switch` from moving to `target` (it
+    /// refuses to overwrite them). Empty: the changes can come along.
+    pub async fn switch_blockers(&self, target: &str, paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let differing = self.cli.paths_differing_from_head(target).await?;
+        Ok(crate::ops::branch::switch_blockers(paths, &differing))
+    }
+    /// Stashes every change (untracked files too) as
+    /// [`left_on`](crate::left_on)`(from)`, then switches like
+    /// [`Repository::switch_branch`]. When the switch fails the changes are
+    /// put back, so nothing is left half done.
+    pub async fn stash_and_switch(&self, from: &str, name: &str, remote: bool) -> Result<()> {
+        let message = crate::left_on(from);
+        let opts = StashOptions {
+            message: Some(message.clone()),
+            include_untracked: true,
+            keep_index: false,
+        };
+        StashOps::stash_push(&self.cli, &opts).await?;
+        // `git stash` saves nothing (and says so) when there was nothing to
+        // save: only an entry made here may be popped back.
+        let made = StashOps::stashes(&self.cli)
+            .await?
+            .first()
+            .is_some_and(|s| s.message.ends_with(&message));
+        if let Err(e) = BranchOps::switch_branch(&self.cli, name, remote).await {
+            if made {
+                if let Err(back) = StashOps::stash_pop(&self.cli, 0).await {
+                    return Err(gf_core::GfError::Other(format!(
+                        "{e}\nyour changes are kept in stash@{{0}} ({back})"
+                    )));
+                }
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
     /// Checks out a commit without a branch (detached HEAD).
     pub async fn checkout_detached(&self, rev: &str) -> Result<()> {
         BranchOps::checkout_detached(&self.cli, rev).await

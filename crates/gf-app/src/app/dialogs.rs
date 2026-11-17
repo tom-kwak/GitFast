@@ -77,6 +77,11 @@ pub enum Purpose {
     Checkout {
         name: String,
         remote: bool,
+        /// Stash the changes first, as left on this branch ("stash, then
+        /// switch"); `None` takes them along.
+        leave_from: Option<String>,
+        /// Changed files that keep them from coming along (`l` lists them).
+        blocked: Vec<PathBuf>,
     },
     StashApply(usize),
     StashPop(usize),
@@ -163,6 +168,8 @@ pub struct Confirm {
     then: Purpose,
     /// ⌘Z can undo it.
     undoable: bool,
+    /// Nothing worth asking about this time: run without the dialog.
+    skip: bool,
 }
 
 impl Confirm {
@@ -182,6 +189,7 @@ impl Confirm {
             checks: Vec::new(),
             then,
             undoable: false,
+            skip: false,
         }
     }
 
@@ -203,6 +211,7 @@ impl Confirm {
             checks: Vec::new(),
             then,
             undoable: false,
+            skip: false,
         }
     }
 
@@ -218,6 +227,14 @@ impl Confirm {
         self
     }
 
+    /// Runs without asking when `safe` (a change with nothing to lose this
+    /// time, e.g. switching branch with no changes). Still goes through
+    /// [`App::confirm`] so every change has one way in.
+    pub fn skip_if(mut self, safe: bool) -> Self {
+        self.skip = safe;
+        self
+    }
+
     pub fn check(mut self, label: impl Into<String>, value: bool) -> Self {
         self.checks.push((label.into(), value));
         self
@@ -226,14 +243,16 @@ impl Confirm {
 
 impl App {
     /// Asks before running `c.then` — the one way to confirm a delete or
-    /// change. Skipped (runs right away) when the user ticked "don't ask
-    /// again" for this change before.
+    /// change. A change runs right away when the user ticked "don't ask
+    /// again" for it before, or the caller said it is safe this time
+    /// ([`Confirm::skip_if`]). A delete is always asked.
     pub(super) fn confirm(&mut self, c: Confirm) -> Task<Message> {
-        if let Some(key) = c.key {
-            if c.severity == Severity::Change && self.settings.confirm.is_skipped(key) {
-                let checks = c.checks.iter().map(|(_, v)| *v).collect();
-                return self.run_purpose(c.then, Vec::new(), checks);
-            }
+        let skipped = c
+            .key
+            .is_some_and(|key| self.settings.confirm.is_skipped(key));
+        if c.severity == Severity::Change && (c.skip || skipped) {
+            let checks = c.checks.iter().map(|(_, v)| *v).collect();
+            return self.run_purpose(c.then, Vec::new(), checks);
         }
         let mut dialog = Dialog::confirm(c.title, c.body, c.label, c.then).severity(c.severity);
         for (label, value) in c.checks {
@@ -390,6 +409,18 @@ impl App {
                         mode: choice
                             .and_then(|i| RESET_MODES.get(i))
                             .map_or(mode, |(m, _, _)| *m),
+                    },
+                    // Option 0 leaves the changes behind, 1 carries them.
+                    Purpose::Checkout {
+                        name,
+                        remote,
+                        leave_from,
+                        blocked,
+                    } => Purpose::Checkout {
+                        name,
+                        remote,
+                        leave_from: leave_from.filter(|_| choice != Some(1)),
+                        blocked,
                     },
                     other => other,
                 };
@@ -597,26 +628,46 @@ impl App {
                 Some(Record::head(gf_git::HeadMode::Keep)),
                 move |r| async move { r.checkout_detached(&rev).await },
             ),
-            Purpose::Checkout { name, remote } => {
-                let label = if remote {
+            Purpose::Checkout {
+                name,
+                remote,
+                leave_from,
+                ..
+            } => {
+                let mut label = if remote {
                     format!("check out {name} as a tracking branch")
                 } else {
                     format!("switch to {name}")
                 };
+                if let Some(from) = &leave_from {
+                    label = format!("leave changes on {from}, {label}");
+                }
                 // Checking out a remote branch also creates the local one.
                 let local = remote
                     .then(|| name.split_once('/').map(|(_, b)| b.to_owned()))
                     .flatten();
-                let scope = match &local {
+                let mut scope = match &local {
                     Some(b) => undo::branches(&[b], true),
                     None => gf_git::Scope::head(),
                 };
-                self.op_recorded(
-                    label,
-                    OpKind::Generic,
-                    Some(Record::new(scope)),
-                    move |r| async move { r.switch_branch(&name, remote).await },
-                )
+                match leave_from {
+                    // One step: ⌘Z switches back and pops the changes.
+                    Some(from) => {
+                        scope.stash = true;
+                        self.op_recorded(
+                            label,
+                            OpKind::Generic,
+                            Some(Record::new(scope).with_changes(Changes::All)),
+                            move |r| async move { r.stash_and_switch(&from, &name, remote).await },
+                        )
+                    }
+                    None => self.op_recorded(
+                        label,
+                        OpKind::Generic,
+                        Some(Record::new(scope)),
+                        move |r| async move { r.switch_branch(&name, remote).await },
+                    ),
+                }
             }
             Purpose::StashApply(i) => self.op_recorded(
                 format!("apply stash@{{{i}}}"),

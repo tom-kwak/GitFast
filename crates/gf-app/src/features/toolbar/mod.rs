@@ -1,6 +1,7 @@
 //! Repository toolbar. Holds only the main git commands — fetch / pull /
-//! push (with live counts and progress), branch, stash — plus refresh at
-//! the far right. View toggles belong to the sections they affect, not here.
+//! push (with live counts and progress), stash — plus refresh at the far
+//! right. View toggles belong to the sections they affect, not here; new
+//! branches are made from the sidebar (BRANCHES header, a branch's menu).
 
 use gf_git::Progress;
 use iced::widget::{container, row, space};
@@ -15,7 +16,6 @@ pub enum Message {
     Fetch,
     Pull,
     Push,
-    NewBranch,
     Stash,
     Refresh,
     Cancel,
@@ -166,7 +166,6 @@ pub fn view<'a>(
             counts.push_hint.clone(),
         ),
         dim(t, "│"),
-        widgets::text_button(t, "+ branch", None, Some(Message::NewBranch)),
         widgets::text_button(t, "≡ stash", None, Some(Message::Stash)),
     ]
     .spacing(4)

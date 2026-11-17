@@ -123,6 +123,20 @@ impl App {
         if self.dialog.is_none() && self.undo_list.is_some() {
             return self.undo_list_key(k);
         }
+        // Letter keys pick a dialog option (a dialog without text to type).
+        if let (Some(dialog), Some(context_menu::Key::Char(c))) = (self.dialog.as_mut(), k.menu) {
+            if dialog.fields.is_empty() && dialog.area.is_none() {
+                if c == 'l' && self.list_switch_blockers() {
+                    return Task::none();
+                }
+                if let Some(dialog) = self.dialog.as_mut().filter(|d| d.has_key(c)) {
+                    return match dialog.key(c) {
+                        Some(outcome) => self.on_dialog_outcome(outcome),
+                        None => Task::none(),
+                    };
+                }
+            }
+        }
         if self.dialog.is_some() || self.rebase_editor.is_some() {
             return run(self, k.shortcut);
         }

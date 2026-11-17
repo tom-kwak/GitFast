@@ -123,7 +123,7 @@ tr.grp td { font-family: var(--sans); font-weight: 600; background: var(--bg); c
       <div style="display:grid;gap:10px;min-width:0">
         <div class="win" id="win">
           <button class="r" data-id="tabs"><b>탭 바</b> &nbsp;[gf] [api] [web] … <span style="float:right">▾ 3 tabs &nbsp;+ open</span></button>
-          <button class="r" data-id="toolbar"><b>툴바</b> &nbsp;fetch · pull · push · branch · stash · merge … &nbsp;⟳</button>
+          <button class="r" data-id="toolbar"><b>툴바</b> &nbsp;fetch · pull · push · stash … &nbsp;⟳</button>
           <div class="body">
             <button class="r tall" data-id="sidebar"><b>사이드바 REFS</b><br>▸ LOCAL<br>▸ REMOTES<br>▸ TAGS<br>▸ STASHES<br>▸ SUBMODULES<br>▸ WORKTREES</button>
             <div class="main" id="main-history">
@@ -243,7 +243,7 @@ const R = {
     files: [["features/tabs/mod.rs",102],["features/tab_list/mod.rs (▾ 드롭다운)",409],["theme/style.rs (탭·툴바 색)",267]],
     state: "App.tabs, App.active", msg: "Message::Tabs", keys: "⌘1‥9 선택, ⌘⇧[ ⌘⇧] 이동, ⌘W 닫기, ⌘P 탭 목록",
     ask: ["탭 바에서 닫기 × 버튼을 hover일 때만 보여줘","탭 이름이 길면 가운데를 … 로 줄여줘"] },
-  toolbar: { name: "툴바", alias: "toolbar", what: "주요 git 명령만 둡니다(fetch·pull·push·branch·stash·merge…). 새로고침은 맨 오른쪽.",
+  toolbar: { name: "툴바", alias: "toolbar", what: "주요 git 명령만 둡니다(fetch·pull·push·stash). 새로고침은 맨 오른쪽. 새 브랜치는 사이드바에서 만듭니다.",
     files: [["features/toolbar/mod.rs",263],["app/ops.rs (pull·push 실행)",796],["gf-git ops/sync.rs",77]],
     state: "App.sync (진행 중인 동기화)", msg: "Message::Toolbar", keys: "⌘R 새로고침",
     ask: ["툴바에 pull 옵션(rebase/merge) 선택을 추가해줘","push 중 진행률을 툴바 버튼에 표시해줘"] },

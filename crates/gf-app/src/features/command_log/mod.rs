@@ -3,6 +3,10 @@
 //!
 //! Background reads gf issues to refresh views are hidden by default (one
 //! toggle shows them) so the log stays about the user's own actions.
+//!
+//! The list follows new output while it is scrolled to the bottom. Scrolling
+//! up holds the position (new output no longer moves it); scrolling back to
+//! the bottom follows again.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -10,7 +14,7 @@ use std::time::{Duration, Instant};
 use gf_core::event::CommandId;
 use gf_core::{CommandEvent, CommandPhase};
 use iced::widget::{Column, button, column, row, space};
-use iced::{Element, Length, Padding};
+use iced::{Element, Length, Padding, Task};
 
 use crate::feature::{Cx, Feature, Update};
 use crate::theme::{Tokens, style};
@@ -20,6 +24,10 @@ const MAX_ENTRIES: usize = 300;
 const MAX_LINES_PER_ENTRY: usize = 2000;
 /// Output longer than this starts collapsed.
 const COLLAPSE_OVER: usize = 12;
+/// The log's scrollable, for following new output.
+const SCROLL_ID: &str = "gf-command-log";
+/// Within this many pixels of the end counts as "at the bottom".
+const BOTTOM_SLACK: f32 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteKind {
@@ -62,6 +70,11 @@ pub struct State {
     show_background: bool,
     /// Spinner frame for running commands, advanced by the app's tick.
     tick: usize,
+    /// The user scrolled up to read something: new output must not move
+    /// the list until they scroll back to the bottom.
+    held: bool,
+    /// Entries or lines were added since the last [`State::follow`].
+    grew: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +82,13 @@ pub enum Message {
     ToggleEntry(usize),
     ToggleBackground,
     Clear,
+    Scrolled(iced::widget::scrollable::Viewport),
+}
+
+/// Whether `v` shows the end of the list.
+fn at_bottom(v: &iced::widget::scrollable::Viewport) -> bool {
+    let rest = v.content_bounds().height - v.bounds().height - v.absolute_offset().y;
+    rest <= BOTTOM_SLACK
 }
 
 impl State {
@@ -92,6 +112,7 @@ impl State {
                     } else {
                         e.truncated += 1;
                     }
+                    self.grew = true;
                 }
             }
             CommandPhase::Finished {
@@ -134,6 +155,18 @@ impl State {
     pub fn clear(&mut self) {
         self.entries
             .retain(|e| matches!(e.status, EntryStatus::Running { .. }));
+        self.held = false;
+    }
+
+    /// Keeps the end of the list in view after it grew, unless the user is
+    /// holding a position higher up. The app calls this after every update.
+    pub fn follow(&mut self) -> Task<Message> {
+        if std::mem::take(&mut self.grew) && !self.held {
+            // A relative offset of 1.0 stays at the end as lines keep coming.
+            iced::widget::operation::snap_to_end(SCROLL_ID)
+        } else {
+            Task::none()
+        }
     }
 
     fn push(&mut self, entry: Entry) {
@@ -141,6 +174,7 @@ impl State {
             self.entries.pop_front();
         }
         self.entries.push_back(entry);
+        self.grew = true;
     }
 
     fn find(&mut self, id: CommandId) -> Option<&mut Entry> {
@@ -249,6 +283,14 @@ impl Feature for State {
             }
             Message::ToggleBackground => self.show_background = !self.show_background,
             Message::Clear => self.clear(),
+            Message::Scrolled(v) => {
+                self.held = !at_bottom(&v);
+                if !self.held {
+                    // Back at the bottom (by wheel or scrollbar): pin it there
+                    // so the next output is followed.
+                    return Update::task(iced::widget::operation::snap_to_end(SCROLL_ID));
+                }
+            }
         }
         Update::none()
     }
@@ -296,7 +338,8 @@ impl Feature for State {
                     col.push(self.entry_view(t, i, e))
                 });
             iced::widget::scrollable(list)
-                .anchor_bottom()
+                .id(SCROLL_ID)
+                .on_scroll(Message::Scrolled)
                 .direction(iced::widget::scrollable::Direction::Vertical(
                     iced::widget::scrollable::Scrollbar::new()
                         .width(6)
@@ -381,6 +424,23 @@ mod tests {
         assert!(!s.entries[0].is_expanded());
         let _ = s.update(Message::ToggleEntry(0));
         assert!(s.entries[0].is_expanded());
+    }
+
+    #[test]
+    fn new_output_is_followed_unless_the_user_holds_a_position() {
+        let mut s = State::default();
+        assert_eq!(s.follow().units(), 0, "nothing new");
+        s.note(NoteKind::Info, "a", vec![]);
+        assert!(s.follow().units() > 0, "at the bottom: follow");
+        assert_eq!(s.follow().units(), 0, "only once per change");
+
+        s.held = true;
+        s.note(NoteKind::Info, "b", vec![]);
+        assert_eq!(s.follow().units(), 0, "scrolled up: stay put");
+
+        s.clear();
+        s.note(NoteKind::Info, "c", vec![]);
+        assert!(s.follow().units() > 0, "clearing follows again");
     }
 
     #[test]
