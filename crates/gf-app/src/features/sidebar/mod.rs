@@ -268,6 +268,20 @@ pub enum Action {
     LfsPull,
 }
 
+impl Action {
+    /// The section a create action adds its item to.
+    fn creates_in(self) -> Option<Section> {
+        match self {
+            Self::NewBranch => Some(Section::Branches),
+            Self::NewTag => Some(Section::Tags),
+            Self::NewStash => Some(Section::Stashes),
+            Self::NewWorktree => Some(Section::Worktrees),
+            Self::TrackLfs => Some(Section::Lfs),
+            _ => None,
+        }
+    }
+}
+
 /// Requests to the app. Destructive ones are confirmed by the app.
 #[derive(Debug, Clone)]
 pub enum Output {
@@ -1162,9 +1176,15 @@ impl State {
                     None => Update::none(),
                 }
             }
-            Message::Act(action) => self
-                .output_for(action, snap)
-                .map_or_else(Update::none, Update::output),
+            Message::Act(action) => {
+                // Creating something (`+`, "branch from here…") opens the
+                // section it will appear in, so the new item shows there.
+                if let Some(section) = action.creates_in() {
+                    self.collapsed.remove(&section);
+                }
+                self.output_for(action, snap)
+                    .map_or_else(Update::none, Update::output)
+            }
             Message::Scrolled(pos) => {
                 self.scroll = pos;
                 Update::none()
@@ -1441,6 +1461,27 @@ mod tests {
         ] {
             assert!(s.collapsed.contains(&sec), "{sec:?} starts closed");
         }
+    }
+
+    #[test]
+    fn creating_opens_the_section_the_new_item_goes_to() {
+        let snap = snap();
+        for (action, sec) in [
+            (Action::NewTag, Section::Tags),
+            (Action::NewStash, Section::Stashes),
+            (Action::NewWorktree, Section::Worktrees),
+            (Action::TrackLfs, Section::Lfs),
+        ] {
+            let mut s = State::default();
+            assert!(s.collapsed.contains(&sec));
+            let out = s.update_with(Message::Act(action), Some(&snap)).output;
+            assert!(out.is_some(), "{action:?} still asks the app");
+            assert!(!s.collapsed.contains(&sec), "{sec:?} opens");
+        }
+        let mut s = State::default();
+        let _ = s.update_with(Message::Toggle(Section::Branches), Some(&snap));
+        let _ = s.update_with(Message::Act(Action::NewBranch), Some(&snap));
+        assert!(!s.collapsed.contains(&Section::Branches));
     }
 
     fn remote(name: &str) -> Branch {

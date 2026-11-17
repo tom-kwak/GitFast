@@ -175,15 +175,19 @@ impl App {
 
     pub(super) fn ask_rebase_onto(&mut self, onto: String) -> Task<Message> {
         let current = self.current_branch();
+        let mut body = vec![
+            format!("Replay the commits of `{current}` on top of `{onto}`?"),
+            "This rewrites those commits (new ids).".into(),
+        ];
+        if self.has_remote() {
+            body.push(format!(
+                "If `{current}` was already pushed, publishing the result needs a force push."
+            ));
+        }
         self.confirm(Confirm::change(
             "rebase",
             "Rebase",
-            vec![
-                format!("Replay the commits of `{current}` on top of `{onto}`?"),
-                "This rewrites those commits (new ids). If `{current}` was already"
-                    .replace("{current}", &current),
-                "pushed, publishing the result needs a force push.".into(),
-            ],
+            body,
             "Rebase",
             Purpose::RebaseOnto { onto },
         ))
@@ -587,15 +591,18 @@ impl App {
             Some(Output::Start { base, items }) => {
                 self.rebase_editor = None;
                 let n = items.len();
+                let mut body = vec![
+                    format!("Rewrite {n} commit(s) after {} as planned?", base.short()),
+                    "Commit ids change.".into(),
+                ];
+                if self.has_remote() {
+                    body.push("If they were pushed, publishing needs a force push.".into());
+                }
+                body.push("Undo is available afterwards.".into());
                 self.confirm(Confirm::change(
                     "rebase-interactive",
                     "Rewrite history",
-                    vec![
-                        format!("Rewrite {n} commit(s) after {} as planned?", base.short()),
-                        "Commit ids change. If they were pushed, publishing needs a force push."
-                            .into(),
-                        "Undo is available afterwards.".into(),
-                    ],
+                    body,
                     "Rewrite",
                     Purpose::RebaseInteractive { base, items },
                 ))

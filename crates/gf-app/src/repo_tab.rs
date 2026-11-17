@@ -920,4 +920,31 @@ mod tests {
         assert!(moved.loaded.history);
         assert_eq!(moved.history.commits.len(), 2);
     }
+
+    #[tokio::test]
+    async fn a_new_tag_shows_after_the_refresh_an_operation_asks_for() {
+        let repo = gf_test_support::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.commit_all("init");
+        let runner = gf_git::GitRunner::new()
+            .with_cleared_env()
+            .with_env(repo.env());
+        let r = Repository::open(repo.path(), runner).await.expect("open");
+        let load = |prev, parts| Snapshot::load(r.clone(), prev, parts, false, 100);
+        let first = load(None, Parts::RELOAD).await.expect("first load");
+        assert!(first.tags.is_empty());
+
+        r.create_tag("v1", None, None).await.expect("lightweight");
+        let after = load(Some(first), Parts::ALL).await.expect("refresh");
+        let names: Vec<_> = after.tags.iter().map(|t| t.name.short()).collect();
+        assert_eq!(names, ["v1"]);
+
+        r.create_tag("v2", None, Some("notes"))
+            .await
+            .expect("annotated");
+        let after = load(Some(after), Parts::ALL).await.expect("refresh");
+        let names: Vec<_> = after.tags.iter().map(|t| t.name.short()).collect();
+        assert_eq!(names, ["v1", "v2"]);
+        assert!(after.badges.values().flatten().any(|b| b.label == "◆ v2"));
+    }
 }
