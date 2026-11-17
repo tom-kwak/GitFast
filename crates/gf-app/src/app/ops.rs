@@ -41,6 +41,32 @@ fn load_snapshot(tab: &mut RepoTab) -> Task<Message> {
     )
 }
 
+/// Remotes of `snap` this session has not listed the tags of yet.
+fn remotes_to_list(snap: &Snapshot, listed: &std::collections::HashSet<String>) -> Vec<String> {
+    snap.remotes
+        .iter()
+        .map(|r| r.name.clone())
+        .filter(|n| !listed.contains(n))
+        .collect()
+}
+
+/// Lists the tags of `remotes` (network, read-only) and reloads the refs
+/// so the push count includes unpublished tags. A remote that cannot be
+/// reached stays unlisted: its tags are listed at the next fetch.
+fn list_remote_tags(repo: Repository, remotes: Vec<String>) -> Task<Message> {
+    let id = repo.id();
+    Task::perform(
+        async move {
+            for remote in remotes {
+                if let Err(e) = repo.record_remote_tags(&remote).await {
+                    tracing::warn!(%remote, error = %e, "could not list remote tags");
+                }
+            }
+        },
+        move |()| Message::Core(gf_core::CoreEvent::RefsChanged(id)),
+    )
+}
+
 /// Writes a missing commit-graph (git logs the command, a failure only
 /// leaves the history as fast as it was).
 fn write_commit_graph(repo: Repository) -> Task<Message> {
@@ -248,6 +274,15 @@ impl App {
                 if !tab.graph_checked && snap.history.more {
                     tab.graph_checked = true;
                     tasks.push(write_commit_graph(tab.repo.clone()));
+                }
+                // Which tags push would publish needs every remote's tag
+                // list. Each remote is listed once a session, in the
+                // background: a missing list, or one gone stale since (a
+                // tag pushed from a terminal, another machine).
+                let unlisted = remotes_to_list(&snap, &tab.remote_tags_listed);
+                if !unlisted.is_empty() {
+                    tab.remote_tags_listed.extend(unlisted.iter().cloned());
+                    tasks.push(list_remote_tags(tab.repo.clone(), unlisted));
                 }
                 // The branch shown instead of HEAD only moves with refs.
                 let refs = snap.loaded.refs;

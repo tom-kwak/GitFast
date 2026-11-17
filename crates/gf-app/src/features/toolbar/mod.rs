@@ -59,7 +59,30 @@ fn count_label(base: &str, n: u32) -> String {
     }
 }
 
-pub fn sync_counts(head: &gf_core::model::HeadInfo, unpublished: Option<u32>) -> SyncCounts {
+/// `tags`: local tags the push remote does not have (they go with a push).
+pub fn sync_counts(
+    head: &gf_core::model::HeadInfo,
+    unpublished: Option<u32>,
+    tags: usize,
+) -> SyncCounts {
+    let with_tags = |commits: Option<String>| {
+        let tags = match tags {
+            0 => None,
+            1 => Some("1 tag".to_owned()),
+            n => Some(format!("{n} tags")),
+        };
+        match (commits, tags) {
+            (None, None) => "⇡ push".to_owned(),
+            (Some(c), None) => format!("⇡ push ({c})"),
+            (None, Some(t)) => format!("⇡ push ({t})"),
+            (Some(c), Some(t)) => format!("⇡ push ({c} +{t})"),
+        }
+    };
+    let tag_hint = if tags == 0 {
+        String::new()
+    } else {
+        format!(" · {tags} tag(s) the remote does not have")
+    };
     match (&head.upstream, &head.branch) {
         (Some(up), _) => SyncCounts {
             pull_label: count_label("⇣ pull", head.behind),
@@ -67,20 +90,16 @@ pub fn sync_counts(head: &gf_core::model::HeadInfo, unpublished: Option<u32>) ->
                 "{} commit(s) on {up} you don't have yet — as of the last fetch (⟳ fetch to update)",
                 head.behind
             ),
-            push_label: count_label("⇡ push", head.ahead),
-            push_hint: format!("{} local commit(s) not on {up} yet", head.ahead),
+            push_label: with_tags((head.ahead > 0).then(|| head.ahead.to_string())),
+            push_hint: format!("{} local commit(s) not on {up} yet{tag_hint}", head.ahead),
         },
         (None, Some(branch)) => {
             let n = unpublished.unwrap_or(0);
             SyncCounts {
                 pull_label: "⇣ pull (—)".into(),
                 pull_hint: format!("`{branch}` has no upstream yet — nothing to pull"),
-                push_label: if n == 0 {
-                    "⇡ push".into()
-                } else {
-                    format!("⇡ push ({n} new)")
-                },
-                push_hint: format!("publish `{branch}`: {n} commit(s) no remote has yet"),
+                push_label: with_tags((n > 0).then(|| format!("{n} new"))),
+                push_hint: format!("publish `{branch}`: {n} commit(s) no remote has yet{tag_hint}"),
             }
         }
         (None, None) => SyncCounts {
@@ -89,6 +108,20 @@ pub fn sync_counts(head: &gf_core::model::HeadInfo, unpublished: Option<u32>) ->
             push_label: "⇡ push (—)".into(),
             push_hint: "HEAD is detached — create a branch to push".into(),
         },
+    }
+}
+
+/// Why the push count may leave tags out: gf could not list the tags of
+/// these remotes yet (unreachable, or never fetched), so it cannot tell
+/// which local tags are unpublished. Empty when every remote is listed.
+pub fn unknown_tags_hint(unlisted: &[String]) -> String {
+    match unlisted {
+        [] => String::new(),
+        [one] => format!(" · tags not counted: could not list `{one}`'s tags yet (⟳ fetch)"),
+        many => format!(
+            " · tags not counted: could not list the tags of {} remotes yet (⟳ fetch)",
+            many.len()
+        ),
     }
 }
 
@@ -141,7 +174,13 @@ pub fn view<'a>(
     let counts = tab
         .snapshot
         .as_ref()
-        .map(|s| sync_counts(&s.status.head, s.unpublished))
+        .map(|s| {
+            let tags = s.pending_tags.as_ref().map_or(0, |p| p.names.len());
+            let mut c = sync_counts(&s.status.head, s.unpublished, tags);
+            c.push_hint
+                .push_str(&unknown_tags_hint(&s.unlisted_remotes));
+            c
+        })
         .unwrap_or_default();
     let fetch = fetch_label(
         tab.snapshot.as_ref().and_then(|s| s.last_fetch),
@@ -224,11 +263,11 @@ mod tests {
 
     #[test]
     fn labels_show_counts_against_upstream() {
-        let c = sync_counts(&head(Some("main"), Some("origin/main"), 2, 3), None);
+        let c = sync_counts(&head(Some("main"), Some("origin/main"), 2, 3), None, 0);
         assert_eq!(c.pull_label, "⇣ pull (3)");
         assert_eq!(c.push_label, "⇡ push (2)");
         assert!(c.pull_hint.contains("origin/main"));
-        let c = sync_counts(&head(Some("main"), Some("origin/main"), 0, 0), None);
+        let c = sync_counts(&head(Some("main"), Some("origin/main"), 0, 0), None, 0);
         assert_eq!(
             (c.pull_label.as_str(), c.push_label.as_str()),
             ("⇣ pull", "⇡ push"),
@@ -238,11 +277,32 @@ mod tests {
 
     #[test]
     fn unpublished_and_detached() {
-        let c = sync_counts(&head(Some("topic"), None, 0, 0), Some(5));
+        let c = sync_counts(&head(Some("topic"), None, 0, 0), Some(5), 0);
         assert_eq!(c.push_label, "⇡ push (5 new)");
         assert_eq!(c.pull_label, "⇣ pull (—)");
-        let c = sync_counts(&head(None, None, 0, 0), None);
+        let c = sync_counts(&head(None, None, 0, 0), None, 0);
         assert_eq!(c.push_label, "⇡ push (—)");
+    }
+
+    #[test]
+    fn tags_the_remote_lacks_count_toward_push() {
+        let up = head(Some("main"), Some("origin/main"), 0, 0);
+        assert_eq!(sync_counts(&up, None, 1).push_label, "⇡ push (1 tag)");
+        let up = head(Some("main"), Some("origin/main"), 2, 0);
+        assert_eq!(sync_counts(&up, None, 3).push_label, "⇡ push (2 +3 tags)");
+        let new = head(Some("topic"), None, 0, 0);
+        assert_eq!(
+            sync_counts(&new, Some(4), 1).push_label,
+            "⇡ push (4 new +1 tag)"
+        );
+        assert!(sync_counts(&new, Some(4), 1).push_hint.contains("1 tag(s)"));
+    }
+
+    #[test]
+    fn unknown_remote_tags_are_explained() {
+        assert_eq!(unknown_tags_hint(&[]), "");
+        assert!(unknown_tags_hint(&["origin".into()]).contains("`origin`"));
+        assert!(unknown_tags_hint(&["a".into(), "b".into()]).contains("2 remotes"));
     }
 
     #[test]
