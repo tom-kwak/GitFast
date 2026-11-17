@@ -565,22 +565,22 @@ impl UndoOps for CliBackend {
                 .iter()
                 .find(|(n, _)| n == name)
                 .and_then(|(_, i)| i.as_ref());
-            if let Some(id) = id {
-                if cur != Some(id) {
-                    self.exec(
-                        self.command(["update-ref", "-m", "gf: undo"])
-                            .args([name, id]),
-                    )
-                    .await?;
-                }
+            if let Some(id) = id
+                && cur != Some(id)
+            {
+                self.exec(
+                    self.command(["update-ref", "-m", "gf: undo"])
+                        .args([name, id]),
+                )
+                .await?;
             }
         }
 
-        if scope.head {
-            if let Some(target) = &to.head {
-                self.restore_head(now.head.as_ref(), target, mode, &scope.files)
-                    .await?;
-            }
+        if scope.head
+            && let Some(target) = &to.head
+        {
+            self.restore_head(now.head.as_ref(), target, mode, &scope.files)
+                .await?;
         }
 
         for (name, id) in &to.refs {

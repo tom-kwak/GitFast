@@ -439,16 +439,16 @@ impl App {
             Outcome::Cancelled { purpose } => {
                 self.dialog = None;
                 // The commit box waits for the amend to run; release it.
-                if matches!(purpose, Purpose::Amend { .. }) {
-                    if let Some(tab) = self.active_tab_mut() {
-                        tab.commit.commit_failed();
-                    }
+                if matches!(purpose, Purpose::Amend { .. })
+                    && let Some(tab) = self.active_tab_mut()
+                {
+                    tab.commit.commit_failed();
                 }
                 // Undoing several steps stops at the one not confirmed.
-                if matches!(purpose, Purpose::Undo { .. }) {
-                    if let Some(tab) = self.active_tab_mut() {
-                        tab.undo_queue = None;
-                    }
+                if matches!(purpose, Purpose::Undo { .. })
+                    && let Some(tab) = self.active_tab_mut()
+                {
+                    tab.undo_queue = None;
                 }
                 return self.restore_focus();
             }

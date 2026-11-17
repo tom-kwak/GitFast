@@ -146,12 +146,10 @@ impl Repository {
             .first()
             .is_some_and(|s| s.message.ends_with(&message));
         if let Err(e) = BranchOps::switch_branch(&self.cli, name, remote).await {
-            if made {
-                if let Err(back) = StashOps::stash_pop(&self.cli, 0).await {
-                    return Err(gf_core::GfError::Other(format!(
-                        "{e}\nyour changes are kept in stash@{{0}} ({back})"
-                    )));
-                }
+            if made && let Err(back) = StashOps::stash_pop(&self.cli, 0).await {
+                return Err(gf_core::GfError::Other(format!(
+                    "{e}\nyour changes are kept in stash@{{0}} ({back})"
+                )));
             }
             return Err(e);
         }

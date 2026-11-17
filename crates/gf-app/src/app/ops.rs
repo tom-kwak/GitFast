@@ -152,10 +152,10 @@ impl App {
         let active = self.active;
         let mut busy = false;
         let mut tasks = Vec::new();
-        if let Some(tab) = self.tabs.get_mut(active) {
-            if tab.load_due(true) {
-                tasks.push(load_snapshot(tab));
-            }
+        if let Some(tab) = self.tabs.get_mut(active)
+            && tab.load_due(true)
+        {
+            tasks.push(load_snapshot(tab));
         }
         busy |= self.tabs.iter().any(|t| t.loading);
         for (i, tab) in self.tabs.iter_mut().enumerate() {
@@ -289,10 +289,10 @@ impl App {
                 let status = snap.loaded.status;
                 tab.snapshot = Some(snap);
                 tab.error = None;
-                if let Some(rev) = tab.history.revision().map(str::to_owned) {
-                    if refs {
-                        tasks.push(load_history(tab, rev));
-                    }
+                if let Some(rev) = tab.history.revision().map(str::to_owned)
+                    && refs
+                {
+                    tasks.push(load_history(tab, rev));
                 }
                 // Work tree diffs may have changed on disk: read the shown
                 // one again if it moved between groups or its file changed
@@ -485,17 +485,17 @@ impl App {
                     let hint = if recorded { " · ⌘Z undo" } else { "" };
                     self.flash(NoteKind::Info, format!("✓ {}{hint}", truncate(&label, 60)));
                 }
-                if let Some(tab) = self.tab_mut(id) {
-                    if kind == OpKind::Commit {
-                        tab.commit.committed();
-                    }
+                if let Some(tab) = self.tab_mut(id)
+                    && kind == OpKind::Commit
+                {
+                    tab.commit.committed();
                 }
             }
             Err(e) => {
-                if kind == OpKind::Commit {
-                    if let Some(tab) = self.tab_mut(id) {
-                        tab.commit.commit_failed();
-                    }
+                if kind == OpKind::Commit
+                    && let Some(tab) = self.tab_mut(id)
+                {
+                    tab.commit.commit_failed();
                 }
                 if e.contains("operation cancelled") {
                     self.flash(NoteKind::Info, format!("{label} cancelled"));

@@ -117,32 +117,32 @@ pub fn get() -> &'static Highlighter {
 impl Highlighter {
     fn new(user_dir: Option<&Path>, warnings: &mut Vec<String>) -> Self {
         let mut builder = two_face::syntax::extra_newlines().into_builder();
-        if let Some(dir) = user_dir {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let loaded = if name.ends_with(".tmLanguage.json") {
-                        std::fs::read_to_string(&path)
-                            .map_err(|e| e.to_string())
-                            .and_then(|s| tmlanguage::load(&s))
-                    } else if name.ends_with(".sublime-syntax") {
-                        std::fs::read_to_string(&path)
-                            .map_err(|e| e.to_string())
-                            .and_then(|s| {
-                                syntect::parsing::SyntaxDefinition::load_from_str(&s, true, None)
-                                    .map_err(|e| e.to_string())
-                            })
-                    } else {
-                        continue;
-                    };
-                    match loaded {
-                        Ok(def) => builder.add(def),
-                        Err(e) => warnings.push(format!("{name}: {e}")),
-                    }
+        if let Some(dir) = user_dir
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let loaded = if name.ends_with(".tmLanguage.json") {
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|s| tmlanguage::load(&s))
+                } else if name.ends_with(".sublime-syntax") {
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|s| {
+                            syntect::parsing::SyntaxDefinition::load_from_str(&s, true, None)
+                                .map_err(|e| e.to_string())
+                        })
+                } else {
+                    continue;
+                };
+                match loaded {
+                    Ok(def) => builder.add(def),
+                    Err(e) => warnings.push(format!("{name}: {e}")),
                 }
             }
         }

@@ -258,13 +258,13 @@ impl GitRunner {
                     if let Some(sink) = &echo {
                         lines.feed(&chunk[..n], sink);
                     }
-                    if let Some(line) = &stop_at {
-                        if has_line(&buf, line, from) {
-                            if let Some(tx) = found.take() {
-                                let _ = tx.send(());
-                            }
-                            break;
+                    if let Some(line) = &stop_at
+                        && has_line(&buf, line, from)
+                    {
+                        if let Some(tx) = found.take() {
+                            let _ = tx.send(());
                         }
+                        break;
                     }
                 }
                 if let Some(sink) = &echo {

@@ -984,10 +984,10 @@ impl State {
                 Update::none()
             }
             Message::LineDragged(at) => {
-                if self.dragging {
-                    if let Some(r) = self.ranges.last_mut() {
-                        r.head = at;
-                    }
+                if self.dragging
+                    && let Some(r) = self.ranges.last_mut()
+                {
+                    r.head = at;
                 }
                 Update::none()
             }

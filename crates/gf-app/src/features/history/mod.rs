@@ -341,10 +341,10 @@ impl State {
             }
             Message::ToggleMark(oid) => {
                 self.cursor = Some(oid.clone());
-                if self.marked.is_empty() {
-                    if let Some(sel) = self.selected.clone() {
-                        self.marked.push(sel);
-                    }
+                if self.marked.is_empty()
+                    && let Some(sel) = self.selected.clone()
+                {
+                    self.marked.push(sel);
                 }
                 if let Some(pos) = self.marked.iter().position(|m| m == &oid) {
                     self.marked.remove(pos);
