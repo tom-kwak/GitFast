@@ -7,6 +7,7 @@ use iced::Task;
 use iced::widget::operation;
 
 use super::dialogs::{Confirm, Purpose};
+use super::ops::Record;
 use super::ops::{load_diff, load_history, load_snapshot};
 use super::{App, Message, OpKind, Shortcut};
 use crate::features::command_log::NoteKind;
@@ -15,6 +16,7 @@ use crate::features::prompt::PROMPT_ID;
 use crate::features::prompt::parse::{BUILTINS, PromptCommand};
 use crate::features::{changes, commit_box, history, sidebar, toolbar};
 use crate::theme;
+use crate::undo;
 
 impl App {
     pub(super) fn show_diff(&mut self, source: DiffSource) -> Task<Message> {
@@ -43,23 +45,32 @@ impl App {
             changes::Output::ResolveConflict(path) => self.open_conflict(path),
             changes::Output::Stage(paths) => {
                 let label = format!("stage {}", names(&paths));
-                self.op(label, OpKind::Generic, move |r| async move {
+                let record = Record::new(undo::index(paths.clone()));
+                self.op_recorded(label, OpKind::Generic, Some(record), move |r| async move {
                     r.stage(&paths).await
                 })
             }
             changes::Output::Unstage(paths) => {
                 let label = format!("unstage {}", names(&paths));
-                self.op(label, OpKind::Generic, move |r| async move {
+                let record = Record::new(undo::index(paths.clone()));
+                self.op_recorded(label, OpKind::Generic, Some(record), move |r| async move {
                     r.unstage(&paths).await
                 })
             }
-            changes::Output::StageAll => self.op("stage all", OpKind::Generic, |r| async move {
-                r.stage_all().await
-            }),
-            changes::Output::UnstageAll => {
-                self.op("unstage all", OpKind::Generic, |r| async move {
-                    r.unstage_all().await
+            changes::Output::StageAll => {
+                let record = Record::new(undo::index(self.changed_paths()));
+                self.op_recorded("stage all", OpKind::Generic, Some(record), |r| async move {
+                    r.stage_all().await
                 })
+            }
+            changes::Output::UnstageAll => {
+                let record = Record::new(undo::index(self.changed_paths()));
+                self.op_recorded(
+                    "unstage all",
+                    OpKind::Generic,
+                    Some(record),
+                    |r| async move { r.unstage_all().await },
+                )
             }
             changes::Output::Discard { tracked, untracked } => {
                 self.confirm_discard(tracked, untracked)
@@ -99,12 +110,26 @@ impl App {
             body.push(format!("Delete untracked {}?", names(&untracked)));
         }
         body.push("Staged changes are kept.".into());
-        self.confirm(Confirm::delete(
+        // Discarded content is saved for undo unless there is too much.
+        let workdir = self.active_tab().map(|t| t.repo.cwd().to_path_buf());
+        let mut saved = gf_git::Scope {
+            files: tracked.iter().chain(&untracked).cloned().collect(),
+            ..gf_git::Scope::default()
+        };
+        let fits = workdir.is_some_and(|w| saved.expand_files(&w).is_ok());
+        if !fits {
+            body.push(
+                "Too much to keep a copy of (over 64 MB or 5000 files): this can't be undone."
+                    .into(),
+            );
+        }
+        let confirm = Confirm::delete(
             "Discard changes",
             body,
             "Discard",
             Purpose::Discard { tracked, untracked },
-        ))
+        );
+        self.confirm(if fits { confirm.undoable() } else { confirm })
     }
 
     pub(super) fn on_diff(
@@ -119,16 +144,19 @@ impl App {
                 description,
             } => {
                 if action == Action::Discard {
-                    self.confirm(Confirm::delete(
-                        "Discard changes",
-                        vec![format!("{description} from the working tree?")],
-                        "Discard",
-                        Purpose::ApplyPatches {
-                            patches,
-                            action,
-                            description,
-                        },
-                    ))
+                    self.confirm(
+                        Confirm::delete(
+                            "Discard changes",
+                            vec![format!("{description} from the working tree?")],
+                            "Discard",
+                            Purpose::ApplyPatches {
+                                patches,
+                                action,
+                                description,
+                            },
+                        )
+                        .undoable(),
+                    )
                 } else {
                     self.apply_patches(patches, action, description)
                 }
@@ -164,7 +192,18 @@ impl App {
         description: String,
     ) -> Task<Message> {
         let (cached, reverse) = action.apply_mode();
-        self.op(description, OpKind::Generic, move |r| async move {
+        // Partial staging changes the index entry, a partial discard the file.
+        let record = self
+            .active_tab()
+            .and_then(|t| t.diff(t.code_view).current_path())
+            .map(|p| {
+                Record::new(if action == Action::Discard {
+                    undo::files(vec![p])
+                } else {
+                    undo::index(vec![p])
+                })
+            });
+        self.op_recorded(description, OpKind::Generic, record, move |r| async move {
             for p in patches {
                 r.apply_patch(p, cached, reverse).await?;
             }
@@ -201,11 +240,11 @@ impl App {
             }
             commit_box::Output::Commit { message, .. } => {
                 let summary = message.lines().next().unwrap_or_default().to_owned();
-                let undo = self.undo_point(&format!("commit: {summary}"), true);
-                self.op_with_undo(
+                let record = Record::head(gf_git::HeadMode::Soft).with_message(message.clone());
+                self.op_recorded(
                     format!("commit: {summary}"),
                     OpKind::Commit,
-                    undo,
+                    Some(record),
                     move |r| async move {
                         r.commit(&message, &CommitOptions::default())
                             .await
@@ -340,15 +379,18 @@ impl App {
             ),
             sidebar::Output::DeleteBranch(b) => self.delete_branch_dialog(&b),
             sidebar::Output::PushBranch(b) => self.push_branch(&b),
-            sidebar::Output::DeleteTag(name) => self.confirm(Confirm::delete(
-                "Delete tag",
-                vec![
-                    format!("Delete local tag `{name}`?"),
-                    "Tags already pushed stay on the remote.".into(),
-                ],
-                "Delete",
-                Purpose::DeleteTag(name),
-            )),
+            sidebar::Output::DeleteTag(name) => self.confirm(
+                Confirm::delete(
+                    "Delete tag",
+                    vec![
+                        format!("Delete local tag `{name}`?"),
+                        "Tags already pushed stay on the remote.".into(),
+                    ],
+                    "Delete",
+                    Purpose::DeleteTag(name),
+                )
+                .undoable(),
+            ),
             sidebar::Output::PushTag(name) => {
                 let remote = self.default_remote();
                 self.confirm(Confirm::change(
@@ -451,12 +493,15 @@ impl App {
             sidebar::Output::Merge(branch) => self.ask_merge(branch),
             sidebar::Output::RebaseOnto(onto) => self.ask_rebase_onto(onto),
             sidebar::Output::Collapse => self.on_shortcut(Shortcut::ToggleRefs),
-            sidebar::Output::StashDrop(i) => self.confirm(Confirm::delete(
-                "Drop stash",
-                vec![format!("Delete stash@{{{i}}}? Its changes will be lost.")],
-                "Drop",
-                Purpose::StashDrop(i),
-            )),
+            sidebar::Output::StashDrop(i) => self.confirm(
+                Confirm::delete(
+                    "Drop stash",
+                    vec![format!("Delete stash@{{{i}}} and the changes in it?")],
+                    "Drop",
+                    Purpose::StashDrop(i),
+                )
+                .undoable(),
+            ),
         }
     }
 
@@ -758,7 +803,9 @@ impl App {
                 self.flash(NoteKind::Info, text);
                 Task::none()
             }
-            PromptCommand::Undo => self.ask_undo(),
+            PromptCommand::Undo { list: false } => self.undo_steps(false, 1),
+            PromptCommand::Undo { list: true } => self.toggle_undo_list(),
+            PromptCommand::Redo => self.undo_steps(true, 1),
             PromptCommand::Pwd => {
                 let text = self.active_tab().map_or_else(
                     || "no repository open".to_owned(),
@@ -778,7 +825,7 @@ fn is_number(args: &[String]) -> bool {
 }
 
 /// `a.txt` or `a.txt and 2 more`.
-fn names(paths: &[std::path::PathBuf]) -> String {
+pub(super) fn names(paths: &[std::path::PathBuf]) -> String {
     match paths {
         [] => "nothing".into(),
         [one] => one.display().to_string(),

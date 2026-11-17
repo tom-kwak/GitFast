@@ -18,7 +18,9 @@ use crate::features::diff_view::{self, DiffSource};
 use crate::features::toolbar;
 use crate::git_actions;
 use crate::repo_tab::{History, RepoTab, Snapshot};
+use crate::undo::Step;
 use crate::widgets::format::truncate;
+use gf_git::{Capture, HeadMode, Scope};
 
 pub fn load_snapshot(tab: &mut RepoTab) -> Task<Message> {
     tab.loading = true;
@@ -175,15 +177,16 @@ impl App {
         F: FnOnce(Repository) -> Fut,
         Fut: Future<Output = gf_core::Result<()>> + Send + 'static,
     {
-        self.op_with_undo(label, kind, None, f)
+        self.op_recorded(label, kind, None, f)
     }
 
-    /// [`Self::op`] that records an undo point when it succeeds.
-    pub(super) fn op_with_undo<F, Fut>(
+    /// [`Self::op`] that records an undo step: `record`'s scope is
+    /// captured before and after the operation (see `crate::undo`).
+    pub(super) fn op_recorded<F, Fut>(
         &mut self,
         label: impl Into<String>,
         kind: OpKind,
-        undo: Option<crate::repo_tab::UndoEntry>,
+        record: Option<Record>,
         f: F,
     ) -> Task<Message>
     where
@@ -196,15 +199,27 @@ impl App {
         let repo = tab.repo.clone();
         let id = repo.id();
         let label = label.into();
-        let fut = f(repo);
+        let fut = f(repo.clone());
+        let step_label = label.clone();
         Task::perform(
-            async move { fut.await.map_err(|e| e.to_string()) },
-            move |result| Message::OpDone {
+            async move {
+                let before = match record {
+                    Some(r) => capture_before(&repo, r).await,
+                    None => None,
+                };
+                let result = fut.await.map_err(|e| e.to_string());
+                let step = match before {
+                    Some(b) => finish(&repo, step_label, b).await,
+                    None => None,
+                };
+                (result, step)
+            },
+            move |(result, step)| Message::OpDone {
                 repo: id,
                 label: label.clone(),
                 kind: kind.clone(),
                 result,
-                undo: undo.clone(),
+                step,
             },
         )
     }
@@ -231,11 +246,8 @@ impl App {
         let id = repo.id();
         let label = label.into();
         // A pull moves the branch; let it be undone.
-        let undo = if kind == OpKind::Pull {
-            self.undo_point("pull", false)
-        } else {
-            None
-        };
+        let record = (kind == OpKind::Pull).then(|| Record::head(HeadMode::Keep));
+        let step_label = label.clone();
         let token = CancellationToken::new();
         self.sync = Some((
             toolbar::Sync {
@@ -249,8 +261,12 @@ impl App {
             64,
             async move |mut out: iced::futures::channel::mpsc::Sender<Message>| {
                 let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel();
+                let before = match record {
+                    Some(r) => capture_before(&repo, r).await,
+                    None => None,
+                };
                 let fut = f(
-                    repo,
+                    repo.clone(),
                     RunOptions {
                         cancel: Some(token),
                         progress: Some(ptx),
@@ -265,13 +281,17 @@ impl App {
                         r = &mut fut => break r,
                     }
                 };
+                let step = match before {
+                    Some(b) => finish(&repo, step_label, b).await,
+                    None => None,
+                };
                 let _ = out
                     .send(Message::OpDone {
                         repo: id,
                         label,
                         kind,
                         result: result.map_err(|e| e.to_string()),
-                        undo,
+                        step,
                     })
                     .await;
             },
@@ -285,23 +305,24 @@ impl App {
         label: String,
         kind: OpKind,
         result: Result<(), String>,
+        recorded: bool,
     ) -> Task<Message> {
         if matches!(kind, OpKind::Fetch | OpKind::Push { .. } | OpKind::Pull) {
             self.sync = None;
         }
         let mut tasks = vec![self.request_refresh(id)];
+        if let OpKind::Undo { redo } = kind {
+            tasks.push(self.on_undo_done(id, redo, result.is_ok()));
+        }
         match result {
             Ok(()) => {
-                self.flash(NoteKind::Info, format!("✓ {}", truncate(&label, 60)));
+                if !matches!(kind, OpKind::Undo { .. }) {
+                    let hint = if recorded { " · ⌘Z undo" } else { "" };
+                    self.flash(NoteKind::Info, format!("✓ {}{hint}", truncate(&label, 60)));
+                }
                 if let Some(tab) = self.tab_mut(id) {
-                    match kind {
-                        OpKind::Commit => tab.commit.committed(),
-                        // Only now is the step really undone; a failed undo
-                        // (e.g. git refusing to overwrite work) can be retried.
-                        OpKind::Undo => {
-                            tab.undo.pop();
-                        }
-                        _ => {}
+                    if kind == OpKind::Commit {
+                        tab.commit.committed();
                     }
                 }
             }
@@ -512,4 +533,86 @@ fn is_global_command(args: &[String]) -> bool {
         args.first().map(String::as_str),
         Some("--version" | "version" | "help" | "config" | "ls-remote")
     )
+}
+
+/// What an operation touches, for its undo step (see `crate::undo`).
+#[derive(Debug, Clone)]
+pub struct Record {
+    pub scope: Scope,
+    /// How HEAD moves back when the branch stays the same.
+    pub mode: HeadMode,
+    /// Commit message to put back in the commit box on undo.
+    pub message: Option<String>,
+    /// Applying / popping this stash entry: its files join the scope.
+    pub stash_entry: Option<usize>,
+}
+
+impl Record {
+    pub fn new(scope: Scope) -> Self {
+        Self {
+            scope,
+            mode: HeadMode::Keep,
+            message: None,
+            stash_entry: None,
+        }
+    }
+
+    /// Moves HEAD only (commit, reset, merge, checkout…).
+    pub fn head(mode: HeadMode) -> Self {
+        Self {
+            mode,
+            ..Self::new(Scope::head())
+        }
+    }
+
+    pub fn with_message(mut self, message: String) -> Self {
+        self.message = Some(message);
+        self
+    }
+
+    pub fn with_stash_entry(mut self, index: usize) -> Self {
+        self.stash_entry = Some(index);
+        self
+    }
+}
+
+/// Captures `record`'s scope before an operation. `None` (no undo step)
+/// when there is too much to save or git could not be asked.
+pub async fn capture_before(repo: &Repository, mut record: Record) -> Option<(Record, Capture)> {
+    if let Some(i) = record.stash_entry {
+        let paths = repo.stash_paths(i).await.ok()?;
+        record.scope.index.extend(paths.iter().cloned());
+        record.scope.files.extend(paths);
+    }
+    // Folders (e.g. an untracked one) stand for the files in them, for
+    // the index as well as for the work tree.
+    let mut index = Scope {
+        files: std::mem::take(&mut record.scope.index),
+        ..Scope::default()
+    };
+    if let Err(e) = index
+        .expand_files(repo.cwd())
+        .and_then(|()| record.scope.expand_files(repo.cwd()))
+    {
+        tracing::info!(error = %e, "no undo step for this operation");
+        return None;
+    }
+    record.scope.index = index.files;
+    let before = repo.capture(&record.scope).await.ok()?;
+    Some((record, before))
+}
+
+/// The step, once the operation ran; `None` when it changed nothing.
+pub async fn finish(
+    repo: &Repository,
+    label: String,
+    (record, before): (Record, Capture),
+) -> Option<Box<Step>> {
+    let after = repo.capture(&record.scope).await.ok()?;
+    if after == before {
+        return None;
+    }
+    let mut step = Step::new(label, record.scope, before, after, record.mode);
+    step.message = record.message;
+    Some(Box::new(step))
 }

@@ -21,6 +21,7 @@ mod dialogs;
 mod focus;
 mod ops;
 mod outputs;
+mod undoing;
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -65,6 +66,9 @@ pub enum Shortcut {
     },
     /// ⌘P: the dropdown of all tabs (`▾ N tabs`).
     TabList,
+    /// ⌘Z / ⌘⇧Z outside text fields.
+    Undo,
+    Redo,
     /// ⌘⇧[ / ⌘⇧]: the tab to the left / right.
     PrevTab,
     NextTab,
@@ -98,8 +102,11 @@ pub enum OpKind {
         to: Option<PushTo>,
     },
     Pull,
-    /// Undoing a step: its undo entry is removed once this succeeds.
-    Undo,
+    /// Undoing (or redoing) a step: it moves to the other stack once this
+    /// succeeds.
+    Undo {
+        redo: bool,
+    },
 }
 
 /// Where to push a branch that is not the current one.
@@ -169,13 +176,20 @@ pub enum Message {
         label: String,
         kind: OpKind,
         result: Result<(), String>,
-        undo: Option<crate::repo_tab::UndoEntry>,
+        /// What it changed, to undo it.
+        step: Option<Box<crate::undo::Step>>,
     },
     IntegrateDone {
         repo: RepoId,
         label: String,
         result: Result<gf_git::Integration, String>,
-        undo: Option<crate::repo_tab::UndoEntry>,
+        record: Option<Box<advanced::Recorded>>,
+    },
+    /// The repository state an undo / redo is about to replace.
+    UndoChecked {
+        repo: RepoId,
+        redo: bool,
+        now: Result<Box<gf_git::Capture>, String>,
     },
     Banner(crate::features::op_banner::Message),
     Conflict(crate::features::conflict_view::Message),
@@ -202,8 +216,12 @@ pub enum Message {
         selected: usize,
         result: Result<gf_git::SquashPreview, String>,
     },
-    /// Ask to undo the latest undoable step of the active tab.
+    /// Undo the latest step of the active tab (⌘Z).
     Undo,
+    /// Redo the latest undone step (⌘⇧Z).
+    Redo,
+    /// The undo history list (status line).
+    UndoList(crate::features::undo_list::Message),
     /// A drag on the file list / diff divider starts.
     ResizeListStart,
     /// The divider is being dragged: pixels from where the drag started.
@@ -242,6 +260,8 @@ pub struct App {
     switcher: Option<usize>,
     /// The `▾ N tabs` dropdown, when open.
     tab_list: Option<tab_list::State>,
+    /// The undo history list, when open.
+    undo_list: Option<crate::features::undo_list::State>,
     /// Open action menu (right-click / `actions ▾`).
     menu: Option<context_menu::State<Message>>,
     /// Where the mouse was last pressed: menus open there.
@@ -323,6 +343,7 @@ impl App {
             mru: tab_switcher::Mru::default(),
             switcher: None,
             tab_list: None,
+            undo_list: None,
             menu: None,
             pointer: crate::widgets::pointer::Pointer::default(),
             rebase_editor: None,
@@ -711,19 +732,21 @@ impl App {
                 label,
                 kind,
                 result,
-                undo,
+                step,
             } => {
-                if result.is_ok() {
-                    self.push_undo(repo, undo);
+                let recorded = step.is_some();
+                if let Some(step) = step {
+                    self.record_step(repo, *step);
                 }
-                self.on_op_done(repo, label, kind, result)
+                self.on_op_done(repo, label, kind, result, recorded)
             }
             Message::IntegrateDone {
                 repo,
                 label,
                 result,
-                undo,
-            } => self.on_integrate_done(repo, label, result, undo),
+                record,
+            } => self.on_integrate_done(repo, label, result, record),
+            Message::UndoChecked { repo, redo, now } => self.on_undo_checked(repo, redo, now),
             Message::Banner(m) => self.on_banner(m),
             Message::Conflict(m) => self.on_conflict_message(m),
             Message::Blame(m) => self.on_blame_message(m),
@@ -766,7 +789,9 @@ impl App {
                 selected,
                 result,
             } => self.on_squash_preview(ids, selected, result),
-            Message::Undo => self.ask_undo(),
+            Message::Undo => self.undo_steps(false, 1),
+            Message::Redo => self.undo_steps(true, 1),
+            Message::UndoList(m) => self.on_undo_list(m),
             Message::ResizeListStart => {
                 self.list_drag_start = Some(self.settings.appearance.list_cols);
                 Task::none()
@@ -1121,6 +1146,8 @@ impl App {
             Shortcut::Forget => Task::none(),
             Shortcut::CycleTab { back } => self.cycle_tab(back),
             Shortcut::TabList => self.toggle_tab_list(),
+            Shortcut::Undo => self.undo_steps(false, 1),
+            Shortcut::Redo => self.undo_steps(true, 1),
             Shortcut::PrevTab | Shortcut::NextTab => {
                 let n = self.tabs.len();
                 if n < 2 {
@@ -1268,11 +1295,12 @@ impl App {
                 tab,
                 self.busy().then_some(spinner),
                 self.flash.as_ref(),
-                tab.and_then(|tab| tab.undo.last()).map(|u| {
-                    (
-                        format!("↶ undo {}", widgets::format::truncate(&u.label, 30)),
-                        Message::Undo,
-                    )
+                tab.map(|tab| status_line::UndoBar {
+                    undo: tab.undo.next(false).map(|s| s.label.clone()),
+                    redo: tab.undo.next(true).map(|s| s.label.clone()),
+                    on_undo: Message::Undo,
+                    on_redo: Message::Redo,
+                    on_list: Message::UndoList(crate::features::undo_list::Message::Toggle),
                 }),
             ));
 
@@ -1330,12 +1358,19 @@ impl App {
                 opaque(stack![backdrop, center(opaque(modal))])
             }
         };
-        let menu_layer: Element<'_, Message> = match (&self.menu, &self.tab_list) {
-            (Some(menu), _) => opaque(menu.view(t).map(Message::Menu)),
-            (None, Some(list)) => {
+        let undo_list = self
+            .undo_list
+            .as_ref()
+            .zip(self.active_tab().map(|t| &t.undo));
+        let menu_layer: Element<'_, Message> = match (&self.menu, &self.tab_list, undo_list) {
+            (Some(menu), _, _) => opaque(menu.view(t).map(Message::Menu)),
+            (None, Some(list), _) => {
                 opaque(list.view(t, &self.tabs, self.active).map(Message::TabList))
             }
-            (None, None) => empty(),
+            (None, None, Some((list, history))) => {
+                opaque(list.view(t, history).map(Message::UndoList))
+            }
+            (None, None, None) => empty(),
         };
         let screen: Element<'_, Message> = stack![base, modal_layer, menu_layer].into();
         self.pointer.track(screen)
@@ -1643,9 +1678,12 @@ fn shortcut(
             _ => {}
         }
         // Layout-independent: ⌘O works with the Korean input method too.
-        // ⌘C/V/X/A/Z are left to text fields.
+        // ⌘C/V/X/A are left to text fields; ⌘Z too while one has focus
+        // (see `focus`).
         return Some(match key.to_latin(physical)? {
             'o' => Shortcut::Open,
+            'z' | 'Z' if modifiers.shift() => Shortcut::Redo,
+            'z' => Shortcut::Undo,
             'p' => Shortcut::TabList,
             'w' => Shortcut::CloseTab,
             'r' => Shortcut::Refresh,
@@ -1703,6 +1741,30 @@ mod tests {
         status: event::Status,
     ) -> Option<Shortcut> {
         shortcut(&key, modifiers, Physical::Code(code), status)
+    }
+
+    #[test]
+    fn undo_keys_work_with_any_input_method() {
+        let cmd = keyboard::Modifiers::COMMAND;
+        // Korean input: the key reports 'ㅋ', the physical key is Z.
+        assert_eq!(
+            press(
+                Key::Character("ㅋ".into()),
+                Code::KeyZ,
+                cmd,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::Undo)
+        );
+        assert_eq!(
+            press(
+                Key::Character("Z".into()),
+                Code::KeyZ,
+                cmd | keyboard::Modifiers::SHIFT,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::Redo)
+        );
     }
 
     #[test]

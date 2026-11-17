@@ -21,4 +21,5 @@ pub mod tab_list;
 pub mod tab_switcher;
 pub mod tabs;
 pub mod toolbar;
+pub mod undo_list;
 pub mod welcome;

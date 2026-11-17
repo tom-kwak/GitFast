@@ -42,6 +42,7 @@ use crate::ops::stash::StashOptions;
 use crate::ops::state::RepoState;
 use crate::ops::submodule::Submodule;
 use crate::ops::sync::{PullMode, PushOptions};
+use crate::ops::undo::{Capture, HeadMode, Scope};
 use crate::ops::worktree::Worktree;
 
 /// `git bisect`: find the commit that introduced a bug.
@@ -403,6 +404,23 @@ pub trait TagOps {
 }
 
 /// Linked worktrees.
+/// Capturing and restoring state for undo / redo (see `ops::undo`).
+pub trait UndoOps {
+    /// Files a stash entry changes (tracked, staged and untracked parts):
+    /// what applying or popping it touches.
+    fn stash_paths(&self, index: usize) -> impl Future<Output = Result<Vec<PathBuf>>> + Send;
+    /// The state of everything `scope` covers. Saves work tree files as
+    /// blobs so they can be written back later.
+    fn capture(&self, scope: &Scope) -> impl Future<Output = Result<Capture>> + Send;
+    /// Puts back what `to` captured (HEAD moved with `mode`).
+    fn restore(
+        &self,
+        scope: &Scope,
+        to: &Capture,
+        mode: HeadMode,
+    ) -> impl Future<Output = Result<()>> + Send;
+}
+
 pub trait WorktreeOps {
     fn worktrees(&self) -> impl Future<Output = Result<Vec<Worktree>>> + Send;
 

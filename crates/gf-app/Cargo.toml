@@ -25,6 +25,7 @@ rfd.workspace = true
 syntect.workspace = true
 two-face.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 

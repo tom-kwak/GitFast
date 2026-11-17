@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gf_core::model::{Branch, Commit, Oid, Remote, StashEntry, StatusEntry, StatusReport, Tag};
+use gf_core::model::{Branch, Commit, Remote, StashEntry, StatusEntry, StatusReport, Tag};
 use gf_git::graph::{self, GraphRow};
 use gf_git::{
     BisectProgress, LineCounts, LogOrder, LogQuery, RepoState, Repository, Submodule, Worktree,
@@ -252,15 +252,6 @@ impl Snapshot {
     }
 }
 
-/// A step that can be undone: where HEAD was before it.
-#[derive(Debug, Clone)]
-pub struct UndoEntry {
-    pub label: String,
-    pub before: Oid,
-    /// Undo keeps the undone changes staged (for commits).
-    pub soft: bool,
-}
-
 #[derive(Debug)]
 pub struct RepoTab {
     pub repo: Repository,
@@ -289,14 +280,21 @@ pub struct RepoTab {
     pub blame: Option<crate::features::blame_view::State>,
     /// Conflict resolver shown instead of the local diff while open.
     pub conflict: Option<crate::features::conflict_view::State>,
-    /// Undoable steps, most recent last.
-    pub undo: Vec<UndoEntry>,
+    /// Undo / redo steps of gf's own operations (saved in the git dir).
+    pub undo: crate::undo::History,
+    /// An operation stopped on conflicts, recorded once it is continued.
+    pub pending: Option<crate::undo::Pending>,
+    /// An undo / redo is being checked or run: further presses wait.
+    pub undo_busy: bool,
+    /// More undo / redo steps to run after the current one.
+    pub undo_queue: Option<crate::undo::Queue>,
     /// Latest bisect step result.
     pub bisect: Option<BisectProgress>,
 }
 
 impl RepoTab {
     pub fn new(repo: Repository, watcher: Option<RepoWatcher>) -> Self {
+        let undo = crate::undo::History::load(&repo.handle().git_dir);
         Self {
             repo,
             snapshot: None,
@@ -313,7 +311,10 @@ impl RepoTab {
             code_view: diff_view::Role::Commit,
             blame: None,
             conflict: None,
-            undo: Vec::new(),
+            undo,
+            pending: None,
+            undo_busy: false,
+            undo_queue: None,
             bisect: None,
             commit: commit_box::State::default(),
         }

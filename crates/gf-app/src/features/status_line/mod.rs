@@ -17,12 +17,23 @@ pub struct Flash {
     pub text: String,
 }
 
+/// The undo / redo buttons: what the next undo and redo would do.
+#[derive(Debug, Clone)]
+pub struct UndoBar<M> {
+    pub undo: Option<String>,
+    pub redo: Option<String>,
+    pub on_undo: M,
+    pub on_redo: M,
+    /// Opens the undo history.
+    pub on_list: M,
+}
+
 pub fn view<'a, M: Clone + 'a>(
     t: &'a Tokens,
     tab: Option<&'a RepoTab>,
     busy: Option<&'static str>,
     flash: Option<&'a Flash>,
-    undo: Option<(String, M)>,
+    undo: Option<UndoBar<M>>,
 ) -> Element<'a, M> {
     let sep = || dim(t, "│");
     let mut left = Row::new().spacing(10).align_y(iced::Alignment::Center);
@@ -99,14 +110,41 @@ pub fn view<'a, M: Clone + 'a>(
         };
         right = right.push(colored(t, widgets::format::truncate(&f.text, 60), color));
     }
-    if let Some((label, on_press)) = undo {
-        right = right.push(widgets::tip(
+    let undo = undo.filter(|b| b.undo.is_some() || b.redo.is_some());
+    // The key hints make room for the undo buttons (the prompt shows the
+    // same hints).
+    let hints = undo.is_none();
+    if let Some(bar) = undo {
+        let mut buttons = Row::new().spacing(2).align_y(iced::Alignment::Center);
+        if let Some(label) = &bar.undo {
+            buttons = buttons.push(widgets::tip(
+                t,
+                widgets::text_button(
+                    t,
+                    &format!("↶ {}", widgets::format::truncate(label, 28)),
+                    Some("⌘Z"),
+                    Some(bar.on_undo.clone()),
+                ),
+                format!("undo \"{label}\" (also `:undo`)"),
+            ));
+        }
+        if let Some(label) = &bar.redo {
+            buttons = buttons.push(widgets::tip(
+                t,
+                widgets::text_button(t, "↷", Some("⌘⇧Z"), Some(bar.on_redo.clone())),
+                format!("redo \"{label}\" (also `:redo`)"),
+            ));
+        }
+        buttons = buttons.push(widgets::tip(
             t,
-            widgets::text_button(t, &label, None, Some(on_press)),
-            "undo the last commit / merge / rebase / pull made in gf (also `:undo`)".into(),
+            widgets::text_button(t, "▾", None, Some(bar.on_list.clone())),
+            "undo history — go back several steps (also `:undo list`)".into(),
         ));
+        right = right.push(buttons);
     }
-    right = right.push(dim(t, "⌘O open · ⌘R refresh · ⌘L prompt · ⌘J log · ? help"));
+    if hints {
+        right = right.push(dim(t, "⌘O open · ⌘R refresh · ⌘L prompt · ⌘J log · ? help"));
+    }
 
     container(
         row![left, space().width(Length::Fill), right]

@@ -120,6 +120,9 @@ impl App {
         if self.dialog.is_none() && self.tab_list.is_some() {
             return self.tab_list_key(k);
         }
+        if self.dialog.is_none() && self.undo_list.is_some() {
+            return self.undo_list_key(k);
+        }
         if self.dialog.is_some() || self.rebase_editor.is_some() {
             return run(self, k.shortcut);
         }
@@ -139,7 +142,11 @@ impl App {
                     return self.nav_pane(Pane::Sidebar, n).unwrap_or_else(Task::none);
                 }
             }
-            let s = k.shortcut.filter(|s| in_prompt || !prompt_only(*s));
+            // ⌘Z / ⌘⇧Z in a text field are about its text, not the repo.
+            let s = k
+                .shortcut
+                .filter(|s| in_prompt || !prompt_only(*s))
+                .filter(|s| !matches!(s, Shortcut::Undo | Shortcut::Redo));
             return run(self, s);
         }
         self.typing = false;
@@ -161,6 +168,45 @@ impl App {
             (_, Some(Key::Up)) => self.cycle_tab(true),
             (_, Some(Key::Down)) => self.cycle_tab(false),
             (Some(Shortcut::Enter), _) | (_, Some(Key::Enter)) => self.finish_switch(),
+            _ => Task::none(),
+        }
+    }
+
+    /// Keys while the undo history is open: ↑/↓ move, ⏎ goes back to the
+    /// highlighted step, Esc closes; ⌘Z / ⌘⇧Z still undo / redo one step.
+    fn undo_list_key(&mut self, k: KeyInput) -> Task<Message> {
+        use crate::features::undo_list;
+        let rows = self
+            .active_tab()
+            .map(|t| undo_list::rows(&t.undo))
+            .unwrap_or_default();
+        let Some(list) = self.undo_list.as_mut() else {
+            return Task::none();
+        };
+        if let Some(n) = k.nav {
+            match n.key {
+                Key::Up => list.move_by(&rows, -1),
+                Key::Down => list.move_by(&rows, 1),
+                Key::PageUp => list.move_by(&rows, -10),
+                Key::PageDown => list.move_by(&rows, 10),
+                Key::Enter => {
+                    let row = list.current(&rows);
+                    return self.update(Message::UndoList(undo_list::Message::Pick(row)));
+                }
+                _ => {}
+            }
+            return Task::none();
+        }
+        match k.shortcut {
+            Some(Shortcut::Escape) => self.update(Message::UndoList(undo_list::Message::Dismiss)),
+            Some(s @ (Shortcut::Undo | Shortcut::Redo)) => {
+                self.undo_list = None;
+                self.on_shortcut(s)
+            }
+            Some(s @ (Shortcut::Open | Shortcut::TabList | Shortcut::Quit)) => {
+                self.undo_list = None;
+                self.on_shortcut(s)
+            }
             _ => Task::none(),
         }
     }

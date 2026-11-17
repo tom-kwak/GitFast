@@ -1,5 +1,5 @@
 //! M4 operations in the app: merge / rebase / cherry-pick / revert (with
-//! conflict handling), the in-progress banner, bisect, and undo.
+//! conflict handling), the in-progress banner and bisect.
 //!
 //! Every action here that changes the repository goes through the shared
 //! confirmation (`App::confirm`), per the confirmation policy.
@@ -7,7 +7,7 @@
 use std::future::Future;
 
 use gf_core::model::{Commit, Oid, RepoId};
-use gf_git::{BisectProgress, Integration, MergeStyle, Repository};
+use gf_git::{BisectProgress, HeadMode, Integration, MergeStyle, Repository, Scope};
 use iced::Task;
 
 use super::dialogs::{Confirm, Purpose};
@@ -16,41 +16,21 @@ use crate::features::command_log::NoteKind;
 use crate::features::diff_view::{self, DiffSource, Role};
 use crate::features::history::{BatchAction, CommitAction};
 use crate::features::op_banner;
-use crate::repo_tab::UndoEntry;
 use crate::widgets::format::truncate;
 
-/// Undo entries kept per tab.
-const MAX_UNDO: usize = 20;
+/// What an integration recorded for undo: a finished step, or the state
+/// before it when it stopped on conflicts (recorded once continued).
+#[derive(Debug, Clone)]
+pub enum Recorded {
+    Step(Box<crate::undo::Step>),
+    Pending(Box<crate::undo::Pending>),
+}
 
 impl App {
-    /// Where HEAD is now, as an undo point for a step about to run.
-    pub(super) fn undo_point(&self, label: &str, soft: bool) -> Option<UndoEntry> {
-        let before = self
-            .active_tab()?
-            .snapshot
-            .as_ref()?
-            .status
-            .head
-            .oid
-            .clone()?;
-        Some(UndoEntry {
-            label: label.to_owned(),
-            before,
-            soft,
-        })
-    }
-
-    pub(super) fn push_undo(&mut self, id: RepoId, entry: Option<UndoEntry>) {
-        if let (Some(entry), Some(tab)) = (entry, self.tab_mut(id)) {
-            tab.undo.push(entry);
-            if tab.undo.len() > MAX_UNDO {
-                tab.undo.remove(0);
-            }
-        }
-    }
-
     /// Runs merge / rebase / cherry-pick / revert / continue. Conflicts are
     /// reported as an outcome and lead the user to the working tree.
+    /// `undoable` starts an undo step; continuing one that stopped on
+    /// conflicts finishes the step it started.
     pub(super) fn integrate_op<F, Fut>(
         &mut self,
         label: impl Into<String>,
@@ -62,24 +42,54 @@ impl App {
         Fut: Future<Output = gf_core::Result<Integration>> + Send + 'static,
     {
         let label = label.into();
-        let undo = if undoable {
-            self.undo_point(&label, false)
-        } else {
-            None
-        };
         let Some(tab) = self.active_tab() else {
             return Task::none();
         };
+        let pending = if undoable { None } else { tab.pending.clone() };
         let repo = tab.repo.clone();
         let id = repo.id();
-        let fut = f(repo);
+        let fut = f(repo.clone());
+        let step_label = label.clone();
         Task::perform(
-            async move { fut.await.map_err(|e| e.to_string()) },
-            move |result| Message::IntegrateDone {
+            async move {
+                let scope = Scope::head();
+                let started = if undoable {
+                    repo.capture(&scope)
+                        .await
+                        .ok()
+                        .map(|before| crate::undo::Pending {
+                            label: step_label,
+                            scope,
+                            before,
+                            mode: HeadMode::Keep,
+                        })
+                } else {
+                    pending
+                };
+                let result = fut.await.map_err(|e| e.to_string());
+                let record = match (&result, started) {
+                    (Ok(Integration::Done), Some(p)) => repo
+                        .capture(&p.scope)
+                        .await
+                        .ok()
+                        .filter(|a| *a != p.before)
+                        .map(|after| {
+                            Box::new(Recorded::Step(Box::new(crate::undo::Step::new(
+                                p.label, p.scope, p.before, after, p.mode,
+                            ))))
+                        }),
+                    (Ok(Integration::Conflicts(_)), Some(p)) => {
+                        Some(Box::new(Recorded::Pending(Box::new(p))))
+                    }
+                    _ => None,
+                };
+                (result, record)
+            },
+            move |(result, record)| Message::IntegrateDone {
                 repo: id,
                 label: label.clone(),
                 result,
-                undo: undo.clone(),
+                record,
             },
         )
     }
@@ -89,20 +99,37 @@ impl App {
         id: RepoId,
         label: String,
         result: Result<Integration, String>,
-        undo: Option<UndoEntry>,
+        record: Option<Box<Recorded>>,
     ) -> Task<Message> {
         let refresh = self.request_refresh(id);
+        let recorded = matches!(record.as_deref(), Some(Recorded::Step(_)));
+        match record.map(|r| *r) {
+            Some(Recorded::Step(step)) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.pending = None;
+                }
+                self.record_step(id, *step);
+            }
+            Some(Recorded::Pending(p)) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.pending = Some(*p);
+                }
+            }
+            None => {}
+        }
         match result {
             Ok(Integration::Done) => {
-                self.flash(NoteKind::Info, format!("✓ {}", truncate(&label, 60)));
-                self.push_undo(id, undo);
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.pending = None;
+                }
+                let hint = if recorded { " · ⌘Z undo" } else { "" };
+                self.flash(NoteKind::Info, format!("✓ {}{hint}", truncate(&label, 60)));
             }
             Ok(Integration::Conflicts(n)) => {
                 // Resolving happens in the working tree view.
                 if let Some(tab) = self.tab_mut(id) {
                     tab.code_view = Role::Local;
                 }
-                self.push_undo(id, undo);
                 self.flash(
                     NoteKind::Error,
                     format!("{label}: {n} conflict(s) — resolve them, then continue (or abort)"),
@@ -216,7 +243,8 @@ impl App {
                         },
                     )
                     .severity(crate::features::dialog::Severity::Change)
-                    .choice("what happens to their changes:", modes, 0),
+                    .choice("what happens to their changes:", modes, 0)
+                    .undoable(),
                 )
             }
             CommitAction::SquashIntoPrevious => {
@@ -474,42 +502,6 @@ impl App {
             }
         }
         self.request_refresh(id)
-    }
-
-    // --------------------------------------------------------------- undo
-
-    pub(super) fn ask_undo(&mut self) -> Task<Message> {
-        let Some(entry) = self.active_tab().and_then(|t| t.undo.last().cloned()) else {
-            self.flash(NoteKind::Info, "nothing to undo");
-            return Task::none();
-        };
-        let branch = self.current_branch();
-        let keeps = if entry.soft {
-            "its changes stay staged so nothing is lost"
-        } else {
-            "files are restored; uncommitted changes are kept (git refuses if they conflict)"
-        };
-        self.confirm(Confirm::change(
-            "undo",
-            "Undo",
-            vec![
-                format!("Undo \"{}\"?", entry.label),
-                format!(
-                    "`{branch}` moves back to {} — {keeps}.",
-                    entry.before.short()
-                ),
-            ],
-            "Undo",
-            Purpose::Undo(entry),
-        ))
-    }
-
-    pub(super) fn run_undo(&mut self, entry: UndoEntry) -> Task<Message> {
-        // The entry is removed when the undo succeeds (see `on_op_done`).
-        let label = format!("undo {}", entry.label);
-        self.op(label, super::OpKind::Undo, move |r| async move {
-            r.undo_to(&entry.before, entry.soft).await
-        })
     }
 
     // ---------------------------------------------------- interactive rebase
@@ -814,9 +806,10 @@ impl App {
     ) -> Task<Message> {
         // The resolver reloads after the refresh this triggers (see
         // `on_loaded`), and closes once the file is no longer conflicted.
-        self.op(
+        self.op_recorded(
             format!("resolve {}", path.display()),
             super::OpKind::Generic,
+            Some(super::ops::Record::new(crate::undo::resolve(path.clone()))),
             move |r| async move {
                 r.resolve_blocks(&path, &segments, &choices)
                     .await

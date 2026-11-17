@@ -97,6 +97,16 @@ impl State {
         self.body = text_editor::Content::with_text(body);
     }
 
+    /// The fields hold exactly `message` (e.g. put back by an undo).
+    pub fn holds(&self, message: &str) -> bool {
+        self.message() == message.trim_end()
+    }
+
+    /// Nothing typed in either field.
+    pub fn is_empty(&self) -> bool {
+        !self.has_message() && self.body_text().trim().is_empty()
+    }
+
     /// Called after a successful commit.
     pub fn committed(&mut self) {
         self.summary.clear();

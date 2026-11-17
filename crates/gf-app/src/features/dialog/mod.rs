@@ -135,6 +135,9 @@ pub struct Dialog<P> {
     dont_ask: bool,
     /// Only one button (no Cancel): the dialog just informs.
     notice: bool,
+    /// The action can be undone with ⌘Z (said instead of "cannot be
+    /// undone" under a deletion).
+    undoable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +191,7 @@ impl<P: Clone> Dialog<P> {
             remember: None,
             dont_ask: false,
             notice: false,
+            undoable: false,
         }
     }
 
@@ -202,6 +206,12 @@ impl<P: Clone> Dialog<P> {
 
     pub fn severity(mut self, severity: Severity) -> Self {
         self.severity = severity;
+        self
+    }
+
+    /// The action can be undone (⌘Z): the footer says so.
+    pub fn undoable(mut self) -> Self {
+        self.undoable = true;
         self
     }
 
@@ -436,7 +446,11 @@ impl<P: Clone> Dialog<P> {
         if danger {
             col = col.push(dim(
                 t,
-                "└ this cannot be undone — click the red button to proceed",
+                if self.undoable {
+                    "└ ⌘Z undoes it afterwards — click the red button to proceed"
+                } else {
+                    "└ this cannot be undone — click the red button to proceed"
+                },
             ));
         }
 

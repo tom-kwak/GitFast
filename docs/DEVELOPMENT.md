@@ -51,12 +51,14 @@ src/
 ├─ feature.rs        Feature trait, Update<M, O>, Cx   ← 피처 계약
 ├─ nav.rs            키보드 패널 이동(Pane, Nav, step/reveal)
 ├─ repo_tab.rs       저장소 탭별 상태(RepoTab, Snapshot)
+├─ undo.rs           undo/redo 기록(Step, History — git dir의 gf/undo.json에 저장)
 ├─ git_actions.rs    git 실행 헬퍼
 ├─ app/              루트 App (라우팅만)
 │  ├─ mod.rs         Message, update, view, 전역 키 → KeyInput
 │  ├─ outputs.rs     피처 Output 처리(on_history, on_sidebar …)
-│  ├─ ops.rs         git 작업 실행·완료 처리
-│  ├─ advanced.rs    merge/rebase/cherry-pick/bisect/undo
+│  ├─ ops.rs         git 작업 실행·완료 처리, undo 기록(Record → op_recorded)
+│  ├─ advanced.rs    merge/rebase/cherry-pick/bisect
+│  ├─ undoing.rs     ⌘Z/⌘⇧Z: 가드 확인 → (확인창) → 복원, undo 목록
 │  ├─ dialogs.rs     공통 확인 다이얼로그(Confirm, Purpose)
 │  └─ focus.rs       키 라우팅(메뉴→다이얼로그→입력창→패널), 패널 테두리
 ├─ features/<name>/mod.rs   피처 하나 = 폴더 하나

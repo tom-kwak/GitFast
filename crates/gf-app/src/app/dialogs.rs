@@ -25,10 +25,12 @@ use gf_git::{PullMode, PushOptions};
 use iced::Task;
 use iced::widget::operation;
 
-use super::outputs::stash_options;
+use super::ops::Record;
+use super::outputs::{names, stash_options};
 use super::{App, Message, OpKind};
 use crate::features::dialog::{Dialog, FIRST_FIELD_ID, Outcome, Severity};
 use crate::features::diff_view::Action;
+use crate::undo;
 
 /// What a dialog is for; carried through the dialog and acted on at submit.
 #[derive(Debug, Clone)]
@@ -124,7 +126,10 @@ pub enum Purpose {
     ForgetRecent(PathBuf),
     SkipOperation,
     AbortOperation,
-    Undo(crate::repo_tab::UndoEntry),
+    /// Undo (or redo) the next step; the check box stashes first.
+    Undo {
+        redo: bool,
+    },
     ResolveBlocks {
         path: PathBuf,
         segments: Vec<gf_git::conflict::Segment>,
@@ -152,6 +157,8 @@ pub struct Confirm {
     label: String,
     checks: Vec<(String, bool)>,
     then: Purpose,
+    /// ⌘Z can undo it.
+    undoable: bool,
 }
 
 impl Confirm {
@@ -170,6 +177,7 @@ impl Confirm {
             label: label.into(),
             checks: Vec::new(),
             then,
+            undoable: false,
         }
     }
 
@@ -190,12 +198,19 @@ impl Confirm {
             label: label.into(),
             checks: Vec::new(),
             then,
+            undoable: false,
         }
     }
 
     /// A change that must always be asked (no "don't ask again").
     pub fn always(mut self) -> Self {
         self.key = None;
+        self
+    }
+
+    /// ⌘Z can undo it: the dialog says so instead of "cannot be undone".
+    pub fn undoable(mut self) -> Self {
+        self.undoable = true;
         self
     }
 
@@ -222,6 +237,9 @@ impl App {
         }
         if let Some(key) = c.key {
             dialog = dialog.remember_as(key);
+        }
+        if c.undoable {
+            dialog = dialog.undoable();
         }
         self.open_dialog(dialog)
     }
@@ -347,7 +365,8 @@ impl App {
                 "Delete",
                 Purpose::DeleteBranch { name: short },
             )
-            .check("force (also delete unmerged commits)", false),
+            .check("force (also delete unmerged commits)", false)
+            .undoable(),
         )
     }
 
@@ -416,9 +435,26 @@ impl App {
         match purpose {
             Purpose::ForgetRecent(path) => self.forget_recent(&path),
             Purpose::Discard { tracked, untracked } => {
-                self.op("discard changes", OpKind::Generic, move |r| async move {
-                    r.discard(&tracked, &untracked).await
-                })
+                let subs = self.submodule_paths(&tracked);
+                let scope = gf_git::Scope {
+                    files: tracked
+                        .iter()
+                        .chain(&untracked)
+                        .filter(|p| !subs.contains(p))
+                        .cloned()
+                        .collect(),
+                    submodules: subs,
+                    ..gf_git::Scope::default()
+                };
+                self.op_recorded(
+                    format!(
+                        "discard {}",
+                        names(&[tracked.clone(), untracked.clone()].concat())
+                    ),
+                    OpKind::Generic,
+                    Some(Record::new(scope)),
+                    move |r| async move { r.discard(&tracked, &untracked).await },
+                )
             }
             Purpose::ApplyPatches {
                 patches,
@@ -428,25 +464,28 @@ impl App {
             Purpose::NewBranch { from } => {
                 let name = value(0);
                 let checkout = check(0);
-                self.op(
+                self.op_recorded(
                     format!("create branch {name}"),
                     OpKind::Generic,
+                    Some(Record::new(undo::branches(&[&name], checkout))),
                     move |r| async move { r.create_branch(&name, from.as_deref(), checkout).await },
                 )
             }
             Purpose::RenameBranch { old } => {
                 let new = value(0);
-                self.op(
+                self.op_recorded(
                     format!("rename {old} → {new}"),
                     OpKind::Generic,
+                    Some(Record::new(undo::branches(&[&old, &new], true))),
                     move |r| async move { r.rename_branch(&old, &new).await },
                 )
             }
             Purpose::DeleteBranch { name } => {
                 let force = check(0);
-                self.op(
+                self.op_recorded(
                     format!("delete branch {name}"),
                     OpKind::Generic,
+                    Some(Record::new(undo::branches(&[&name], false))),
                     move |r| async move { r.delete_branch(&name, force).await },
                 )
             }
@@ -458,29 +497,39 @@ impl App {
             Purpose::NewTag { at } => {
                 let name = value(0);
                 let message = value(1);
-                self.op(
+                self.op_recorded(
                     format!("create tag {name}"),
                     OpKind::Generic,
+                    Some(Record::new(undo::tag(&name))),
                     move |r| async move {
                         let msg = (!message.is_empty()).then_some(message.as_str());
                         r.create_tag(&name, at.as_deref(), msg).await
                     },
                 )
             }
-            Purpose::DeleteTag(name) => self.op(
+            Purpose::DeleteTag(name) => self.op_recorded(
                 format!("delete tag {name}"),
                 OpKind::Generic,
+                Some(Record::new(undo::tag(&name))),
                 move |r| async move { r.delete_tag(&name).await },
             ),
             Purpose::Stash => {
                 let opts = stash_options(value(0), check(0), check(1));
-                self.op("stash changes", OpKind::Generic, move |r| async move {
-                    r.stash_push(&opts).await
-                })
+                let scope = undo::stash(self.changed_paths());
+                self.op_recorded(
+                    "stash changes",
+                    OpKind::Generic,
+                    Some(Record::new(scope)),
+                    move |r| async move { r.stash_push(&opts).await },
+                )
             }
-            Purpose::StashDrop(i) => self.op(
+            Purpose::StashDrop(i) => self.op_recorded(
                 format!("drop stash@{{{i}}}"),
                 OpKind::Generic,
+                Some(Record::new(gf_git::Scope {
+                    stash: true,
+                    ..gf_git::Scope::default()
+                })),
                 move |r| async move { r.stash_drop(i).await },
             ),
             Purpose::Publish { branch } => {
@@ -520,10 +569,11 @@ impl App {
             } else {
                 PullMode::Merge
             }),
-            Purpose::CheckoutDetached(rev) => self.op(
+            Purpose::CheckoutDetached(rev) => self.op_recorded(
                 // By characters: a revision is not always an ASCII id.
                 format!("check out {}", rev.chars().take(7).collect::<String>()),
                 OpKind::Generic,
+                Some(Record::head(gf_git::HeadMode::Keep)),
                 move |r| async move { r.checkout_detached(&rev).await },
             ),
             Purpose::Checkout { name, remote } => {
@@ -532,18 +582,31 @@ impl App {
                 } else {
                     format!("switch to {name}")
                 };
-                self.op(label, OpKind::Generic, move |r| async move {
-                    r.switch_branch(&name, remote).await
-                })
+                // Checking out a remote branch also creates the local one.
+                let local = remote
+                    .then(|| name.split_once('/').map(|(_, b)| b.to_owned()))
+                    .flatten();
+                let scope = match &local {
+                    Some(b) => undo::branches(&[b], true),
+                    None => gf_git::Scope::head(),
+                };
+                self.op_recorded(
+                    label,
+                    OpKind::Generic,
+                    Some(Record::new(scope)),
+                    move |r| async move { r.switch_branch(&name, remote).await },
+                )
             }
-            Purpose::StashApply(i) => self.op(
+            Purpose::StashApply(i) => self.op_recorded(
                 format!("apply stash@{{{i}}}"),
                 OpKind::Generic,
+                Some(Record::new(undo::stash(self.changed_paths())).with_stash_entry(i)),
                 move |r| async move { r.stash_apply(i).await },
             ),
-            Purpose::StashPop(i) => self.op(
+            Purpose::StashPop(i) => self.op_recorded(
                 format!("pop stash@{{{i}}}"),
                 OpKind::Generic,
+                Some(Record::new(undo::stash(self.changed_paths())).with_stash_entry(i)),
                 move |r| async move { r.stash_pop(i).await },
             ),
             Purpose::Pull => self.pull(PullMode::Config),
@@ -590,10 +653,16 @@ impl App {
                     |r| async move { r.skip_operation().await },
                 )
             }
-            Purpose::AbortOperation => self.op("abort", OpKind::Generic, |r| async move {
-                r.abort_operation().await
-            }),
-            Purpose::Undo(entry) => self.run_undo(entry),
+            Purpose::AbortOperation => {
+                // Aborting puts everything back: nothing left to record.
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.pending = None;
+                }
+                self.op("abort", OpKind::Generic, |r| async move {
+                    r.abort_operation().await
+                })
+            }
+            Purpose::Undo { redo } => self.run_undo(redo, check(0)),
             Purpose::Reset { to, mode } => {
                 let label = format!(
                     "reset {} to {}",
@@ -604,10 +673,22 @@ impl App {
                     },
                     to.short()
                 );
-                // Undo moves the branch back; after a soft reset the undone
-                // commits' changes are still staged, so it keeps them.
-                let undo = self.undo_point(&label, mode == gf_git::ResetMode::Soft);
-                self.op_with_undo(label, OpKind::Generic, undo, move |r| async move {
+                // Undo moves the branch back the same way it moved; a hard
+                // reset also saves the uncommitted work it throws away.
+                let record = match mode {
+                    gf_git::ResetMode::Soft => Record::head(gf_git::HeadMode::Soft),
+                    gf_git::ResetMode::Mixed => Record::head(gf_git::HeadMode::Mixed),
+                    gf_git::ResetMode::Hard => {
+                        let paths = self.changed_paths();
+                        Record::new(gf_git::Scope {
+                            head: true,
+                            index: paths.clone(),
+                            files: paths,
+                            ..gf_git::Scope::default()
+                        })
+                    }
+                };
+                self.op_recorded(label, OpKind::Generic, Some(record), move |r| async move {
                     r.reset(&to, mode).await
                 })
             }
@@ -659,9 +740,10 @@ impl App {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.conflict = None;
                 }
-                self.op(
+                self.op_recorded(
                     format!("resolve {}", path.display()),
                     OpKind::Generic,
+                    Some(Record::new(undo::resolve(path.clone()))),
                     move |r| async move { r.take_side(&path, side).await },
                 )
             }
@@ -669,9 +751,10 @@ impl App {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.conflict = None;
                 }
-                self.op(
+                self.op_recorded(
                     format!("mark {} resolved", path.display()),
                     OpKind::Generic,
+                    Some(Record::new(undo::resolve(path.clone()))),
                     move |r| async move { r.stage(&[path]).await },
                 )
             }
@@ -682,11 +765,10 @@ impl App {
                     .filter(|l| !l.trim().is_empty())
                     .unwrap_or("message kept")
                     .to_owned();
-                let undo = self.undo_point(&format!("amend: {summary}"), true);
-                self.op_with_undo(
+                self.op_recorded(
                     format!("amend commit: {summary}"),
                     OpKind::Commit,
-                    undo,
+                    Some(Record::head(gf_git::HeadMode::Soft)),
                     move |r| async move {
                         let opts = gf_git::CommitOptions {
                             amend: true,
