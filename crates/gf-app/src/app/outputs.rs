@@ -324,13 +324,16 @@ impl App {
                 } else {
                     "with the staged changes and this message"
                 };
+                let mut body = vec![format!("Replace commit {head} with a new one {what}?")];
+                if let Some(on) = self.head_on_remote() {
+                    body.push(format!(
+                        "⚠ It is already on {on}: publishing the new one needs a force push."
+                    ));
+                }
                 self.confirm(Confirm::change(
                     "amend",
                     "Amend last commit",
-                    vec![
-                        format!("Replace commit {head} with a new one {what}?"),
-                        "If it was already pushed, the remote will need a force push.".into(),
-                    ],
+                    body,
                     "Amend",
                     Purpose::Amend { message },
                 ))
@@ -480,16 +483,16 @@ impl App {
             sidebar::Output::DeleteTag(name) => self.confirm(
                 Confirm::delete(
                     "Delete tag",
-                    vec![
-                        format!("Delete local tag `{name}`?"),
-                        "Tags already pushed stay on the remote.".into(),
-                    ],
+                    self.delete_tag_body(&name),
                     "Delete",
                     Purpose::DeleteTag(name),
                 )
                 .undoable(),
             ),
             sidebar::Output::PushTag(name) => {
+                if !self.has_remote() {
+                    return self.no_remote("push tag");
+                }
                 let remote = self.default_remote();
                 self.confirm(Confirm::change(
                     "push-tag",
@@ -679,6 +682,9 @@ impl App {
         }
         let branch = b.name.short().to_owned();
         if b.upstream.is_none() {
+            if !self.has_remote() {
+                return self.no_remote("publish");
+            }
             let remote = self.default_remote();
             return self.open_dialog(
                 crate::features::dialog::Dialog::confirm(
@@ -949,6 +955,44 @@ impl App {
     }
 
     /// First configured remote, preferring `origin`.
+    /// Whether the active repository has any remote configured.
+    pub(super) fn has_remote(&self) -> bool {
+        self.active_tab()
+            .and_then(|t| t.snapshot.as_ref())
+            .is_some_and(|s| !s.remotes.is_empty())
+    }
+
+    /// Where HEAD's commit is known to be on a remote (`` `origin/main` ``
+    /// or "a remote"), `None` when it is not, or gf cannot tell. Dialogs say
+    /// a commit was pushed only when this knows it.
+    pub(super) fn head_on_remote(&self) -> Option<String> {
+        let snap = self.active_tab()?.snapshot.as_ref()?;
+        head_on_remote(snap)
+    }
+
+    /// Delete-tag text: a local delete never touches a remote, so it is
+    /// mentioned only when there is one (gf does not know which tags it has).
+    fn delete_tag_body(&self, name: &str) -> Vec<String> {
+        let mut body = vec![format!("Delete local tag `{name}`?")];
+        if self.has_remote() {
+            body.push(format!(
+                "Remotes are not changed: if you pushed it to `{}`, it stays there.",
+                self.default_remote()
+            ));
+        }
+        body
+    }
+
+    /// `what` needs a remote and there is none: say so instead of offering
+    /// a remote that does not exist.
+    fn no_remote(&mut self, what: &str) -> Task<Message> {
+        self.flash(
+            NoteKind::Info,
+            format!("{what}: no remote yet — add one with `remote add origin <url>`"),
+        );
+        Task::none()
+    }
+
     pub(super) fn default_remote(&self) -> String {
         let remotes = self
             .active_tab()
@@ -1167,6 +1211,22 @@ fn blocker_summary(blocked: &[std::path::PathBuf]) -> String {
     s
 }
 
+/// Where HEAD's commit is known to be on a remote: on its upstream when
+/// the branch is not ahead of it, or on some remote when nothing is left to
+/// publish. `None` without remotes, before the first commit, or when HEAD
+/// has commits no remote has.
+fn head_on_remote(snap: &crate::repo_tab::Snapshot) -> Option<String> {
+    let head = &snap.status.head;
+    if snap.remotes.is_empty() || head.oid.is_none() {
+        return None;
+    }
+    match (&head.upstream, snap.unpublished) {
+        (Some(up), _) if head.ahead == 0 => Some(format!("`{up}`")),
+        (None, Some(0)) => Some("a remote".into()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1180,5 +1240,30 @@ mod tests {
             blocker_summary(&many),
             "a.rs, b.rs, c.rs  +2 more  [l] list"
         );
+    }
+
+    #[test]
+    fn a_commit_counts_as_pushed_only_when_known() {
+        use crate::repo_tab::Snapshot;
+        use gf_core::model::Remote;
+        let mut snap = Snapshot::default();
+        snap.status.head.oid = Some("a".repeat(40).parse().expect("oid"));
+        snap.unpublished = Some(0);
+        assert_eq!(head_on_remote(&snap), None, "no remote: never pushed");
+
+        snap.remotes = vec![Remote {
+            name: "origin".into(),
+            fetch_url: "https://example.com/r.git".into(),
+            push_url: None,
+        }];
+        assert_eq!(head_on_remote(&snap).as_deref(), Some("a remote"));
+        snap.unpublished = Some(2);
+        assert_eq!(head_on_remote(&snap), None, "HEAD is not on any remote");
+
+        snap.unpublished = None;
+        snap.status.head.upstream = Some("origin/main".into());
+        assert_eq!(head_on_remote(&snap).as_deref(), Some("`origin/main`"));
+        snap.status.head.ahead = 1;
+        assert_eq!(head_on_remote(&snap), None, "HEAD is ahead of it");
     }
 }
