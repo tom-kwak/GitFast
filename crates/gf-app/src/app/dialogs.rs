@@ -145,6 +145,11 @@ pub enum Purpose {
         choices: Vec<Option<gf_git::conflict::Choice>>,
     },
     TakeSide(PathBuf, gf_git::Side),
+    /// Load the history down to a far commit, then show it.
+    RevealCommit {
+        oid: gf_core::model::Oid,
+        at: super::reveal::Located,
+    },
     MarkResolved(PathBuf),
     AddWorktree,
     RemoveWorktree(PathBuf),
@@ -812,6 +817,7 @@ impl App {
                 segments,
                 choices,
             } => self.run_resolve(path, segments, choices),
+            Purpose::RevealCommit { oid, at } => self.show_located(oid, at),
             Purpose::TakeSide(path, side) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.conflict = None;

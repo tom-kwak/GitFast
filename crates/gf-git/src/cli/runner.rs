@@ -53,6 +53,27 @@ pub struct RunOptions {
     /// Receives parsed progress lines. Commands only report progress when
     /// given `--progress` (git suppresses it when stderr is not a TTY).
     pub progress: Option<mpsc::UnboundedSender<Progress>>,
+    /// Stop as soon as stdout has this line (without its newline): git is
+    /// stopped and the run counts as a success, with stdout read so far
+    /// (the line included). For long listings searched for one entry.
+    pub stop_at: Option<Vec<u8>>,
+}
+
+/// Whether `buf` has `line` as a whole line, looking only at what came
+/// after `from` (minus a line's length, for a line split across reads).
+fn has_line(buf: &[u8], line: &[u8], from: usize) -> bool {
+    let start = from.saturating_sub(line.len() + 1);
+    let mut i = start;
+    while let Some(off) = buf[i..].windows(line.len()).position(|w| w == line) {
+        let at = i + off;
+        let end = at + line.len();
+        let starts = at == 0 || buf[at - 1] == b'\n';
+        if starts && buf.get(end) == Some(&b'\n') {
+            return true;
+        }
+        i = at + 1;
+    }
+    false
 }
 
 /// Spawns git processes. Cheap to clone; clones share the command id counter
@@ -211,12 +232,16 @@ impl GitRunner {
             });
         }
 
+        // Fires when `opts.stop_at` was read (never otherwise).
+        let (found_tx, found_rx) = tokio::sync::oneshot::channel::<()>();
         let stdout_task = {
             let mut pipe = child
                 .stdout
                 .take()
                 .ok_or_else(|| GfError::Other("no stdout".into()))?;
             let echo = cmd.echo_stdout.then(|| self.line_sink(id, cmd, false));
+            let stop_at = opts.stop_at.clone().filter(|l| !l.is_empty());
+            let mut found = Some(found_tx);
             tokio::spawn(async move {
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 16 * 1024];
@@ -226,9 +251,18 @@ impl GitRunner {
                     if n == 0 {
                         break;
                     }
+                    let from = buf.len();
                     buf.extend_from_slice(&chunk[..n]);
                     if let Some(sink) = &echo {
                         lines.feed(&chunk[..n], sink);
+                    }
+                    if let Some(line) = &stop_at {
+                        if has_line(&buf, line, from) {
+                            if let Some(tx) = found.take() {
+                                let _ = tx.send(());
+                            }
+                            break;
+                        }
                     }
                 }
                 if let Some(sink) = &echo {
@@ -276,7 +310,25 @@ impl GitRunner {
         };
 
         let cancel = opts.cancel.unwrap_or_default();
+        let found = async {
+            if found_rx.await.is_err() {
+                // The reader ended without the line: wait for git instead.
+                std::future::pending::<()>().await;
+            }
+        };
+        // `biased`: once the line is read, git may die of the closed pipe
+        // at any moment; the found line must win over that exit.
         let status = tokio::select! {
+            biased;
+            () = found => {
+                let _ = child.kill().await;
+                stderr_task.abort();
+                return Ok(GitOutput {
+                    stdout: join(stdout_task).await?,
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                });
+            }
             status = child.wait() => status?,
             () = cancel.cancelled() => {
                 let _ = child.kill().await;
@@ -399,6 +451,23 @@ impl LineSplitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_is_found_only_whole_and_also_when_split_across_reads() {
+        let buf = b"aaa\nabc\nxabcx\nabcd\n";
+        assert!(has_line(buf, b"abc", 0));
+        assert!(!has_line(b"xabc\nabcd\n", b"abc", 0), "not a whole line");
+        assert!(!has_line(b"abc", b"abc", 0), "no newline yet: may continue");
+        // The line ends in the newest read; `from` is where that read began.
+        let buf = b"0123\nab";
+        let mut more = buf.to_vec();
+        more.extend_from_slice(b"c\n");
+        assert!(has_line(&more, b"abc", buf.len()), "split across reads");
+        assert!(
+            !has_line(b"abc\nzzzz\n", b"abc", 9),
+            "only new data is searched"
+        );
+    }
 
     #[test]
     fn splits_on_cr_and_lf_across_chunks() {

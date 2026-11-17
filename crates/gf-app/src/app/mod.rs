@@ -21,6 +21,7 @@ mod dialogs;
 mod focus;
 mod ops;
 mod outputs;
+mod reveal;
 mod undoing;
 
 use std::hash::{Hash, Hasher};
@@ -240,6 +241,12 @@ pub enum Message {
         from: String,
         changed: usize,
         blocked: Result<Vec<PathBuf>, String>,
+    },
+    /// Where a commit to find is in the main history (see `reveal`).
+    CommitLocated {
+        repo: RepoId,
+        oid: gf_core::model::Oid,
+        result: Result<Option<reveal::Located>, String>,
     },
     /// A drag on the file list / diff divider starts.
     ResizeListStart,
@@ -798,6 +805,9 @@ impl App {
                 untracked,
                 fits,
             } => self.show_discard(repo, tracked, untracked, fits),
+            Message::CommitLocated { repo, oid, result } => {
+                self.on_commit_located(repo, oid, result)
+            }
             Message::SwitchMeasured {
                 repo,
                 name,

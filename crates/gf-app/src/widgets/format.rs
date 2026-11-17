@@ -37,7 +37,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     )
 }
 
-/// Compact age for labels: `now`, `45s`, `5m`, `3h`, `2d`, `6w`.
+/// Compact age for labels: `now`, `45s`, `5m`, `3h`, `2d`, `6w`, `3mo`, `2y`.
 pub fn age(d: Duration) -> String {
     let s = d.as_secs();
     match s {
@@ -46,7 +46,9 @@ pub fn age(d: Duration) -> String {
         60..3_600 => format!("{}m", s / 60),
         3_600..86_400 => format!("{}h", s / 3_600),
         86_400..1_209_600 => format!("{}d", s / 86_400),
-        _ => format!("{}w", s / 604_800),
+        1_209_600..5_184_000 => format!("{}w", s / 604_800),
+        5_184_000..31_536_000 => format!("{}mo", s / 2_592_000),
+        _ => format!("{}y", s / 31_536_000),
     }
 }
 
@@ -189,6 +191,10 @@ mod tests {
         assert_eq!(age(Duration::from_secs(7_200)), "2h");
         assert_eq!(age(Duration::from_secs(3 * 86_400)), "3d");
         assert_eq!(age(Duration::from_secs(30 * 86_400)), "4w");
+        assert_eq!(age(Duration::from_secs(59 * 86_400)), "8w");
+        assert_eq!(age(Duration::from_secs(90 * 86_400)), "3mo");
+        assert_eq!(age(Duration::from_secs(364 * 86_400)), "12mo");
+        assert_eq!(age(Duration::from_secs(800 * 86_400)), "2y");
     }
 
     #[test]

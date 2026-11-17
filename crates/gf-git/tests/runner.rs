@@ -106,6 +106,7 @@ async fn cancellation_kills_the_process() {
             RunOptions {
                 cancel: Some(cancel),
                 progress: None,
+                stop_at: None,
             },
         )
         .await;
@@ -131,6 +132,7 @@ async fn reports_clone_progress() {
             RunOptions {
                 cancel: None,
                 progress: Some(tx),
+                stop_at: None,
             },
         )
         .await
@@ -143,4 +145,52 @@ async fn reports_clone_progress() {
     assert!(!updates.is_empty(), "no progress parsed");
     assert!(updates.iter().any(|p| p.percent == 100));
     assert!(target.path().join("f19.txt").exists());
+}
+
+#[tokio::test]
+async fn stops_reading_at_the_line_asked_for() {
+    let repo = TestRepo::new();
+    let mut ids = Vec::new();
+    for i in 0..300 {
+        repo.write("f.txt", &format!("{i}\n"));
+        ids.push(repo.commit_all(&format!("c{i}")));
+    }
+    // rev-list lists newest first: stop at the 11th.
+    let target = ids[ids.len() - 11].clone();
+    let cmd = GitCommand::new(["rev-list", "HEAD"])
+        .current_dir(repo.path())
+        .read_only();
+    let out = runner(&repo)
+        .run_with(
+            &cmd,
+            RunOptions {
+                stop_at: Some(target.clone().into_bytes()),
+                ..RunOptions::default()
+            },
+        )
+        .await
+        .expect("stopping early is a success");
+    let lines: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+    assert!(lines.len() >= 11, "read up to the line");
+    assert!(lines.contains(&target.as_str()));
+    assert!(out.success());
+
+    // A line that never comes: the whole output, like a normal run.
+    let out = runner(&repo)
+        .run_with(
+            &cmd,
+            RunOptions {
+                stop_at: Some(b"not-an-id".to_vec()),
+                ..RunOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .count(),
+        300
+    );
 }

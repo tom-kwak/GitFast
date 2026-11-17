@@ -62,6 +62,8 @@ pub struct State {
     loading_more: bool,
     /// Lanes and widest summary of the history shown (see `view`).
     widths: Memo<(memo::Id, memo::Id), (usize, usize)>,
+    /// A commit to select and scroll to once a longer history arrives.
+    reveal_pending: Option<Oid>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +194,46 @@ impl State {
         self.cursor = Some(oid.clone());
         self.selected = Some(oid);
         self.marked.clear();
+    }
+
+    /// The selected commit (one), if any.
+    #[cfg(test)]
+    pub fn selected(&self) -> Option<&Oid> {
+        self.selected.as_ref()
+    }
+
+    /// Selects `oid` and scrolls the list to it (centered when it was out
+    /// of view). `None` when the history shown does not have it.
+    pub fn reveal<M: Send + 'static>(
+        &mut self,
+        oid: &Oid,
+        snap: &Snapshot,
+        t: &Tokens,
+    ) -> Option<Task<M>> {
+        let i = self
+            .history(snap)?
+            .commits
+            .iter()
+            .position(|c| &c.id == oid)?;
+        self.select(oid.clone());
+        Some(match reveal_center(self.scroll, i, row_height(t)) {
+            Some(y) => nav::scroll_y(LIST_ID, y),
+            None => Task::none(),
+        })
+    }
+
+    /// Reveals `oid` once the snapshot's history has at least `rows`
+    /// commits: raises the limit to cover them (the app reloads it).
+    pub fn reveal_after_load(&mut self, oid: Oid, rows: usize) {
+        let pages = rows.div_ceil(HISTORY_PAGE).max(1) + 1;
+        self.head_limit = self.head_limit().max(pages * HISTORY_PAGE);
+        self.reveal_pending = Some(oid);
+    }
+
+    /// The commit waiting for a longer history, once that history arrived:
+    /// taken (whether or not it is in it now).
+    pub fn take_pending_reveal(&mut self) -> Option<Oid> {
+        self.reveal_pending.take()
     }
 
     /// Arrow keys move the selection (with Shift: extend a range), `.`
@@ -393,6 +435,15 @@ impl State {
             (Some(_), None) => None,
         }
     }
+}
+
+/// Offset that shows row `index` in the middle of the list, or `None` when
+/// it is already fully in view.
+fn reveal_center(pos: ScrollPos, index: usize, h: f32) -> Option<f32> {
+    nav::reveal_offset(pos, index, h)?;
+    #[allow(clippy::cast_precision_loss)]
+    let top = index as f32 * h;
+    Some((top - (pos.height - h) / 2.0).max(0.0))
 }
 
 /// `limit`, or one page when unset.
@@ -921,6 +972,69 @@ impl Feature for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reveal_selects_the_commit_and_scrolls_only_when_out_of_view() {
+        let t = crate::theme::preset("gf-dark");
+        let h = row_height(&t);
+        let list = commits(50);
+        let mut s = shown(list.clone(), false);
+        let snap = Snapshot::default();
+        // A viewport of ten rows at the top.
+        s.scroll = ScrollPos {
+            offset: 0.0,
+            height: h * 10.0,
+            content: h * 50.0,
+        };
+        let target = list[40].id.clone();
+        assert!(s.reveal::<Message>(&target, &snap, &t).is_some());
+        assert_eq!(s.selected(), Some(&target));
+        assert!(s.marked.is_empty());
+        let missing: Oid = "f".repeat(40).parse().expect("oid");
+        assert!(
+            s.reveal::<Message>(&missing, &snap, &t).is_none(),
+            "not in the list"
+        );
+        assert_eq!(s.selected(), Some(&target), "selection kept when not found");
+    }
+
+    #[test]
+    fn a_revealed_row_lands_in_the_middle_unless_already_visible() {
+        let h = 10.0;
+        let view = |offset| ScrollPos {
+            offset,
+            height: 100.0,
+            content: 10_000.0,
+        };
+        assert_eq!(reveal_center(view(0.0), 3, h), None, "visible: stay");
+        // Row 40 (top 400): centered means 400 - (100 - 10) / 2 = 355.
+        assert_eq!(reveal_center(view(0.0), 40, h), Some(355.0));
+        assert_eq!(reveal_center(view(900.0), 40, h), Some(355.0), "above too");
+        assert_eq!(
+            reveal_center(view(500.0), 2, h),
+            Some(0.0),
+            "never above the top"
+        );
+    }
+
+    #[test]
+    fn revealing_after_a_load_raises_the_limit_past_the_row() {
+        let mut s = State::default();
+        let oid: Oid = "a".repeat(40).parse().expect("oid");
+        s.reveal_after_load(oid.clone(), 1_800);
+        assert!(
+            s.head_limit() >= 1_800 + HISTORY_PAGE / 2,
+            "{}",
+            s.head_limit()
+        );
+        assert_eq!(s.head_limit() % HISTORY_PAGE, 0, "whole pages");
+        // Never lowered by a nearer one.
+        let before = s.head_limit();
+        s.reveal_after_load(oid.clone(), 5);
+        assert_eq!(s.head_limit(), before);
+        assert_eq!(s.take_pending_reveal(), Some(oid));
+        assert_eq!(s.take_pending_reveal(), None, "taken once");
+    }
 
     #[test]
     fn stale_revision_results_are_ignored() {

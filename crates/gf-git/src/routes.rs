@@ -174,6 +174,12 @@ impl Repository {
         std::fs::write(&file, out)?;
         Ok(())
     }
+    /// Row of `oid` in the history `query` lists (0 = newest), found by
+    /// reading commit ids until it comes up; `None` when it is not in that
+    /// history. Limit, skip and filters of `query` are ignored.
+    pub async fn log_position(&self, query: &LogQuery, oid: &Oid) -> Result<Option<usize>> {
+        self.cli.log_position(query, oid.as_str()).await
+    }
     /// Checks out a commit without a branch (detached HEAD).
     pub async fn checkout_detached(&self, rev: &str) -> Result<()> {
         BranchOps::checkout_detached(&self.cli, rev).await

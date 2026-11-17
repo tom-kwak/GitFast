@@ -877,17 +877,15 @@ impl App {
         else {
             return Task::none();
         };
-        if let Some(tab) = self.active_tab_mut() {
-            tab.blame = None;
-        }
         match out {
-            Output::Close => Task::none(),
-            Output::ShowCommit(oid) => {
+            Output::Close => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.history.select(oid.clone());
+                    tab.blame = None;
                 }
-                self.show_diff(crate::features::diff_view::DiffSource::Commit(oid))
+                Task::none()
             }
+            // Blame stays open: the history finds the commit beside it.
+            Output::ShowCommit(oid) => self.reveal_commit(oid),
         }
     }
 

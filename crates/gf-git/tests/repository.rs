@@ -394,3 +394,76 @@ async fn diff_of_merge_commit_uses_first_parent() {
         Some(Path::new("src/feature.rs"))
     );
 }
+
+// ------------------------------------------------------- log position
+
+/// Branches, a merge, a branch merged nowhere and a tag on it.
+fn tangled_repo() -> TestRepo {
+    let repo = common::repo_with_merge();
+    repo.git(&["switch", "-q", "-c", "side", "HEAD~2"]);
+    for i in 0..5 {
+        repo.write("side.txt", &format!("{i}\n"));
+        repo.commit_all(&format!("S{i}: side work"));
+    }
+    repo.git(&["tag", "side-tag"]);
+    repo.git(&["switch", "-q", "main"]);
+    for i in 0..3 {
+        repo.write("main.txt", &format!("{i}\n"));
+        repo.commit_all(&format!("N{i}: more main"));
+    }
+    repo
+}
+
+#[tokio::test]
+async fn log_position_matches_the_row_in_the_history() {
+    use gf_git::{LogOrder, LogQuery};
+    let repo = tangled_repo();
+    let r = open(&repo).await;
+    for (all_refs, revisions) in [
+        (true, vec![]),
+        (false, vec![]),
+        (false, vec!["side".to_owned()]),
+        (false, vec!["feature".to_owned()]),
+    ] {
+        let query = LogQuery {
+            revisions,
+            all_refs,
+            order: LogOrder::Topo,
+            ..LogQuery::default()
+        };
+        let rows = r.log(&query).await.unwrap();
+        assert!(!rows.is_empty());
+        for (i, c) in rows.iter().enumerate() {
+            assert_eq!(
+                r.log_position(&query, &c.id).await.unwrap(),
+                Some(i),
+                "{} in {query:?}",
+                c.summary
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn log_position_is_none_outside_the_history() {
+    use gf_git::{LogOrder, LogQuery};
+    let repo = tangled_repo();
+    let r = open(&repo).await;
+    let side: gf_core::model::Oid = repo.git(&["rev-parse", "side"]).trim().parse().unwrap();
+    let head_only = LogQuery {
+        order: LogOrder::Topo,
+        ..LogQuery::default()
+    };
+    assert_eq!(
+        r.log_position(&head_only, &side).await.unwrap(),
+        None,
+        "not reachable from HEAD"
+    );
+    let all = LogQuery {
+        all_refs: true,
+        ..head_only.clone()
+    };
+    assert!(r.log_position(&all, &side).await.unwrap().is_some());
+    let unknown: gf_core::model::Oid = "1".repeat(40).parse().unwrap();
+    assert_eq!(r.log_position(&all, &unknown).await.unwrap(), None);
+}

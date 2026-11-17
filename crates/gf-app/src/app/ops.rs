@@ -138,6 +138,7 @@ impl App {
             tab.history.snapshot_loaded();
         }
         let mut tasks = Vec::new();
+        let mut reveal = false;
         match result {
             Ok(snap) => {
                 if !tab.sidebar.retain_existing(&snap) && tab.history.revision().is_some() {
@@ -183,6 +184,8 @@ impl App {
                 if snap.state.is_clean() {
                     tab.pending = None;
                 }
+                // A commit waiting for a longer history (`reveal`).
+                reveal = snap.loaded.history;
                 // The branch shown instead of HEAD only moves with refs.
                 let refs = snap.loaded.refs;
                 let status = snap.loaded.status;
@@ -213,6 +216,9 @@ impl App {
             if !tab.queued.is_empty() {
                 tasks.push(load_snapshot(tab, Parts::default()));
             }
+        }
+        if reveal {
+            tasks.push(self.reveal_pending(id));
         }
         Task::batch(tasks)
     }
@@ -324,6 +330,7 @@ impl App {
                     RunOptions {
                         cancel: Some(token),
                         progress: Some(ptx),
+                        stop_at: None,
                     },
                 );
                 tokio::pin!(fut);
