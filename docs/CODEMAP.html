@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gf 코드 지도</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=IBM+Plex+Sans+KR:wght@400;600&display=swap">
+<style>
+/* Layout: a clickable mock of the gf window on the left, the code behind the picked region on the right; below, the layers, the flow of one action, and a file index. */
+:root {
+  --bg: #f2f5f4; --panel: #ffffff; --fg: #18211d; --dim: #5d6c65; --line: #cdd8d2;
+  --accent: #0d7a68; --accent-soft: #d8efe9; --warn: #a35f00; --blue: #2c5fc4; --blue-soft: #e1e9fa;
+  --red: #b43a3a;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --sans: "IBM Plex Sans KR", -apple-system, "Apple SD Gothic Neo", sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e1311; --panel: #151c19; --fg: #d5e1db; --dim: #7f9189; --line: #2a3530;
+  --accent: #3fc6a6; --accent-soft: #163a31; --warn: #e2a640; --blue: #77a2ff; --blue-soft: #1a2643;
+  --red: #ec7b7b; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0e1311; --panel: #151c19; --fg: #d5e1db; --dim: #7f9189; --line: #2a3530;
+  --accent: #3fc6a6; --accent-soft: #163a31; --warn: #e2a640; --blue: #77a2ff; --blue-soft: #1a2643;
+  --red: #ec7b7b; color-scheme: dark }
+* { box-sizing: border-box }
+[hidden] { display: none !important }
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 15px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 64px }
+.wrap { max-width: 1240px; margin: 0 auto; display: grid; gap: 44px }
+h1, h2 { font-family: var(--mono); font-weight: 600; text-wrap: balance; margin: 0 }
+h1 { font-size: 26px } h1 span { color: var(--accent) }
+h2 { font-size: 18px; display: flex; gap: 10px; align-items: baseline }
+h2 small { font-family: var(--sans); font-weight: 400; font-size: 14px; color: var(--dim) }
+p { margin: 0; max-width: 70ch }
+.lede { color: var(--dim); margin-top: 6px }
+code, .mono { font-family: var(--mono); font-size: 0.88em }
+section { display: grid; gap: 14px }
+
+/* ---------- screen map ---------- */
+.map { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; align-items: start }
+@media (max-width: 900px) { .map { grid-template-columns: minmax(0, 1fr) } }
+.modes { display: flex; gap: 6px; flex-wrap: wrap; font-family: var(--mono); font-size: 13px }
+.modes button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); background: var(--panel); color: var(--dim); cursor: pointer }
+.modes button[aria-pressed="true"] { color: var(--fg); border-color: var(--accent); background: var(--accent-soft) }
+.win { border: 1px solid var(--line); background: var(--panel); font-family: var(--mono); font-size: 12px; display: grid; gap: 3px; padding: 4px; overflow-x: auto }
+.r { border: 1px dashed var(--line); padding: 6px 8px; cursor: pointer; color: var(--dim); background: transparent; text-align: left; font: inherit; min-width: 0; display: block; width: 100% }
+.r b { color: var(--fg); font-weight: 600 }
+.r:hover { border-color: var(--accent); color: var(--fg) }
+.r:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px }
+.r.on { border: 1px solid var(--accent); background: var(--accent-soft); color: var(--fg) }
+.row { display: grid; gap: 3px }
+.body { display: grid; grid-template-columns: 9.5em minmax(0, 1fr); gap: 3px; min-height: 300px }
+.main { display: grid; gap: 3px; grid-template-rows: auto auto 1fr 1.4fr }
+.split { display: grid; grid-template-columns: 9em 10px minmax(0, 1fr); gap: 3px }
+.split .r.sp { padding: 0; writing-mode: vertical-rl; text-align: center; font-size: 10px }
+.left { display: grid; gap: 3px; grid-template-rows: 1.4fr 1fr }
+.mainL { display: grid; gap: 3px; grid-template-rows: auto auto 1fr }
+.tall { min-height: 90px }
+.overlays { display: flex; flex-wrap: wrap; gap: 6px; font-family: var(--mono); font-size: 12px }
+.overlays .r { width: auto; display: inline-block }
+.hint { font-size: 13px; color: var(--dim) }
+
+.detail { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; display: grid; gap: 12px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px) }
+@media (max-width: 900px) { .detail { position: static } }
+.detail .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent) }
+.detail h3 { margin: 0; font-size: 20px; font-family: var(--sans) }
+.detail h3 .alias { font-family: var(--mono); font-size: 13px; color: var(--dim); font-weight: 400; margin-left: 6px }
+.kv { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 6px 12px; font-size: 14px }
+.kv dt { color: var(--dim) }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere }
+.files { display: grid; gap: 3px }
+.f { font-family: var(--mono); font-size: 12.5px; display: flex; gap: 8px; justify-content: space-between }
+.f .n { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap }
+.ask { border-left: 3px solid var(--accent); padding: 6px 10px; background: var(--accent-soft); font-size: 14px }
+.ask + .ask { margin-top: -6px }
+
+/* ---------- layers ---------- */
+.layers { display: grid; gap: 8px }
+.layer { display: grid; grid-template-columns: 11em minmax(0, 1fr); gap: 14px; border: 1px solid var(--line); background: var(--panel); padding: 12px 14px }
+@media (max-width: 640px) { .layer { grid-template-columns: minmax(0, 1fr) } }
+.layer .nm { font-family: var(--mono); font-weight: 600 }
+.layer .nm small { display: block; font-family: var(--sans); font-weight: 400; color: var(--dim); font-size: 13px }
+.chips { display: flex; flex-wrap: wrap; gap: 6px }
+.chip { font-family: var(--mono); font-size: 12px; border: 1px solid var(--line); padding: 2px 7px; white-space: nowrap }
+.chip.k { border-color: var(--accent); color: var(--accent) }
+.arrow { text-align: center; font-family: var(--mono); color: var(--dim); font-size: 13px }
+
+/* ---------- flow ---------- */
+.flow { display: grid; gap: 0; counter-reset: s }
+.step { display: grid; grid-template-columns: 2.2em minmax(0, 1fr) minmax(0, 15em); gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); align-items: baseline }
+.step:last-child { border-bottom: 1px solid var(--line) }
+.step::before { counter-increment: s; content: counter(s); font-family: var(--mono); color: var(--accent); font-weight: 600 }
+.step .where { font-family: var(--mono); font-size: 12.5px; color: var(--dim); overflow-wrap: anywhere }
+@media (max-width: 640px) { .step { grid-template-columns: 2.2em minmax(0, 1fr) } .step .where { grid-column: 2 } }
+
+/* ---------- index ---------- */
+.tbl { overflow-x: auto; border: 1px solid var(--line); background: var(--panel) }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top }
+th { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); font-weight: 600 }
+td:first-child { font-family: var(--mono); font-size: 12.5px; white-space: nowrap }
+td.n { font-variant-numeric: tabular-nums; color: var(--dim); text-align: right; font-family: var(--mono); font-size: 12px }
+tr.grp td { font-family: var(--sans); font-weight: 600; background: var(--bg); color: var(--accent); font-size: 12.5px }
+.template { font-family: var(--mono); font-size: 13px; background: var(--panel); border: 1px solid var(--line); padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere }
+.template em { color: var(--accent); font-style: normal }
+@media (prefers-reduced-motion: no-preference) { .r { transition: background .12s, border-color .12s } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1><span>gf</span> 코드 지도</h1>
+    <p class="lede">화면의 어느 부분이 어느 파일에 있는지 보여줍니다. 아래 창 그림에서 영역을 누르면 담당 코드와 요청 예시가 나옵니다. 요청할 때 <b>굵은 이름</b>을 그대로 쓰면 바로 찾아갑니다.</p>
+  </header>
+
+  <section>
+    <h2>1 · 화면 → 코드 <small>영역을 눌러 보세요</small></h2>
+    <div class="modes" role="group" aria-label="메인 영역 모드">
+      <button id="mode-history" aria-pressed="true" data-mode="history">◆ HISTORY 모드</button>
+      <button id="mode-local" aria-pressed="false" data-mode="local">● WORKING TREE 모드</button>
+      <span class="hint" style="align-self:center">⌘E로 바꾸는 메인 영역 두 가지</span>
+    </div>
+    <div class="map">
+      <div style="display:grid;gap:10px;min-width:0">
+        <div class="win" id="win">
+          <button class="r" data-id="tabs"><b>탭 바</b> &nbsp;[gf] [api] [web] … <span style="float:right">▾ 3 tabs &nbsp;+ open</span></button>
+          <button class="r" data-id="toolbar"><b>툴바</b> &nbsp;fetch · pull · push · branch · stash · merge … &nbsp;⟳</button>
+          <div class="body">
+            <button class="r tall" data-id="sidebar"><b>사이드바 REFS</b><br>▸ LOCAL<br>▸ REMOTES<br>▸ TAGS<br>▸ STASHES<br>▸ SUBMODULES<br>▸ WORKTREES</button>
+            <div class="main" id="main-history">
+              <button class="r" data-id="banner"><b>작업 배너</b> &nbsp;MERGING · 2 conflicts · continue / abort</button>
+              <button class="r" data-id="modetabs"><b>모드 탭</b> &nbsp;[◆ HISTORY] [● WORKING TREE · 3 changed]</button>
+              <button class="r" data-id="history"><b>히스토리</b><br>● │ 커밋 그래프 · 브랜치 배지 · 메시지</button>
+              <div class="split">
+                <button class="r" data-id="files"><b>커밋 파일</b><br>M a.rs<br>A b.rs</button>
+                <button class="r sp" data-id="splitter">↔</button>
+                <button class="r" data-id="commitdiff"><b>커밋 diff</b><br>선택한 커밋 파일의 변경 (읽기 전용)<br><span class="hint">blame 열면 이 자리에 blame</span></button>
+              </div>
+            </div>
+            <div class="mainL" id="main-local" hidden>
+              <button class="r" data-id="banner"><b>작업 배너</b> &nbsp;MERGING · 2 conflicts · continue / abort</button>
+              <button class="r" data-id="modetabs"><b>모드 탭</b> &nbsp;[◆ HISTORY] [● WORKING TREE · 3 changed]</button>
+              <div class="split">
+                <div class="left">
+                  <button class="r" data-id="changes"><b>변경 목록</b><br>CONFLICTS<br>STAGED<br>UNSTAGED<br>UNTRACKED</button>
+                  <button class="r" data-id="commitbox"><b>커밋 박스</b><br>summary / body<br>[commit] amend</button>
+                </div>
+                <button class="r sp" data-id="splitter">↔</button>
+                <button class="r" data-id="localdiff"><b>로컬 diff</b><br>hunk·줄 단위 stage / unstage / discard<br><span class="hint">충돌 파일이면 이 자리에 충돌 해결기</span></button>
+              </div>
+            </div>
+          </div>
+          <button class="r" data-id="log"><b>명령 로그</b> &nbsp;$ git status … ✓ 0.02s</button>
+          <button class="r" data-id="prompt"><b>프롬프트</b> &nbsp;gf ❯ <span class="hint">git 명령 또는 :help</span></button>
+          <button class="r" data-id="status"><b>상태줄</b> &nbsp;main ↑1 · ✓ flash <span style="float:right">[↶ undo ⌘Z] [↷] [▾]</span></button>
+        </div>
+        <div>
+          <div class="hint" style="margin-bottom:6px">창 위에 뜨는 것들</div>
+          <div class="overlays">
+            <button class="r" data-id="dialog"><b>확인창</b></button>
+            <button class="r" data-id="menu"><b>우클릭 메뉴</b></button>
+            <button class="r" data-id="picker"><b>저장소 열기</b> ⌘O</button>
+            <button class="r" data-id="switcher"><b>탭 전환기</b> ⌃⇥</button>
+            <button class="r" data-id="tablist"><b>탭 목록</b> ▾</button>
+            <button class="r" data-id="undolist"><b>되돌리기 기록</b></button>
+            <button class="r" data-id="rebase"><b>rebase 편집기</b></button>
+            <button class="r" data-id="welcome"><b>시작 화면</b></button>
+          </div>
+        </div>
+      </div>
+      <aside class="detail" id="detail" aria-live="polite"></aside>
+    </div>
+  </section>
+
+  <section>
+    <h2>2 · 층 구조 <small>위에서 아래로만 부릅니다</small></h2>
+    <p>화면 코드는 git을 직접 실행하지 않습니다. 버튼을 누르면 <code>gf-app</code>이 <code>gf-git</code>의 <code>Repository</code> 메서드를 부르고, 그 안에서 git CLI(또는 읽기 일부는 gix)를 실행합니다.</p>
+    <div class="layers">
+      <div class="layer"><div class="nm">gf-app<small>화면과 상호작용</small></div>
+        <div class="chips"><span class="chip k">features/*</span><span class="chip k">app/*</span><span class="chip">repo_tab.rs</span><span class="chip">undo.rs</span><span class="chip">nav.rs</span><span class="chip">widgets/*</span><span class="chip">theme/*</span><span class="chip">highlight/*</span></div></div>
+      <div class="arrow">↓ Repository::x().await</div>
+      <div class="layer"><div class="nm">gf-git<small>git 실행과 결과 해석</small></div>
+        <div class="chips"><span class="chip k">routes.rs</span><span class="chip">backend/mod.rs (trait)</span><span class="chip k">ops/*.rs</span><span class="chip">cli/runner.rs</span><span class="chip">cli/parse/*</span><span class="chip">gix_*.rs</span><span class="chip">graph.rs</span><span class="chip">patch.rs</span><span class="chip">conflict.rs</span></div></div>
+      <div class="arrow">↓ 공통 타입</div>
+      <div class="layer"><div class="nm">gf-core<small>모델 · 오류 · 이벤트</small></div>
+        <div class="chips"><span class="chip">model/ (Commit, Branch, StatusEntry, FileDiff…)</span><span class="chip">error.rs</span><span class="chip">event.rs (EventBus)</span></div></div>
+      <div class="layer"><div class="nm">옆에서 돕는 크레이트<small>&nbsp;</small></div>
+        <div class="chips"><span class="chip">gf-config — 설정·경로 (settings.toml)</span><span class="chip">gf-watch — 파일 감시 → 새로고침</span><span class="chip">gf-test-support — 테스트용 임시 저장소</span><span class="chip">gf-commands · gf-flow · gf-hosting* · gf-auth — 비어 있음</span></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3 · 버튼 하나가 지나가는 길 <small>예: 변경 목록에서 파일 discard</small></h2>
+    <div class="flow">
+      <div class="step"><div>변경 목록이 클릭을 받아 자기 상태를 바꾸고, 밖에서 할 일은 <code>Output</code>으로 App에 넘깁니다.</div><div class="where">features/changes/mod.rs<br>Message → Output::Discard</div></div>
+      <div class="step"><div>App이 메시지를 해당 피처로 보내고, 돌아온 Output을 처리 함수로 넘깁니다.</div><div class="where">app/mod.rs update()<br>→ app/outputs.rs on_changes</div></div>
+      <div class="step"><div>지우거나 바꾸는 작업이면 공통 확인창을 띄웁니다. 확인하면 <code>Purpose</code>에 맞는 작업을 실행합니다.</div><div class="where">app/dialogs.rs<br>Confirm::delete / ::change, Purpose</div></div>
+      <div class="step"><div>작업을 비동기로 실행합니다. 이때 되돌리기용으로 전후 상태를 기록합니다.</div><div class="where">app/ops.rs op_recorded<br>(merge·rebase는 advanced.rs)</div></div>
+      <div class="step"><div>어떤 git 구현을 쓸지 고르고, git 명령을 실행합니다.</div><div class="where">gf-git routes.rs → ops/index.rs<br>→ cli/runner.rs</div></div>
+      <div class="step"><div>완료 메시지로 알림(flash)과 명령 로그를 남기고, 되돌리기 기록에 넣고, 저장소를 다시 읽습니다.</div><div class="where">Message::OpDone → on_op_done<br>→ undoing.rs record_step → request_refresh</div></div>
+      <div class="step"><div>새 Snapshot으로 모든 패널이 다시 그려집니다. 바깥에서 파일이 바뀌면 감시기가 바뀐 곳에 맞는 부분만 다시 읽게 합니다(아래 4).</div><div class="where">ops.rs on_loaded<br>repo_tab.rs Snapshot</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>4 · 새로고침은 필요한 부분만 <small>무엇이 바뀌면 무엇을 다시 읽나</small></h2>
+    <p>저장소 데이터(<code>Snapshot</code>)는 다섯 부분(<code>Parts</code>)으로 나뉩니다. 바뀐 곳에 맞는 부분만 git에서 다시 읽고, 나머지는 이전 Snapshot의 것을 그대로 씁니다. 히스토리는 HEAD·브랜치·태그·stash가 같으면(<code>history_key</code>) 다시 만들지 않습니다.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>무엇이 바뀌었나</th><th>다시 읽는 부분</th><th>어디서 정하나</th></tr></thead>
+      <tbody>
+        <tr><td>작업 트리 파일 저장</td><td>status (gitignore된 경로는 무시: target/ 빌드는 새로고침 없음)</td><td>mod.rs → ops.rs <code>worktree_parts</code>, gf-watch <code>drop_ignored</code></td></tr>
+        <tr><td>.git/index (stage 등)</td><td>status</td><td>app/mod.rs 감시 이벤트 처리 (<code>Parts::STATUS</code>)</td></tr>
+        <tr><td>refs (커밋·브랜치·태그)</td><td>status · refs · modules (+ 키가 바뀌면 history)</td><td>app/mod.rs, repo_tab.rs <code>history_key</code></td></tr>
+        <tr><td>.git/config</td><td>status · config</td><td>app/mod.rs</td></tr>
+        <tr><td>모든 브랜치 토글, 더 불러오기</td><td>history만</td><td>outputs.rs → <code>request_parts(id, Parts::HISTORY)</code></td></tr>
+        <tr><td>⌘R, 새 탭</td><td>전부 (<code>RELOAD</code>)</td><td>ops.rs <code>refresh_active</code></td></tr>
+        <tr><td>gf가 실행한 작업이 끝남</td><td>전부 (<code>ALL</code>)</td><td>ops.rs <code>request_refresh</code></td></tr>
+      </tbody>
+    </table></div>
+    <p class="hint">읽는 중에 또 요청이 오면 겹쳐 실행하지 않고 <code>RepoTab.queued</code>에 모아 두었다가 끝난 뒤 한 번 더 읽습니다. 읽은 부분과 걸린 시간은 로그(<code>RUST_LOG=gf=debug</code>)의 <code>snapshot loaded</code> 줄에 남습니다.</p>
+    <p>화면을 그릴 때마다 긴 목록 전체를 훑는 계산(가장 긴 줄 너비, diff 행 목록)은 <code>widgets/memo.rs</code>의 <code>Memo</code>에 담아 데이터가 바뀔 때만 다시 합니다. 결과가 틀리면 안 되는 값은 <code>Same</code>(Arc 동일성) 키, 너비처럼 모양만 영향받는 값은 <code>Id</code>(주소·길이) 키를 씁니다.</p>
+  </section>
+
+  <section>
+    <h2>5 · 화면 밖에서 공통으로 쓰는 코드</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>파일</th><th>무엇을 하나</th><th>이럴 때 언급하세요</th><th style="text-align:right">줄</th></tr></thead>
+      <tbody id="index"></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>6 · 요청 이렇게 쓰면 빠릅니다</h2>
+    <div class="template"><em>어디</em>: 로컬 diff의 hunk 헤더 버튼
+<em>무엇</em>: discard 버튼을 stage 버튼 왼쪽으로, 빨간색은 유지
+<em>왜</em>: 실수로 discard를 누름</div>
+    <p class="hint">위치만 정확하면 파일 이름은 몰라도 됩니다. 이 페이지의 영역 이름(<b>변경 목록</b>, <b>커밋 박스</b>, <b>상태줄</b> …)이나 화면에 보이는 글자를 그대로 적어 주세요. 키 동작은 "키 처리", 색은 "테마", 확인창 문구는 "확인창"이라고 하면 됩니다.</p>
+  </section>
+</div>
+
+<script>
+const R = {
+  tabs: { name: "탭 바", alias: "tabs", what: "열린 저장소마다 탭 하나. 많아지면 ▾ 드롭다운, 맨 오른쪽 + open.",
+    files: [["features/tabs/mod.rs",102],["features/tab_list/mod.rs (▾ 드롭다운)",409],["theme/style.rs (탭·툴바 색)",267]],
+    state: "App.tabs, App.active", msg: "Message::Tabs", keys: "⌘1‥9 선택, ⌘⇧[ ⌘⇧] 이동, ⌘W 닫기, ⌘P 탭 목록",
+    ask: ["탭 바에서 닫기 × 버튼을 hover일 때만 보여줘","탭 이름이 길면 가운데를 … 로 줄여줘"] },
+  toolbar: { name: "툴바", alias: "toolbar", what: "주요 git 명령만 둡니다(fetch·pull·push·branch·stash·merge…). 새로고침은 맨 오른쪽.",
+    files: [["features/toolbar/mod.rs",263],["app/ops.rs (pull·push 실행)",796],["gf-git ops/sync.rs",77]],
+    state: "App.sync (진행 중인 동기화)", msg: "Message::Toolbar", keys: "⌘R 새로고침",
+    ask: ["툴바에 pull 옵션(rebase/merge) 선택을 추가해줘","push 중 진행률을 툴바 버튼에 표시해줘"] },
+  sidebar: { name: "사이드바 (REFS)", alias: "sidebar", what: "로컬·원격 브랜치, 태그, stash, 서브모듈, 워크트리 트리. 우클릭 메뉴로 checkout·삭제·이름 변경.",
+    files: [["features/sidebar/mod.rs",1549],["app/outputs.rs on_sidebar",901],["app/dialogs.rs (삭제·이름 변경 확인)",892],["gf-git ops/branch.rs · tag.rs · stash.rs",0]],
+    state: "RepoTab.sidebar", msg: "Message::Sidebar · Pane::Sidebar", keys: "⌘B 열고 닫기, ↑↓ 이동",
+    ask: ["사이드바 브랜치를 최근 커밋 순으로 정렬하는 옵션","REMOTES 섹션에 원격별 fetch 버튼"] },
+  banner: { name: "작업 배너", alias: "op_banner", what: "merge·rebase·cherry-pick·bisect가 진행 중일 때만 위에 뜹니다. continue / abort.",
+    files: [["features/op_banner/mod.rs",143],["app/advanced.rs",1091],["gf-git ops/state.rs · integrate.rs",0]],
+    state: "Snapshot.state, RepoTab.bisect", msg: "Message::Banner", keys: "",
+    ask: ["rebase 배너에 남은 커밋 수를 보여줘"] },
+  modetabs: { name: "모드 탭", alias: "main_area", what: "메인 영역을 HISTORY와 WORKING TREE 사이에서 바꿉니다.",
+    files: [["app/mod.rs main_area()",2018]],
+    state: "RepoTab.code_view (Role::Commit / Local)", msg: "Message::CodeView", keys: "⌘E 전환, ⌘[ ⌘]",
+    ask: ["WORKING TREE 탭에 staged 개수도 따로 보여줘"] },
+  history: { name: "히스토리", alias: "history", what: "커밋 그래프와 브랜치·태그 배지. 1000개씩 끝까지 스크롤하면 더 불러옵니다.",
+    files: [["features/history/mod.rs",1185],["widgets/graph_canvas.rs",133],["gf-git graph.rs (레인 배치)",424],["gf-git ops/log.rs",175]],
+    state: "RepoTab.history, Snapshot.history", msg: "Message::History · Pane::History", keys: "↑↓ 이동, ⇧↑↓ 범위 선택, . 메뉴",
+    ask: ["히스토리에서 작성자별 필터","그래프 선 색을 브랜치마다 고정"] },
+  files: { name: "커밋 파일", alias: "diff_view files_view", what: "HISTORY에서 고른 커밋(또는 stash)이 바꾼 파일 목록.",
+    files: [["features/diff_view/mod.rs files_view()",1155]],
+    state: "RepoTab.commit_diff", msg: "Message::CommitDiff · Pane::Files", keys: "",
+    ask: ["커밋 파일 목록을 폴더 트리로 보기"] },
+  commitdiff: { name: "커밋 diff", alias: "diff_view (Commit)", what: "커밋에서 바뀐 내용, 읽기 전용. blame을 열면 이 자리를 blame이 대신합니다.",
+    files: [["features/diff_view/mod.rs",1155],["features/blame_view/mod.rs",227],["highlight/ (구문 강조)",576]],
+    state: "RepoTab.commit_diff, RepoTab.blame", msg: "Message::CommitDiff · Message::Blame · Pane::Diff", keys: "",
+    ask: ["커밋 diff에 side-by-side 보기 추가"] },
+  splitter: { name: "구분선", alias: "splitter", what: "파일 목록과 diff 사이 너비 조절. 더블클릭하면 원래대로.",
+    files: [["widgets/splitter.rs",212],["app/mod.rs list_split()",2018]],
+    state: "settings.appearance.list_cols", msg: "Message::ResizeList*", keys: "",
+    ask: ["구분선을 위아래(히스토리 / diff 사이)에도 추가"] },
+  changes: { name: "변경 목록", alias: "changes", what: "git status처럼 충돌·staged·unstaged·untracked로 묶은 파일 목록.",
+    files: [["features/changes/mod.rs",585],["app/outputs.rs on_changes",901],["gf-git ops/index.rs (stage·discard)",111]],
+    state: "RepoTab.changes, Snapshot.status", msg: "Message::Changes · Pane::Changes", keys: "Space stage, d discard",
+    ask: ["변경 목록에서 여러 파일 shift 선택","untracked를 기본으로 접어줘"] },
+  commitbox: { name: "커밋 박스", alias: "commit_box", what: "요약(50/72 안내)과 본문, commit·amend.",
+    files: [["features/commit_box/mod.rs",388],["app/outputs.rs on_commit",901],["gf-git ops/commit.rs",49]],
+    state: "RepoTab.commit", msg: "Message::Commit", keys: "⌘⏎ 커밋",
+    ask: ["커밋 박스에 최근 메시지 불러오기 드롭다운"] },
+  localdiff: { name: "로컬 diff", alias: "diff_view (Local)", what: "고른 파일의 변경. hunk·줄 단위로 stage / unstage / discard. 충돌 파일이면 충돌 해결기가 대신합니다.",
+    files: [["features/diff_view/mod.rs",1155],["features/conflict_view/mod.rs",370],["gf-git patch.rs (부분 패치)",196],["gf-git conflict.rs",251]],
+    state: "RepoTab.local_diff, RepoTab.conflict", msg: "Message::LocalDiff · Message::Conflict · Pane::Diff", keys: "n / p 다음·이전 hunk",
+    ask: ["로컬 diff에서 줄 선택을 드래그로","충돌 해결기에 '둘 다 사용' 버튼"] },
+  log: { name: "명령 로그", alias: "command_log", what: "gf가 실행한 모든 git 명령과 출력, 종료 코드. 설정에서 숨길 수 있습니다.",
+    files: [["features/command_log/mod.rs",407]],
+    state: "App.log", msg: "Message::Log", keys: "⌘J 열고 닫기",
+    ask: ["명령 로그에서 실패한 것만 보기"] },
+  prompt: { name: "프롬프트", alias: "prompt", what: "gf ❯ 입력줄. git 명령을 그대로 실행하거나 :undo, :help 같은 내장 명령.",
+    files: [["features/prompt/mod.rs",253],["features/prompt/parse.rs (: 명령 해석)",448],["features/prompt/hangul.rs (한글 입력)",212],["app/outputs.rs (명령 실행)",901]],
+    state: "App.prompt", msg: "Message::Prompt", keys: "/ 또는 ⌘L 로 포커스, ⇥ 자동완성",
+    ask: ["프롬프트에 :blame <파일> 명령 추가","브랜치 이름도 자동완성"] },
+  status: { name: "상태줄", alias: "status_line", what: "브랜치·upstream 상태, 진행 스피너, 알림(flash), 되돌리기 버튼.",
+    files: [["features/status_line/mod.rs",158],["app/undoing.rs (⌘Z 동작)",329]],
+    state: "App.flash, RepoTab.undo", msg: "Message::Undo · Redo · UndoList", keys: "⌘Z, ⌘⇧Z",
+    ask: ["상태줄 알림이 사라지는 시간을 늘려줘"] },
+  dialog: { name: "확인창", alias: "dialog", what: "모든 삭제·변경이 거치는 공통 창. 빨강(delete)은 클릭해야 진행, 노랑(change)은 '다시 묻지 않기' 가능.",
+    files: [["features/dialog/mod.rs (모양)",595],["app/dialogs.rs (Confirm, Purpose = 확인 뒤 할 일)",892]],
+    state: "App.dialog", msg: "Message::Dialog", keys: "⏎ 확인, esc 취소",
+    ask: ["브랜치 삭제 확인창에 '원격도 삭제' 체크박스"] },
+  menu: { name: "우클릭 메뉴", alias: "context_menu", what: "우클릭이나 actions ▾로 여는 공통 메뉴. 각 피처가 항목을 만들어 넘깁니다.",
+    files: [["features/context_menu/mod.rs",396],["항목은 각 피처 파일 (sidebar, history, changes…)",0]],
+    state: "App.menu", msg: "Message::Menu", keys: "↑↓ ⏎, 단축 글자",
+    ask: ["히스토리 우클릭 메뉴에 'copy SHA' 추가"] },
+  picker: { name: "저장소 열기", alias: "repo_picker", what: "⌘O 또는 + open. 경로 입력, 최근 저장소, 폴더 탐색.",
+    files: [["features/repo_picker/mod.rs",1156]],
+    state: "App.picker", msg: "Message::Picker", keys: "⌘O",
+    ask: ["저장소 열기 창에 즐겨찾기 고정"] },
+  switcher: { name: "탭 전환기", alias: "tab_switcher", what: "최근 사용 순 탭 목록, ⌃⇥ 누르는 동안 표시.",
+    files: [["features/tab_switcher/mod.rs",164]],
+    state: "App.switcher", msg: "Message::Switcher", keys: "⌃⇥",
+    ask: [] },
+  tablist: { name: "탭 목록", alias: "tab_list", what: "탭 바 ▾ N tabs 드롭다운. 검색과 닫기.",
+    files: [["features/tab_list/mod.rs",409]],
+    state: "App.tab_list", msg: "Message::TabList", keys: "⌘P",
+    ask: [] },
+  undolist: { name: "되돌리기 기록", alias: "undo_list", what: "상태줄 ▾ 또는 :undo list. 고른 지점까지 여러 단계 되돌립니다.",
+    files: [["features/undo_list/mod.rs",235],["app/undoing.rs",329],["undo.rs (기록 저장)",341],["gf-git ops/undo.rs (상태 저장·복원)",924]],
+    state: "App.undo_list, RepoTab.undo", msg: "Message::UndoList", keys: "↑↓ ⏎ esc",
+    ask: [] },
+  rebase: { name: "rebase 편집기", alias: "rebase_editor", what: "interactive rebase: 순서 바꾸기, squash, reword, drop.",
+    files: [["features/rebase_editor/mod.rs",468],["gf-git ops/rebase_interactive.rs",373]],
+    state: "App.rebase_editor", msg: "Message::RebaseEditor", keys: "",
+    ask: [] },
+  welcome: { name: "시작 화면", alias: "welcome", what: "탭이 하나도 없을 때. 여는 방법, 최근 저장소, 끌어 놓기.",
+    files: [["features/welcome/mod.rs",92]],
+    state: "settings.repos.recent", msg: "Message::Welcome", keys: "",
+    ask: [] },
+};
+
+const INDEX = [
+  ["gf-app / app (화면 뒤 조정자)"],
+  ["app/mod.rs","Message 전체 목록, update 분기, 화면 배치(view), 전역 단축키, 감시 이벤트 → 새로고침 부분","새 단축키, 화면 배치 변경",2018],
+  ["app/outputs.rs","각 피처의 요청(Output) 처리, :help 문구","버튼을 눌렀을 때 하는 일 변경",901],
+  ["app/ops.rs","git 작업 실행과 완료 처리, undo 기록, Snapshot 읽기 요청(request_parts·load_snapshot·on_loaded)","작업 후 알림·새로고침",796],
+  ["app/advanced.rs","merge · rebase · cherry-pick · revert · bisect","합치기 계열 작업",1091],
+  ["app/dialogs.rs","확인창 정의(Confirm)와 확인 뒤 실행할 일(Purpose)","확인창 문구·체크박스",892],
+  ["app/focus.rs","키 라우팅 순서, 패널 포커스 테두리","키가 엉뚱한 곳으로 갈 때",411],
+  ["app/undoing.rs","⌘Z / ⌘⇧Z 흐름, 되돌리기 기록 목록","되돌리기 동작",329],
+  ["gf-app / 공용"],
+  ["repo_tab.rs","저장소 탭 하나의 상태(RepoTab)와 읽어 온 데이터(Snapshot), 부분 새로고침(Parts, history_key)","탭 전환 시 유지할 것, 무엇을 다시 읽을지",648],
+  ["undo.rs","되돌리기 기록 저장·불러오기 (.git/gf/undo.json, 저장은 백그라운드)","",341],
+  ["nav.rs","패널 목록(Pane)과 키보드 이동 규칙","",206],
+  ["feature.rs","피처의 공통 틀(Feature, Update, Cx)","",66],
+  ["git_actions.rs","git 실행 보조 함수","",622],
+  ["widgets/","패널·버튼·가상 목록·구분선 등 재사용 위젯","모든 패널에 공통으로 적용할 모양",1480],
+  ["widgets/memo.rs","화면마다 다시 하지 않을 계산 캐시(Memo, Same, Id)","스크롤·키 입력이 느릴 때",96],
+  ["theme/","색·글꼴 토큰, 스타일 함수, 프리셋","색·간격·글꼴",519],
+  ["highlight/","diff 구문 강조","",576],
+  ["gf-watch"],
+  ["gf-watch/src/lib.rs","파일 감시 → CoreEvent, gitignore된 경로 버리기(check-ignore)","빌드 중 새로고침이 잦을 때",348],
+  ["gf-git"],
+  ["routes.rs","Repository의 공개 메서드. 명령별로 CLI·gix 중 선택","",486],
+  ["backend/mod.rs","영역별 git 인터페이스(trait)","",443],
+  ["ops/*.rs","영역별 git 구현: branch, commit, index, stash, sync, integrate, undo …","특정 git 명령의 옵션·동작",3118],
+  ["cli/","git 프로세스 실행과 출력 해석","",1891],
+  ["gix_*.rs","gix로 빠르게 읽기(status, refs, fetch)","속도 문제",1808],
+  ["graph.rs · patch.rs · conflict.rs","커밋 그래프 배치 · 부분 패치 · 충돌 표시 해석","",871],
+];
+
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+let current = "localdiff";
+
+function show(id) {
+  const d = R[id]; if (!d) return;
+  current = id;
+  document.querySelectorAll(".r").forEach(b => b.classList.toggle("on", b.dataset.id === id));
+  const files = d.files.map(([f, n]) =>
+    `<div class="f"><span>${esc(f)}</span><span class="n">${n ? n + "줄" : ""}</span></div>`).join("");
+  const asks = d.ask.length
+    ? `<div class="eyebrow">이렇게 요청</div>` + d.ask.map(a => `<div class="ask">${esc(a)}</div>`).join("")
+    : "";
+  $("#detail").innerHTML = `
+    <div class="eyebrow">선택한 영역</div>
+    <h3>${esc(d.name)}<span class="alias">${esc(d.alias)}</span></h3>
+    <p>${esc(d.what)}</p>
+    <div class="eyebrow">코드 (crates/gf-app/src 기준)</div>
+    <div class="files">${files}</div>
+    <dl class="kv">
+      <dt>상태</dt><dd class="mono">${esc(d.state)}</dd>
+      <dt>메시지</dt><dd class="mono">${esc(d.msg)}</dd>
+      ${d.keys ? `<dt>키</dt><dd>${esc(d.keys)}</dd>` : ""}
+    </dl>${asks}`;
+}
+
+function setMode(m) {
+  document.querySelectorAll(".modes button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
+  $("#main-history").hidden = m !== "history";
+  $("#main-local").hidden = m !== "local";
+  try { localStorage.setItem("gfmap-mode", m) } catch (e) {}
+  show(current);
+}
+
+document.addEventListener("click", e => {
+  const r = e.target.closest(".r"); if (r) { show(r.dataset.id); return }
+  const m = e.target.closest(".modes button"); if (m) setMode(m.dataset.mode);
+});
+
+$("#index").innerHTML = INDEX.map(r => r.length === 1
+  ? `<tr class="grp"><td colspan="4">${esc(r[0])}</td></tr>`
+  : `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td><td class="n">${r[3]}</td></tr>`).join("");
+
+let mode = "local";
+try { mode = localStorage.getItem("gfmap-mode") || "local" } catch (e) {}
+setMode(mode);
+</script>
