@@ -18,6 +18,50 @@ pub enum Message {
     Bisect(gf_git::Verdict),
     BisectReset,
     ShowConflicts,
+    /// Pop the stash of changes gf left on this branch.
+    PopLeft(usize),
+    /// Hide that offer (the stash stays in the list).
+    DismissLeft(gf_core::model::Oid),
+}
+
+/// Offer to bring back the changes gf stashed when the user switched away
+/// from this branch ("stash, then switch").
+pub fn left_changes<'a>(t: &'a Tokens, stash: &gf_core::model::StashEntry) -> Element<'a, Message> {
+    let bar = row![
+        colored(t, "≡", t.accent()),
+        widgets::mono(
+            t,
+            format!(
+                "changes you left here are in stash@{{{}}} ({})",
+                stash.index,
+                crate::undo::age(u64::try_from(stash.time.seconds).unwrap_or(0))
+            )
+        ),
+        space().width(Length::Fill),
+        widgets::text_button(t, "pop", None, Some(Message::PopLeft(stash.index))),
+        widgets::text_button(
+            t,
+            "dismiss",
+            None,
+            Some(Message::DismissLeft(stash.id.clone()))
+        ),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    container(bar)
+        .padding(Padding::from([3, 8]))
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            text_color: Some(t.fg),
+            background: Some(Background::Color(style::tint(t.bg, t.accent(), 0.12))),
+            border: Border {
+                color: t.accent(),
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 pub fn view<'a>(

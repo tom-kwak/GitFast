@@ -126,6 +126,7 @@ gf/
 5. **안전장치 (공통 확인 다이얼로그)** — 삭제·변경 작업은 반드시 `App::confirm(Confirm::…)`로 확인한다 (`gf-app/src/app/dialogs.rs`). 새 기능도 같은 헬퍼를 재사용
    - `Confirm::delete` (빨강 ⚠): 데이터를 지우는 작업(discard, 브랜치·태그·stash 삭제, force push). Enter로 실행 불가, 클릭 필수, 건너뛰기 불가
    - `Confirm::change` (노랑 ?): 작업 트리·HEAD·원격을 바꾸는 작업(checkout, stash apply/pop, pull, push, 태그 push, amend). 무엇이 바뀌는지와 되돌릴 수 있는지 명시, "다시 묻지 않기" 선택 가능(`:confirm reset`으로 복원)
+   - 잃을 것이 없을 때는 `Confirm::change(..).skip_if(..)`로 묻지 않고 바로 실행(여전히 `App::confirm`을 거침). 예: 로컬 브랜치 checkout은 HEAD가 브랜치에 있고, merge·rebase·bisect 중이 아니고, 변경(ignored 제외)이 없으면 바로 전환(⌘Z로 복귀). 원격 브랜치 checkout은 로컬 브랜치를 새로 만들므로 항상 확인
    - 확인 없이 실행: stage/unstage(hunk·줄 포함)처럼 자주 쓰고 즉시 되돌릴 수 있는 작업, 사용자가 명령줄에 직접 입력한 git 명령
 6. **포커스·상태 유지** — 탭 전환·새로고침 후에도 선택, 스크롤, 접힘 상태 유지. 앱 재시작 시 열린 탭 복원
 7. **큰 클릭 영역과 hover 표시** — 행 전체 클릭 가능, hover 시 배경 강조. 밀도 높은 레이아웃이어도 오클릭이 없도록

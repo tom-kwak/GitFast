@@ -1,4 +1,6 @@
-//! Branch management.
+//! Branch management, and what switching branch does with changes.
+
+use std::path::PathBuf;
 
 use gf_core::{GfError, Result};
 
@@ -64,5 +66,88 @@ impl BranchOps for CliBackend {
         self.exec(self.command(["push", remote, "--delete", branch]))
             .await?;
         Ok(())
+    }
+}
+
+// ------------------------------------------------- switching with changes
+
+impl CliBackend {
+    /// Paths that differ between `HEAD` and `target`.
+    pub(crate) async fn paths_differing_from_head(&self, target: &str) -> Result<Vec<PathBuf>> {
+        let out = self
+            .read(self.command([
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                "HEAD",
+                target,
+                "--",
+            ]))
+            .await?;
+        Ok(out
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| PathBuf::from(String::from_utf8_lossy(p).into_owned()))
+            .collect())
+    }
+}
+
+/// The changed paths `git switch` would refuse over: a changed file (or an
+/// untracked one, or a folder of them) is in the way when `target` has a
+/// different version of it. git does not merge on switch, so this is
+/// exactly its rule, not a guess.
+pub fn switch_blockers(changed: &[PathBuf], differing: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = differing
+        .iter()
+        .filter(|d| changed.iter().any(|c| d.starts_with(c)))
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Message of the stash gf makes when changes are left on `branch`.
+pub fn left_on(branch: &str) -> String {
+    format!("{LEFT_ON}{branch}")
+}
+
+/// The branch a stash left by gf belongs to (from its message, which git
+/// shows as `On main: gf: left on main`).
+pub fn left_on_branch(message: &str) -> Option<&str> {
+    message
+        .find(LEFT_ON)
+        .map(|i| &message[i + LEFT_ON.len()..])
+        .filter(|b| !b.is_empty())
+}
+
+const LEFT_ON: &str = "gf: left on ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn blockers_are_changed_paths_the_target_has_differently() {
+        let changed = [p("a.rs"), p("notes.txt"), p("build/")];
+        let differing = [p("a.rs"), p("b.rs"), p("build/x.o"), p("buildx")];
+        assert_eq!(
+            switch_blockers(&changed, &differing),
+            [p("a.rs"), p("build/x.o")]
+        );
+        assert!(switch_blockers(&[], &differing).is_empty());
+    }
+
+    #[test]
+    fn left_stashes_name_their_branch() {
+        assert_eq!(left_on("feat/x"), "gf: left on feat/x");
+        assert_eq!(left_on_branch("On main: gf: left on main"), Some("main"));
+        assert_eq!(left_on_branch("On main: wip"), None);
+        assert_eq!(left_on_branch("gf: left on "), None);
     }
 }

@@ -113,8 +113,59 @@ impl std::fmt::Debug for Area {
 #[derive(Debug, Clone)]
 pub struct Choice {
     pub label: String,
-    pub options: Vec<(String, bool)>,
+    pub options: Vec<Opt>,
     pub selected: usize,
+}
+
+/// How a line under an option reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// A git command the option runs (`$ git switch dev`).
+    Command,
+    Hint,
+    /// Why the option cannot run.
+    Problem,
+}
+
+/// One option of a [`Choice`].
+#[derive(Debug, Clone)]
+pub struct Opt {
+    pub label: String,
+    pub dangerous: bool,
+    /// Pressing it picks the option and runs it (a dangerous one is only
+    /// picked: it still needs a click).
+    pub key: Option<char>,
+    /// Shown under the label: the commands it runs, hints, problems.
+    pub lines: Vec<(String, Tone)>,
+    /// Cannot be picked (the lines say why).
+    pub disabled: bool,
+}
+
+impl Opt {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            dangerous: false,
+            key: None,
+            lines: Vec::new(),
+            disabled: false,
+        }
+    }
+
+    pub fn key(mut self, key: char) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    pub fn line(mut self, text: impl Into<String>, tone: Tone) -> Self {
+        self.lines.push((text.into(), tone));
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -262,11 +313,23 @@ impl<P: Clone> Dialog<P> {
 
     /// Radio options; `(label, dangerous)` each, `selected` first.
     pub fn choice(
-        mut self,
+        self,
         label: impl Into<String>,
         options: Vec<(String, bool)>,
         selected: usize,
     ) -> Self {
+        let options = options
+            .into_iter()
+            .map(|(label, dangerous)| Opt {
+                dangerous,
+                ..Opt::new(label)
+            })
+            .collect();
+        self.options(label, options, selected)
+    }
+
+    /// Options with keys and lines (see [`Opt`]); `selected` first.
+    pub fn options(mut self, label: impl Into<String>, options: Vec<Opt>, selected: usize) -> Self {
         self.choice = Some(Choice {
             label: label.into(),
             options,
@@ -275,13 +338,32 @@ impl<P: Clone> Dialog<P> {
         self
     }
 
+    /// A letter key: picks the option it belongs to and runs it (only
+    /// picks a dangerous one). `None` when no enabled option has the key.
+    pub fn key(&mut self, key: char) -> Option<Outcome<P>> {
+        let i = self.choice.as_ref().and_then(|c| {
+            c.options
+                .iter()
+                .position(|o| o.key == Some(key) && !o.disabled)
+        })?;
+        let _ = self.update(Message::Choose(i));
+        self.enter()
+    }
+
+    /// Whether `key` belongs to an option.
+    pub fn has_key(&self, key: char) -> bool {
+        self.choice
+            .as_ref()
+            .is_some_and(|c| c.options.iter().any(|o| o.key == Some(key)))
+    }
+
     /// The severity in effect: a dangerous option makes it a deletion.
     fn effective_severity(&self) -> Severity {
         let dangerous = self
             .choice
             .as_ref()
             .and_then(|c| c.options.get(c.selected))
-            .is_some_and(|(_, d)| *d);
+            .is_some_and(|o| o.dangerous);
         if dangerous {
             Severity::Delete
         } else {
@@ -316,7 +398,8 @@ impl<P: Clone> Dialog<P> {
                 None
             }
             Message::Choose(i) => {
-                if let Some(c) = self.choice.as_mut().filter(|c| i < c.options.len()) {
+                let enabled = |c: &&mut Choice| c.options.get(i).is_some_and(|o| !o.disabled);
+                if let Some(c) = self.choice.as_mut().filter(enabled) {
                     c.selected = i;
                 }
                 None
@@ -394,14 +477,24 @@ impl<P: Clone> Dialog<P> {
         }
         if let Some(choice) = &self.choice {
             col = col.push(dim(t, format!("│ {}", choice.label)));
-            for (i, (label, dangerous)) in choice.options.iter().enumerate() {
+            for (i, o) in choice.options.iter().enumerate() {
                 let picked = i == choice.selected;
-                let text = format!("{} {label}", if picked { "(•)" } else { "( )" });
-                col = col.push(if *dangerous && picked {
-                    widgets::danger_button(t, &text, Some(Message::Choose(i)))
+                let key = o.key.map(|k| format!("[{k}] ")).unwrap_or_default();
+                let text = format!("{} {key}{}", if picked { "(•)" } else { "( )" }, o.label);
+                let pick = (!o.disabled).then_some(Message::Choose(i));
+                col = col.push(if o.dangerous && picked {
+                    widgets::danger_button(t, &text, pick)
                 } else {
-                    widgets::text_button(t, &text, None, Some(Message::Choose(i)))
+                    widgets::text_button(t, &text, None, pick)
                 });
+                for (line, tone) in &o.lines {
+                    let color = match tone {
+                        Tone::Command if !o.disabled => t.fg,
+                        Tone::Command | Tone::Hint => t.dim,
+                        Tone::Problem => t.error(),
+                    };
+                    col = col.push(colored(t, format!("│       {line}"), color));
+                }
             }
         }
         for (i, c) in self.checks.iter().enumerate() {
@@ -550,6 +643,34 @@ mod tests {
             Some(1),
             "out of range ignored"
         );
+    }
+
+    #[test]
+    fn option_keys_pick_and_run_but_skip_disabled_options() {
+        let opts = || {
+            vec![
+                Opt::new("stash, then switch").key('s'),
+                Opt::new("carry changes over").key('c').disabled(true),
+            ]
+        };
+        let mut d = Dialog::confirm("Switch", vec![], "Switch", ())
+            .severity(Severity::Change)
+            .options("", opts(), 0);
+        assert!(d.has_key('c') && !d.has_key('x'));
+        assert!(d.key('c').is_none(), "disabled");
+        let _ = d.update(Message::Choose(1));
+        assert_eq!(
+            d.choice.as_ref().map(|c| c.selected),
+            Some(0),
+            "not by click either"
+        );
+        assert!(matches!(
+            d.key('s'),
+            Some(Outcome::Submitted {
+                choice: Some(0),
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub use cli::parse::numstat::LineCounts;
 pub use cli::{GitCommand, GitOutput, GitRunner, Progress, RunOptions};
 pub use ops::bisect::{BisectProgress, Verdict};
 pub use ops::blame::BlameLine;
+pub use ops::branch::{left_on, left_on_branch, switch_blockers};
 pub use ops::commit::CommitOptions;
 pub use ops::conflict::Side;
 pub use ops::diff::{DiffOptions, DiffTarget};

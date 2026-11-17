@@ -578,7 +578,8 @@ impl UndoOps for CliBackend {
 
         if scope.head {
             if let Some(target) = &to.head {
-                self.restore_head(now.head.as_ref(), target, mode).await?;
+                self.restore_head(now.head.as_ref(), target, mode, &scope.files)
+                    .await?;
             }
         }
 
@@ -711,7 +712,42 @@ impl UndoOps for CliBackend {
 }
 
 impl CliBackend {
-    async fn restore_head(&self, now: Option<&Head>, to: &Head, mode: HeadMode) -> Result<()> {
+    /// Moves HEAD to `to`. `owned` are the files this step restores right
+    /// after: changes in them may be overwritten by a switch (redoing
+    /// "stash, then switch" finds them back while still on the old branch).
+    /// Whether there are changes and all of them are in `owned` (files or
+    /// folders): then nothing outside the step would be lost by forcing.
+    async fn only_changed_in(&self, owned: &[PathBuf]) -> Result<bool> {
+        if owned.is_empty() {
+            return Ok(false);
+        }
+        let out = self
+            .read(self.command([
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=all",
+                "--no-renames",
+            ]))
+            .await?;
+        let changed: Vec<PathBuf> = out
+            .split(|b| *b == 0)
+            .filter(|e| e.len() > 3)
+            .map(|e| PathBuf::from(String::from_utf8_lossy(&e[3..]).into_owned()))
+            .collect();
+        Ok(!changed.is_empty()
+            && changed
+                .iter()
+                .all(|c| owned.iter().any(|o| c.starts_with(o))))
+    }
+
+    async fn restore_head(
+        &self,
+        now: Option<&Head>,
+        to: &Head,
+        mode: HeadMode,
+        owned: &[PathBuf],
+    ) -> Result<()> {
         if now == Some(to) {
             return Ok(());
         }
@@ -751,7 +787,12 @@ impl CliBackend {
                 .await?;
             }
             (Some(b), oid) => {
-                self.exec(self.command(["switch", "-q"]).arg(b)).await?;
+                if self.only_changed_in(owned).await? {
+                    self.exec(self.command(["switch", "-q", "--discard-changes"]).arg(b))
+                        .await?;
+                } else {
+                    self.exec(self.command(["switch", "-q"]).arg(b)).await?;
+                }
                 if let Some(oid) = oid {
                     let at = self.try_read(self.command(["rev-parse", "HEAD"])).await;
                     if at.as_deref() != Some(oid.as_str()) {

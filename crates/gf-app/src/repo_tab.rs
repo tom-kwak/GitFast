@@ -448,6 +448,29 @@ impl Snapshot {
         self.branches.iter().find(|b| b.is_head)
     }
 
+    /// Switching branch has nothing to ask about: HEAD is on a branch (no
+    /// commits could be left behind), no merge, rebase or bisect is in
+    /// progress, and nothing is changed (ignored files aside). Even if the
+    /// status is a moment old, `git switch` refuses to overwrite a change.
+    pub fn can_switch_quietly(&self) -> bool {
+        self.status.head.branch.is_some()
+            && self.state.is_clean()
+            && self
+                .status
+                .entries
+                .iter()
+                .all(|e| matches!(e, StatusEntry::Ignored { .. }))
+    }
+
+    /// The newest stash gf made when changes were left on the current
+    /// branch ("stash, then switch"), to offer them back.
+    pub fn left_here(&self) -> Option<&StashEntry> {
+        let branch = self.status.head.branch.as_deref()?;
+        self.stashes
+            .iter()
+            .find(|s| gf_git::left_on_branch(&s.message) == Some(branch))
+    }
+
     pub fn staged_count(&self) -> usize {
         self.status.entries.iter().filter(|e| e.is_staged()).count()
     }
@@ -525,6 +548,8 @@ pub struct RepoTab {
     pub undo_queue: Option<crate::undo::Queue>,
     /// Latest bisect step result.
     pub bisect: Option<BisectProgress>,
+    /// Stashes of left changes whose "bring back" offer was dismissed.
+    pub left_dismissed: Vec<Oid>,
 }
 
 impl RepoTab {
@@ -551,6 +576,7 @@ impl RepoTab {
             undo_busy: false,
             undo_queue: None,
             bisect: None,
+            left_dismissed: Vec::new(),
             commit: commit_box::State::default(),
         }
     }
@@ -589,6 +615,37 @@ impl RepoTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switching_quietly_needs_a_branch_no_operation_and_no_changes() {
+        let clean = Snapshot {
+            status: StatusReport {
+                head: gf_core::model::HeadInfo {
+                    branch: Some("main".into()),
+                    ..Default::default()
+                },
+                entries: vec![StatusEntry::Ignored {
+                    path: "target".into(),
+                }],
+            },
+            ..Snapshot::default()
+        };
+        assert!(clean.can_switch_quietly(), "ignored files don't count");
+
+        let mut s = clean.clone();
+        s.status.head.branch = None;
+        assert!(!s.can_switch_quietly(), "detached HEAD");
+
+        let mut s = clean.clone();
+        s.state = gf_git::RepoState::Bisecting;
+        assert!(!s.can_switch_quietly(), "operation in progress");
+
+        let mut s = clean;
+        s.status.entries.push(StatusEntry::Untracked {
+            path: "notes.txt".into(),
+        });
+        assert!(!s.can_switch_quietly(), "a change");
+    }
 
     #[test]
     fn counts_lines_of_new_files() {

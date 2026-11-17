@@ -230,6 +230,17 @@ pub enum Message {
         untracked: Vec<std::path::PathBuf>,
         fits: bool,
     },
+    /// What would keep the changes from coming along to branch `name`:
+    /// the switch dialog can be shown.
+    SwitchMeasured {
+        repo: RepoId,
+        name: String,
+        remote: bool,
+        /// Branch the changes are on.
+        from: String,
+        changed: usize,
+        blocked: Result<Vec<PathBuf>, String>,
+    },
     /// A drag on the file list / diff divider starts.
     ResizeListStart,
     /// The divider is being dragged: pixels from where the drag started.
@@ -432,6 +443,15 @@ impl App {
     // ------------------------------------------------------------- update
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        // Anything may have written to the command log (notes, git output).
+        match self.log.follow() {
+            follow if follow.units() == 0 => task,
+            follow => Task::batch([task, follow.map(Message::Log)]),
+        }
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tabs(m) => match m {
                 tabs::Message::Select(i) => self.select_tab(i),
@@ -490,8 +510,8 @@ impl App {
                 }
             }
             Message::Log(m) => {
-                let _ = self.log.update(m);
-                Task::none()
+                let Update { task, .. } = self.log.update(m);
+                task.map(Message::Log)
             }
             Message::Sidebar(m) => {
                 if matches!(m, sidebar::Message::Select(_) | sidebar::Message::Toggle(_)) {
@@ -778,6 +798,14 @@ impl App {
                 untracked,
                 fits,
             } => self.show_discard(repo, tracked, untracked, fits),
+            Message::SwitchMeasured {
+                repo,
+                name,
+                remote,
+                from,
+                changed,
+                blocked,
+            } => self.show_switch(repo, name, remote, from, changed, blocked),
             Message::Banner(m) => self.on_banner(m),
             Message::Conflict(m) => self.on_conflict_message(m),
             Message::Blame(m) => self.on_blame_message(m),
@@ -1274,22 +1302,30 @@ impl App {
                         Message::Key(Shortcut::ToggleRefs),
                     )
                 };
-                let main: Element<'_, Message> = match cx.snapshot.and_then(|s| {
-                    crate::features::op_banner::view(
+                use crate::features::op_banner;
+                let op = cx.snapshot.and_then(|s| {
+                    op_banner::view(t, &s.state, s.conflict_count(), tab.bisect.as_ref())
+                });
+                // Changes gf stashed when the user left this branch.
+                let left_here = cx
+                    .snapshot
+                    .filter(|s| s.state.is_clean())
+                    .and_then(|s| s.left_here())
+                    .filter(|e| !tab.left_dismissed.contains(&e.id))
+                    .map(|e| op_banner::left_changes(t, e));
+                let mut main = column![].spacing(4);
+                for banner in op.into_iter().chain(left_here) {
+                    main = main.push(banner.map(Message::Banner));
+                }
+                let main: Element<'_, Message> = main
+                    .push(main_area(
                         t,
-                        &s.state,
-                        s.conflict_count(),
-                        tab.bisect.as_ref(),
-                    )
-                }) {
-                    Some(banner) => column![
-                        banner.map(Message::Banner),
-                        main_area(t, tab, cx, active, self.settings.appearance.list_cols)
-                    ]
-                    .spacing(4)
-                    .into(),
-                    None => main_area(t, tab, cx, active, self.settings.appearance.list_cols),
-                };
+                        tab,
+                        cx,
+                        active,
+                        self.settings.appearance.list_cols,
+                    ))
+                    .into();
                 row![left, main].spacing(4).height(Length::Fill).into()
             }
         };

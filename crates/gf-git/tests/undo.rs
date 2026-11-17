@@ -506,3 +506,61 @@ async fn submodule_discard_is_undone() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), first);
 }
+
+#[tokio::test]
+async fn leaving_changes_behind_stashes_switches_and_undoes_in_one_step() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.commit_all("init");
+    repo.git(&["switch", "-q", "-c", "dev"]);
+    repo.write("a.txt", "dev\n");
+    repo.commit_all("dev");
+    repo.git(&["switch", "-q", "main"]);
+    repo.write("a.txt", "work\n");
+    repo.write("new.txt", "untracked\n");
+    let r = open(&repo).await;
+
+    // a.txt is different on dev: a plain switch would be refused.
+    let changed = [p("a.txt"), p("new.txt")];
+    assert_eq!(
+        r.switch_blockers("dev", &changed).await.unwrap(),
+        [p("a.txt")]
+    );
+    assert!(r.switch_branch("dev", false).await.is_err());
+
+    let mut scope = Scope {
+        head: true,
+        stash: true,
+        index: changed.to_vec(),
+        files: changed.to_vec(),
+        ..Scope::default()
+    };
+    scope.expand_files(repo.path()).unwrap();
+    let rec = recorded(&r, &scope, || r.stash_and_switch("main", "dev", false)).await;
+    assert_eq!(repo.git(&["symbolic-ref", "--short", "HEAD"]), "dev");
+    assert_eq!(read(&repo, "a.txt").as_deref(), Some("dev\n"));
+    assert!(read(&repo, "new.txt").is_none(), "untracked file left too");
+    assert!(repo.git(&["stash", "list"]).contains("gf: left on main"));
+
+    undo_redo(&r, &scope, &rec, HeadMode::Keep).await;
+    assert_eq!(repo.git(&["symbolic-ref", "--short", "HEAD"]), "main");
+    assert_eq!(read(&repo, "a.txt").as_deref(), Some("work\n"));
+    assert_eq!(read(&repo, "new.txt").as_deref(), Some("untracked\n"));
+    assert!(repo.git(&["stash", "list"]).is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_switch_puts_the_left_changes_back() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.commit_all("init");
+    repo.write("a.txt", "work\n");
+    let r = open(&repo).await;
+    assert!(
+        r.stash_and_switch("main", "no-such-branch", false)
+            .await
+            .is_err()
+    );
+    assert_eq!(read(&repo, "a.txt").as_deref(), Some("work\n"));
+    assert!(repo.git(&["stash", "list"]).is_empty());
+}
