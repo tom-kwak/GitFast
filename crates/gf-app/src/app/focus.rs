@@ -30,6 +30,11 @@ pub struct KeyInput {
 }
 
 /// Shortcuts that only make sense inside the prompt.
+/// Keys a focused text field handles itself (copy, select all).
+fn text_edit(s: Shortcut) -> bool {
+    matches!(s, Shortcut::Copy | Shortcut::SelectAll)
+}
+
 fn prompt_only(s: Shortcut) -> bool {
     matches!(
         s,
@@ -138,7 +143,8 @@ impl App {
             }
         }
         if self.dialog.is_some() || self.rebase_editor.is_some() {
-            return run(self, k.shortcut);
+            // ⌘C / ⌘A belong to the dialog's text, not the diff behind it.
+            return run(self, k.shortcut.filter(|s| !text_edit(*s)));
         }
         let field = self.pointer.field_at_key();
         if field != Field::None {
@@ -160,7 +166,8 @@ impl App {
             let s = k
                 .shortcut
                 .filter(|s| in_prompt || !prompt_only(*s))
-                .filter(|s| !matches!(s, Shortcut::Undo | Shortcut::Redo));
+                .filter(|s| !matches!(s, Shortcut::Undo | Shortcut::Redo))
+                .filter(|s| !text_edit(*s));
             return run(self, s);
         }
         self.typing = false;

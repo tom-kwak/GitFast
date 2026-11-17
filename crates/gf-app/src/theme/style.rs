@@ -235,33 +235,10 @@ fn diff_line_bg(t: &Tokens, kind: LineKind) -> Option<Background> {
     }
 }
 
-pub fn diff_line(t: &Tokens, kind: LineKind) -> impl Fn(&Theme) -> container::Style + '_ {
-    move |_| container::Style {
-        background: diff_line_bg(t, kind),
-        ..container::Style::default()
-    }
-}
-
-/// A selectable diff line: tinted like [`diff_line`], highlighted when
-/// selected or hovered.
-pub fn diff_line_button(
-    t: &Tokens,
-    kind: LineKind,
-    selected: bool,
-) -> impl Fn(&Theme, button::Status) -> button::Style + '_ {
-    move |_, status| {
-        let background = if selected {
-            Some(Background::Color(t.selection))
-        } else if matches!(status, button::Status::Hovered) {
-            Some(Background::Color(tint(t.bg, t.accent(), 0.18)))
-        } else {
-            diff_line_bg(t, kind)
-        };
-        button::Style {
-            background,
-            text_color: t.fg,
-            border: square(Color::TRANSPARENT, 0.0),
-            ..button::Style::default()
-        }
+/// A diff line's background color by change kind (`None`: unchanged).
+pub fn diff_line_color(t: &Tokens, kind: LineKind) -> Option<Color> {
+    match diff_line_bg(t, kind) {
+        Some(Background::Color(c)) => Some(c),
+        _ => None,
     }
 }

@@ -88,6 +88,10 @@ pub enum Shortcut {
     Enter,
     /// ⌘[ / ⌘]: HISTORY / WORKING TREE mode of the main area.
     CodeView(diff_view::Role),
+    /// ⌘C outside text fields: the selected diff lines.
+    Copy,
+    /// ⌘A outside text fields: every line of the diff in focus.
+    SelectAll,
     Quit,
 }
 
@@ -903,9 +907,22 @@ impl App {
     }
 
     fn on_diff_message(&mut self, role: diff_view::Role, m: diff_view::Message) -> Task<Message> {
+        // ⌘-press adds to the line selection, ⇧-press extends it (as in
+        // the history list).
+        let m = match m {
+            diff_view::Message::LinePressed(k) if self.modifiers.command() => {
+                diff_view::Message::LinePressedAdd(k)
+            }
+            diff_view::Message::LinePressed(k) if self.modifiers.shift() => {
+                diff_view::Message::LinePressedRange(k)
+            }
+            other => other,
+        };
         match m {
             diff_view::Message::SelectFile(_) => self.focus_pane(Pane::Files),
-            diff_view::Message::ToggleLine(_) => self.focus_pane(Pane::Diff),
+            diff_view::Message::LinePressed(_)
+            | diff_view::Message::LinePressedAdd(_)
+            | diff_view::Message::LinePressedRange(_) => self.focus_pane(Pane::Diff),
             _ => {}
         }
         let Some(tab) = self.active_tab_mut() else {
@@ -1281,6 +1298,16 @@ impl App {
             }
             Shortcut::Enter => Task::none(),
             Shortcut::CodeView(role) => self.update(Message::CodeView(role)),
+            Shortcut::Copy => self.copy_diff_selection(),
+            Shortcut::SelectAll => {
+                // Only the diff being worked in: ⌘A elsewhere selects nothing.
+                match (self.focus, self.active_tab().map(|t| t.code_view)) {
+                    (Pane::Diff, Some(role)) => {
+                        self.on_diff_message(role, diff_view::Message::SelectAll)
+                    }
+                    _ => Task::none(),
+                }
+            }
             Shortcut::Quit => iced::exit(),
         }
     }
@@ -1767,9 +1794,13 @@ fn shortcut(
             _ => {}
         }
         // Layout-independent: ⌘O works with the Korean input method too.
-        // ⌘C/V/X/A are left to text fields; ⌘Z too while one has focus
+        // ⌘V/X are left to text fields; ⌘C/A/Z too while one has focus
         // (see `focus`).
+        let edit = status == event::Status::Captured;
         return Some(match key.to_latin(physical)? {
+            // Only when no text widget used them for its own text.
+            'c' if !edit => Shortcut::Copy,
+            'a' if !edit => Shortcut::SelectAll,
             'o' => Shortcut::Open,
             'z' | 'Z' if modifiers.shift() => Shortcut::Redo,
             'z' => Shortcut::Undo,
@@ -1940,6 +1971,25 @@ mod tests {
                 event::Status::Captured
             ),
             None
+        );
+        // Nobody used ⌘C / ⌘A: they copy / select the diff lines.
+        assert_eq!(
+            press(
+                Key::Character("c".into()),
+                Code::KeyC,
+                cmd,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::Copy)
+        );
+        assert_eq!(
+            press(
+                Key::Character("ㅁ".into()),
+                Code::KeyA,
+                cmd,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::SelectAll)
         );
     }
 
