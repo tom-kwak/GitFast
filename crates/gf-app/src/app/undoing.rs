@@ -125,6 +125,7 @@ impl App {
         };
         // The dialogs act on the active tab.
         if active != Some(id) {
+            tab.undo_queue = None;
             return Task::none();
         }
         let title = if redo { "Redo" } else { "Undo" };
@@ -144,7 +145,7 @@ impl App {
                 format!("{title} anyway?"),
                 body,
                 format!("{title} anyway"),
-                Purpose::Undo { redo },
+                Purpose::Undo { redo, force: true },
             ));
         }
         if step.moves_head() {
@@ -172,18 +173,20 @@ impl App {
                 title,
                 vec![what, format!("`{branch}` goes to {at} — {keeps}.")],
                 title,
-                Purpose::Undo { redo },
+                Purpose::Undo { redo, force: false },
             );
             if dirty && step.mode == HeadMode::Keep {
                 confirm = confirm.check("stash my uncommitted changes first", false);
             }
             return self.confirm(confirm);
         }
-        self.run_undo(redo, false)
+        self.run_undo(redo, false, false)
     }
 
-    /// Restores the next step's other side (asked or not).
-    pub(super) fn run_undo(&mut self, redo: bool, stash_first: bool) -> Task<Message> {
+    /// Restores the next step's other side (asked or not). Unless
+    /// `force`, the repository is checked against the step once more right
+    /// before anything is written.
+    pub(super) fn run_undo(&mut self, redo: bool, stash_first: bool, force: bool) -> Task<Message> {
         let Some(tab) = self.active_tab_mut() else {
             return Task::none();
         };
@@ -202,7 +205,9 @@ impl App {
                 })
                 .await?;
             }
-            r.restore(&step.scope, step.target(redo), step.mode).await
+            let expected = (!force).then(|| step.expected(redo));
+            r.restore(&step.scope, expected, step.target(redo), step.mode)
+                .await
         })
     }
 

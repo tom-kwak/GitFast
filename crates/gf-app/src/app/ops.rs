@@ -137,6 +137,13 @@ impl App {
                         tab.conflict = None;
                     }
                 }
+                // A merge / rebase gf started and that stopped on
+                // conflicts has ended some other way (commit box, terminal,
+                // abort): continuing a later one must not record it. A
+                // Continue already running holds its own copy.
+                if snap.state.is_clean() {
+                    tab.pending = None;
+                }
                 tab.snapshot = Some(snap);
                 tab.error = None;
                 if let Some(rev) = tab.history.revision().map(str::to_owned) {
@@ -204,12 +211,15 @@ impl App {
         Task::perform(
             async move {
                 let before = match record {
-                    Some(r) => capture_before(&repo, r).await,
+                    Some(r) => match before_or_refuse(&repo, r).await {
+                        Ok(b) => b,
+                        Err(e) => return (Err(e), None),
+                    },
                     None => None,
                 };
                 let result = fut.await.map_err(|e| e.to_string());
                 let step = match before {
-                    Some(b) => finish(&repo, step_label, b).await,
+                    Some(b) => finish(&repo, step_label, b, result.is_ok()).await,
                     None => None,
                 };
                 (result, step)
@@ -262,7 +272,7 @@ impl App {
             async move |mut out: iced::futures::channel::mpsc::Sender<Message>| {
                 let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel();
                 let before = match record {
-                    Some(r) => capture_before(&repo, r).await,
+                    Some(r) => before_or_refuse(&repo, r).await.ok().flatten(),
                     None => None,
                 };
                 let fut = f(
@@ -281,8 +291,9 @@ impl App {
                         r = &mut fut => break r,
                     }
                 };
+                let ok = result.is_ok();
                 let step = match before {
-                    Some(b) => finish(&repo, step_label, b).await,
+                    Some(b) => finish(&repo, step_label, b, ok).await,
                     None => None,
                 };
                 let _ = out
@@ -545,6 +556,21 @@ pub struct Record {
     pub message: Option<String>,
     /// Applying / popping this stash entry: its files join the scope.
     pub stash_entry: Option<usize>,
+    /// The changed files, read fresh when the operation starts, join the
+    /// scope (the snapshot may be older than the last edit).
+    pub changes: Option<Changes>,
+    /// The confirmation promised ⌘Z: without a saved copy the operation
+    /// does not run.
+    pub required: bool,
+}
+
+/// Which changed files join a [`Record`]'s scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Changes {
+    /// Changes to tracked files and conflicts (what a hard reset throws away).
+    Tracked,
+    /// Untracked files too (stash).
+    All,
 }
 
 impl Record {
@@ -554,6 +580,8 @@ impl Record {
             mode: HeadMode::Keep,
             message: None,
             stash_entry: None,
+            changes: None,
+            required: false,
         }
     }
 
@@ -574,13 +602,60 @@ impl Record {
         self.stash_entry = Some(index);
         self
     }
+
+    pub fn with_changes(mut self, changes: Changes) -> Self {
+        self.changes = Some(changes);
+        self
+    }
+
+    /// Refuse to run without a copy saved for undo.
+    pub fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
 }
 
-/// Captures `record`'s scope before an operation. `None` (no undo step)
-/// when there is too much to save or git could not be asked.
-pub async fn capture_before(repo: &Repository, mut record: Record) -> Option<(Record, Capture)> {
+/// [`capture_before`], or the error the operation fails with when the
+/// record is required. `Ok(None)`: run without an undo step.
+async fn before_or_refuse(
+    repo: &Repository,
+    record: Record,
+) -> Result<Option<(Record, Capture)>, String> {
+    let required = record.required;
+    match capture_before(repo, record).await {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if required => Err(format!(
+            "nothing was changed: couldn't keep a copy for undo ({e})"
+        )),
+        Err(e) => {
+            tracing::info!(error = %e, "no undo step for this operation");
+            Ok(None)
+        }
+    }
+}
+
+/// Captures `record`'s scope before an operation. Fails when there is too
+/// much to save or git could not be asked.
+pub async fn capture_before(
+    repo: &Repository,
+    mut record: Record,
+) -> Result<(Record, Capture), String> {
     if let Some(i) = record.stash_entry {
-        let paths = repo.stash_paths(i).await.ok()?;
+        let paths = repo.stash_paths(i).await.map_err(|e| e.to_string())?;
+        record.scope.index.extend(paths.iter().cloned());
+        record.scope.files.extend(paths);
+    }
+    if let Some(changes) = record.changes {
+        let status = repo.status().await.map_err(|e| e.to_string())?;
+        let paths: Vec<_> = crate::undo::changed_paths(&status)
+            .into_iter()
+            .filter(|p| {
+                changes == Changes::All
+                    || !status.entries.iter().any(|e| {
+                        matches!(e, gf_core::model::StatusEntry::Untracked { path } if path == p)
+                    })
+            })
+            .collect();
         record.scope.index.extend(paths.iter().cloned());
         record.scope.files.extend(paths);
     }
@@ -590,23 +665,32 @@ pub async fn capture_before(repo: &Repository, mut record: Record) -> Option<(Re
         files: std::mem::take(&mut record.scope.index),
         ..Scope::default()
     };
-    if let Err(e) = index
+    index
         .expand_files(repo.cwd())
         .and_then(|()| record.scope.expand_files(repo.cwd()))
-    {
-        tracing::info!(error = %e, "no undo step for this operation");
-        return None;
-    }
+        .map_err(|e| match e {
+            gf_core::GfError::Unsupported(_) => {
+                "too much to keep: over 64 MB or 5000 files".to_owned()
+            }
+            e => e.to_string(),
+        })?;
     record.scope.index = index.files;
-    let before = repo.capture(&record.scope).await.ok()?;
-    Some((record, before))
+    let before = repo
+        .capture(&record.scope)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok((record, before))
 }
 
 /// The step, once the operation ran; `None` when it changed nothing.
+/// A failed operation that moved HEAD is not recorded: it stopped half
+/// way (e.g. a pull that hit conflicts mid-rebase), and undoing to or
+/// from that state would only confuse.
 pub async fn finish(
     repo: &Repository,
     label: String,
     (record, before): (Record, Capture),
+    succeeded: bool,
 ) -> Option<Box<Step>> {
     let after = repo.capture(&record.scope).await.ok()?;
     if after == before {
@@ -614,5 +698,55 @@ pub async fn finish(
     }
     let mut step = Step::new(label, record.scope, before, after, record.mode);
     step.message = record.message;
-    Some(Box::new(step))
+    (succeeded || !step.moves_head()).then(|| Box::new(step))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gf_git::GitRunner;
+    use gf_test_support::TestRepo;
+    use std::path::PathBuf;
+
+    async fn open(repo: &TestRepo) -> Repository {
+        let runner = GitRunner::new().with_cleared_env().with_env(repo.env());
+        Repository::open(repo.path(), runner)
+            .await
+            .expect("open repository")
+    }
+
+    #[tokio::test]
+    async fn a_hard_reset_saves_tracked_changes_read_when_it_starts() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.commit_all("init");
+        repo.write("a.txt", "edited after the last refresh\n");
+        repo.write("scratch.log", "untracked\n");
+        let r = open(&repo).await;
+        let record = Record::new(Scope::head()).with_changes(Changes::Tracked);
+        let (record, before) = capture_before(&r, record).await.expect("captured");
+        assert_eq!(record.scope.files, [PathBuf::from("a.txt")]);
+        assert_eq!(before.files.len(), 1);
+        let all = Record::new(Scope::default()).with_changes(Changes::All);
+        let (all, _) = capture_before(&r, all).await.expect("captured");
+        assert_eq!(all.scope.files.len(), 2, "stash also keeps untracked files");
+    }
+
+    #[tokio::test]
+    async fn a_required_copy_that_cannot_be_kept_stops_the_operation() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.commit_all("init");
+        let r = open(&repo).await;
+        // A stash entry that does not exist cannot be read.
+        let record = Record::new(Scope::default()).with_stash_entry(7);
+        assert!(matches!(
+            before_or_refuse(&r, record.clone()).await,
+            Ok(None)
+        ));
+        let err = before_or_refuse(&r, record.required())
+            .await
+            .expect_err("refused");
+        assert!(err.starts_with("nothing was changed"), "{err}");
+    }
 }

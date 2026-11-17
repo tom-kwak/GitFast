@@ -1087,6 +1087,8 @@ impl App {
         if self.active > i || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
+        // The tab now shown counts as used (⌃⇥ order).
+        self.note_active();
         self.flash(
             NoteKind::Info,
             format!("closed {} — reopen from Recent or ⌘O", closed.name()),

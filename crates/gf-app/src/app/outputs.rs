@@ -122,14 +122,26 @@ impl App {
                 "Too much to keep a copy of (over 64 MB or 5000 files): this can't be undone."
                     .into(),
             );
+        } else if !subs.is_empty() {
+            // Undo puts the submodule back on its commit, but no copy is
+            // kept of the files inside it.
+            body.push("Edits inside the submodule can't be brought back with undo.".into());
         }
         let confirm = Confirm::delete(
             "Discard changes",
             body,
             "Discard",
-            Purpose::Discard { tracked, untracked },
+            Purpose::Discard {
+                tracked,
+                untracked,
+                saved: fits,
+            },
         );
-        self.confirm(if fits { confirm.undoable() } else { confirm })
+        self.confirm(if fits && subs.is_empty() {
+            confirm.undoable()
+        } else {
+            confirm
+        })
     }
 
     pub(super) fn on_diff(
@@ -197,11 +209,12 @@ impl App {
             .active_tab()
             .and_then(|t| t.diff(t.code_view).current_path())
             .map(|p| {
-                Record::new(if action == Action::Discard {
-                    undo::files(vec![p])
+                if action == Action::Discard {
+                    // The dialog promised ⌘Z.
+                    Record::new(undo::files(vec![p])).required()
                 } else {
-                    undo::index(vec![p])
-                })
+                    Record::new(undo::index(vec![p]))
+                }
             });
         self.op_recorded(description, OpKind::Generic, record, move |r| async move {
             for p in patches {
