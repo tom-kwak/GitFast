@@ -27,7 +27,7 @@ use crate::repo_tab::{HISTORY_PAGE, History, Snapshot};
 use crate::theme::{Tokens, style};
 use crate::widgets::graph_canvas;
 use crate::widgets::memo::{self, Memo};
-use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
+use crate::widgets::virtual_list::{self, ScrollPos, columns, virtual_list};
 use crate::widgets::{self, colored, dim, format, mono};
 
 /// Scrollable id of the commit list.
@@ -470,20 +470,32 @@ fn badge_color(t: &Tokens, kind: badges::Kind) -> Color {
 /// Columns reserved for the author and date.
 const AUTHOR_COLS: usize = 16;
 const DATE_COLS: usize = 16;
-/// Badges + summary are clipped to at most this many columns so author and
-/// date stay aligned; the full text is in the detail box.
-const MAX_SUMMARY_COLS: usize = 110;
+/// Badge labels longer than this many columns end in `…`.
+const BADGE_COLS: usize = 28;
+/// The summary column never gets narrower than this; below it the list
+/// scrolls sideways instead.
+const MIN_SUMMARY_COLS: usize = 20;
+/// Columns the summary text keeps after the badges, however many there are.
+const MIN_TEXT_COLS: usize = 10;
 
-/// Badges and summary as one text line, plus its width in columns.
-fn summary_line(
-    c: &Commit,
-    badges: Option<&Vec<Badge>>,
-) -> (Vec<(String, Option<badges::Kind>)>, usize) {
+/// Badges and summary as one text line, cut to fit `budget` columns.
+struct SummaryLine {
+    parts: Vec<(String, Option<badges::Kind>)>,
+    /// Display width in columns.
+    cols: usize,
+    /// Whether the summary ends in `…`.
+    cut: bool,
+}
+
+/// The badges of `c` (each label cut at [`BADGE_COLS`]) and its summary,
+/// cut with `…` where the line would pass `budget` columns.
+/// `usize::MAX` measures the line uncut.
+fn summary_line(c: &Commit, badges: Option<&Vec<Badge>>, budget: usize) -> SummaryLine {
     let mut parts: Vec<(String, Option<badges::Kind>)> = Vec::new();
     if let Some(refs) = badges {
         for b in refs.iter().take(MAX_BADGES) {
             parts.push((
-                format!("({}) ", format::truncate(&b.label, 28)),
+                format!("({}) ", format::truncate_columns(&b.label, BADGE_COLS)),
                 Some(b.kind),
             ));
         }
@@ -491,9 +503,13 @@ fn summary_line(
             parts.push((format!("+{} ", refs.len() - MAX_BADGES), None));
         }
     }
-    parts.push((c.summary.clone(), None));
-    let cols = parts.iter().map(|(s, _)| columns(s)).sum();
-    (parts, cols)
+    let badge_cols: usize = parts.iter().map(|(s, _)| columns(s)).sum();
+    let room = budget.saturating_sub(badge_cols).max(MIN_TEXT_COLS);
+    let text = format::truncate_columns(&c.summary, room);
+    let cut = text != c.summary;
+    let cols = badge_cols + columns(&text);
+    parts.push((text, None));
+    SummaryLine { parts, cols, cut }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -502,7 +518,7 @@ fn commit_row<'a>(
     c: &'a Commit,
     g: Option<&'a GraphRow>,
     graph_px: f32,
-    summary_px: f32,
+    summary_cols: usize,
     badges: Option<&Vec<Badge>>,
     selected: bool,
 ) -> Element<'a, Message> {
@@ -516,20 +532,23 @@ fn commit_row<'a>(
     }
     line = line.push(colored(t, c.id.short(), t.warning()).wrapping(Wrapping::None));
 
-    let (parts, _) = summary_line(c, badges);
+    let line_text = summary_line(c, badges, summary_cols);
+    let hint = row_hint(c, badges, line_text.cut);
     let mut summary = Row::new();
-    for (text, kind) in parts {
+    for (text, kind) in line_text.parts {
         summary = summary.push(match kind {
             Some(kind) => colored(t, text, badge_color(t, kind)).wrapping(Wrapping::None),
             None => mono(t, text).wrapping(Wrapping::None),
         });
     }
+    let summary = container(summary)
+        .width(Length::Fixed(t.cols(summary_cols)))
+        .clip(true);
     line = line
-        .push(
-            container(summary)
-                .width(Length::Fixed(summary_px))
-                .clip(true),
-        )
+        .push(match hint {
+            Some(hint) => widgets::tip(t, summary, hint),
+            None => summary.into(),
+        })
         .push(
             container(
                 dim(t, format::truncate(&c.author.name, AUTHOR_COLS)).wrapping(Wrapping::None),
@@ -537,21 +556,45 @@ fn commit_row<'a>(
             .width(Length::Fixed(t.cols(AUTHOR_COLS))),
         )
         .push(dim(t, format::datetime(c.author.time)).wrapping(Wrapping::None));
-    let row: Element<'a, Message> = iced::widget::mouse_area(widgets::list_row_flush(
+    iced::widget::mouse_area(widgets::list_row_flush(
         t,
         line,
         selected,
         Message::Select(c.id.clone()),
     ))
     .on_right_press(Message::RightClick(c.id.clone()))
-    .into();
-    match badges {
-        Some(refs) if refs.len() > MAX_BADGES => {
-            let all: Vec<&str> = refs.iter().map(|b| b.label.as_str()).collect();
-            widgets::tip(t, row, all.join(", "))
-        }
-        _ => row,
+    .into()
+}
+
+/// What hovering a row's summary shows: the full text of whatever ends in
+/// `…` — the summary when it did not fit the column (`summary_cut`), a
+/// badge label past [`BADGE_COLS`]. `None` when nothing was cut. The
+/// message body is in the detail box (`▸ details`).
+fn row_hint(c: &Commit, badges: Option<&Vec<Badge>>, summary_cut: bool) -> Option<String> {
+    let mut lines: Vec<&str> = badges
+        .into_iter()
+        .flat_map(|refs| refs.iter().take(MAX_BADGES))
+        .map(|b| b.label.as_str())
+        .filter(|l| columns(l) > BADGE_COLS)
+        .collect();
+    if summary_cut {
+        lines.push(&c.summary);
     }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Columns for the summary column: as many as `room_px` holds, no more
+/// than the `widest` line needs (short histories keep author and date
+/// close) and never fewer than [`MIN_SUMMARY_COLS`].
+fn summary_cols_for(room_px: f32, char_px: f32, widest: usize) -> usize {
+    // Truncation is intended: whole columns that fit.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let fits = if char_px > 0.0 {
+        (room_px.max(0.0) / char_px) as usize
+    } else {
+        0
+    };
+    fits.min(widest).max(MIN_SUMMARY_COLS)
 }
 
 /// `[ actions ▾ ]`: opens the same menu as right-clicking the selection.
@@ -890,22 +933,19 @@ impl Feature for State {
             memo::identity(history, history.commits.len()),
             memo::identity(snap, snap.branches.len() + snap.tags.len()),
         );
-        let (lanes, summary_cols) = self.widths.get(key, || {
+        let (lanes, widest) = self.widths.get(key, || {
             let lanes = history.graph.iter().map(|g| g.width).max().unwrap_or(1);
-            let summary = history
+            let widest = history
                 .commits
                 .iter()
-                .map(|c| summary_line(c, decor.get(&c.id)).1)
+                .map(|c| summary_line(c, decor.get(&c.id), usize::MAX).cols)
                 .max()
-                .unwrap_or(0)
-                .clamp(20, MAX_SUMMARY_COLS);
-            (lanes, summary)
+                .unwrap_or(0);
+            (lanes, widest)
         });
         let graph_px = graph_canvas::width_for(lanes);
-        let summary_px = t.cols(summary_cols);
-        // graph, hash, summary, author, date + gaps and padding.
-        let content_width =
-            graph_px + t.cols(7 + AUTHOR_COLS + DATE_COLS) + summary_px + 4.0 * 6.0 + 12.0;
+        // graph, hash, author, date + gaps and padding: all but the summary.
+        let fixed_px = graph_px + t.cols(7 + AUTHOR_COLS + DATE_COLS) + 4.0 * 6.0 + 12.0;
         let selected = self.selected.as_ref();
         let marked = &self.marked;
         let is_selected = move |id: &Oid| {
@@ -915,26 +955,35 @@ impl Feature for State {
                 marked.contains(id)
             }
         };
-        let list = virtual_list(
-            LIST_ID,
-            history.commits.len(),
-            row_height(t),
-            content_width,
-            self.scroll,
-            move |i| {
-                let c = &history.commits[i];
-                commit_row(
-                    t,
-                    c,
-                    history.graph.get(i),
-                    graph_px,
-                    summary_px,
-                    decor.get(&c.id),
-                    is_selected(&c.id),
-                )
-            },
-            Message::Scrolled,
-        );
+        let total = history.commits.len();
+        let scroll = self.scroll;
+        // The summary takes the room the window leaves it: wider windows
+        // show more of a long summary before the `…`.
+        let list = iced::widget::responsive(move |size| {
+            let room = size.width - virtual_list::SCROLLBAR - fixed_px;
+            let summary_cols = summary_cols_for(room, t.char_width(), widest);
+            let content_width = fixed_px + t.cols(summary_cols);
+            virtual_list(
+                LIST_ID,
+                total,
+                row_height(t),
+                content_width,
+                scroll,
+                move |i| {
+                    let c = &history.commits[i];
+                    commit_row(
+                        t,
+                        c,
+                        history.graph.get(i),
+                        graph_px,
+                        summary_cols,
+                        decor.get(&c.id),
+                        is_selected(&c.id),
+                    )
+                },
+                Message::Scrolled,
+            )
+        });
 
         let mut content = column![toolbar, list].spacing(4);
         if self.marked.len() > 1 {
@@ -1141,6 +1190,72 @@ mod tests {
                 body: String::new(),
             })
             .collect()
+    }
+
+    #[test]
+    fn summaries_are_cut_to_the_room_and_shown_whole_on_hover() {
+        let mut c = commits(1).remove(0);
+        c.summary = "x".repeat(40);
+        let fit = summary_line(&c, None, 40);
+        assert!(!fit.cut);
+        assert_eq!(row_hint(&c, None, fit.cut), None, "it fits: no hover");
+
+        let narrow = summary_line(&c, None, 30);
+        assert!(narrow.cut);
+        assert_eq!(narrow.cols, 30);
+        assert!(narrow.parts[0].0.ends_with('…'));
+        c.body = "why".into();
+        // Only the summary line: the body is in the detail box.
+        assert_eq!(row_hint(&c, None, true), Some(c.summary.clone()));
+
+        // Korean takes two columns a character.
+        c.summary = "가".repeat(20);
+        assert!(summary_line(&c, None, 39).cut);
+        assert!(!summary_line(&c, None, 40).cut);
+        assert_eq!(summary_line(&c, None, usize::MAX).cols, 40);
+    }
+
+    #[test]
+    fn badges_take_room_first_but_leave_some_for_the_summary() {
+        let mut c = commits(1).remove(0);
+        c.summary = "s".repeat(30);
+        let refs = vec![Badge {
+            label: "main".into(),
+            kind: badges::Kind::Branch,
+        }];
+        // `(main) ` is 7 columns: 23 left for the summary.
+        let line = summary_line(&c, Some(&refs), 30);
+        assert_eq!(line.cols, 30);
+        assert!(line.cut);
+        // However narrow, the summary keeps MIN_TEXT_COLS.
+        let line = summary_line(&c, Some(&refs), 0);
+        assert_eq!(line.cols, 7 + MIN_TEXT_COLS);
+    }
+
+    #[test]
+    fn the_summary_column_follows_the_window_width() {
+        // 8px a column.
+        assert_eq!(summary_cols_for(800.0, 8.0, 500), 100);
+        assert_eq!(summary_cols_for(400.0, 8.0, 500), 50);
+        assert_eq!(summary_cols_for(800.0, 8.0, 30), 30, "no wider than needed");
+        assert_eq!(summary_cols_for(-50.0, 8.0, 500), MIN_SUMMARY_COLS);
+    }
+
+    #[test]
+    fn only_text_cut_with_an_ellipsis_shows_on_hover() {
+        let c = commits(1).remove(0);
+        let badge = |l: &str| Badge {
+            label: l.into(),
+            kind: badges::Kind::Branch,
+        };
+        let long = "b".repeat(BADGE_COLS + 1);
+        // `+1` is not cut text: no hover for it.
+        let refs = vec![badge("a"), badge("b"), badge("c")];
+        assert_eq!(row_hint(&c, Some(&refs), false), None);
+        let refs = vec![badge("a"), badge(&long)];
+        assert_eq!(row_hint(&c, Some(&refs), false), Some(long.clone()));
+        let line = summary_line(&c, Some(&refs), usize::MAX);
+        assert!(line.parts[1].0.ends_with("…) "));
     }
 
     fn ids(out: Option<Output>) -> Vec<Oid> {

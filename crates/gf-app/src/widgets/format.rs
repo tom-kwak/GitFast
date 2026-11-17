@@ -95,6 +95,27 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Truncates to `max` display columns (wide characters count two) with a
+/// trailing `…`, so monospace columns line up.
+pub fn truncate_columns(s: &str, max: usize) -> String {
+    use crate::widgets::virtual_list::{char_columns, columns};
+    if columns(s) <= max {
+        return s.to_owned();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = char_columns(c);
+        if used + w > max.saturating_sub(1) {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
 /// A line of file content ready to draw: tabs expanded, the line's own
 /// trailing `\r` (CRLF files) dropped, other control characters shown as
 /// their Unicode pictures (`␜`, `␍` …).
@@ -128,6 +149,15 @@ pub fn code_text(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_columns_counts_wide_characters_twice() {
+        assert_eq!(truncate_columns("abcdef", 6), "abcdef");
+        assert_eq!(truncate_columns("abcdefg", 6), "abcde…");
+        // 한글 is two columns a character: 2 + 2 fit in 5 with the `…`.
+        assert_eq!(truncate_columns("한글커밋", 5), "한글…");
+        assert_eq!(truncate_columns("한글커밋", 8), "한글커밋");
+    }
 
     #[test]
     fn code_lines_have_no_control_characters() {
