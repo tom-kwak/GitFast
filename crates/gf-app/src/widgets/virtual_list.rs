@@ -19,7 +19,7 @@ const OVERSCAN: usize = 10;
 /// Assumed viewport height before the first scroll event reports the real one.
 const INITIAL_HEIGHT: f32 = 1400.0;
 /// Room for the vertical scrollbar.
-const SCROLLBAR: f32 = 8.0;
+pub const SCROLLBAR: f32 = 8.0;
 
 /// Scroll position reported by the list (kept in the feature's state).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -116,16 +116,17 @@ pub fn virtual_list<'a, M: 'a>(
 /// Display width of `s` in monospace columns: East Asian wide characters
 /// (Hangul, CJK, full-width forms) take two columns.
 pub fn columns(s: &str) -> usize {
-    s.chars()
-        .map(|c| {
-            let u = u32::from(c);
-            let wide = matches!(u,
-                0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
-                | 0xA960..=0xA97F | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60
-                | 0xFFE0..=0xFFE6 | 0x1F300..=0x1F64F | 0x20000..=0x3FFFD);
-            if wide { 2 } else { 1 }
-        })
-        .sum()
+    s.chars().map(char_columns).sum()
+}
+
+/// Display width of one character: see [`columns`].
+pub fn char_columns(c: char) -> usize {
+    let u = u32::from(c);
+    let wide = matches!(u,
+        0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
+        | 0xA960..=0xA97F | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6 | 0x1F300..=0x1F64F | 0x20000..=0x3FFFD);
+    if wide { 2 } else { 1 }
 }
 
 #[cfg(test)]
