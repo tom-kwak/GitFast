@@ -433,8 +433,16 @@ async fn remote_tag_lists_are_shared_by_worktrees_and_survive_odd_names() {
     a.commit_all("one");
     let url = remote.path().to_str().unwrap();
     a.git(&["remote", "add", "team/a.b", url]);
-    a.git(&["remote", "add", "team", url]);
-    a.git(&["push", "-q", "team", "main", "refs/heads/main:refs/tags/t1"]);
+    // Spelled like the escaped file name of the first: must not share it.
+    // (git 2.56 refuses `team` beside `team/a.b`.)
+    a.git(&["remote", "add", "team%2Fa%2Eb", url]);
+    a.git(&[
+        "push",
+        "-q",
+        "team/a.b",
+        "main",
+        "refs/heads/main:refs/tags/t1",
+    ]);
     let ra = open(&a).await;
 
     // Concurrent writes (fetch and a background listing) both succeed.
@@ -444,11 +452,13 @@ async fn remote_tag_lists_are_shared_by_worktrees_and_survive_odd_names() {
     );
     x.unwrap();
     y.unwrap();
-    ra.record_remote_tags("team").await.unwrap();
+    // Unlisted, so unknown: it did not get the other's file.
+    assert!(ra.known_remote_tags("team%2Fa%2Eb").await.is_none());
+    ra.record_remote_tags("team%2Fa%2Eb").await.unwrap();
     let names =
         |k: Option<std::collections::BTreeSet<String>>| k.unwrap().into_iter().collect::<Vec<_>>();
     assert_eq!(names(ra.known_remote_tags("team/a.b").await), ["t1"]);
-    assert_eq!(names(ra.known_remote_tags("team").await), ["t1"]);
+    assert_eq!(names(ra.known_remote_tags("team%2Fa%2Eb").await), ["t1"]);
 
     // A linked worktree reads the same list.
     let wt = tempfile::tempdir().unwrap();
@@ -465,7 +475,7 @@ async fn remote_tag_lists_are_shared_by_worktrees_and_survive_odd_names() {
         .with_cleared_env()
         .with_env(a.env());
     let rw = gf_git::Repository::open(&wt_path, runner).await.unwrap();
-    assert_eq!(names(rw.known_remote_tags("team").await), ["t1"]);
+    assert_eq!(names(rw.known_remote_tags("team/a.b").await), ["t1"]);
 }
 
 #[tokio::test]
