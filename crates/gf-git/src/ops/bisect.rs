@@ -42,6 +42,14 @@ pub fn parse_progress(out: &str) -> BisectProgress {
     p
 }
 
+/// The `# first bad commit: [<oid>] <subject>` line of `git bisect log`.
+pub fn first_bad_in_log(log: &str) -> Option<Oid> {
+    log.lines()
+        .find_map(|l| l.strip_prefix("# first bad commit: ["))
+        .and_then(|rest| rest.split(']').next())
+        .and_then(|id| id.parse().ok())
+}
+
 impl BisectOps for CliBackend {
     async fn bisect_start(&self, bad: &str, good: &str) -> Result<BisectProgress> {
         // `bisect start` has no `--end-of-options`; refuse option-like names.
@@ -63,7 +71,16 @@ impl BisectOps for CliBackend {
             Verdict::Skip => "skip",
         };
         let out = self.exec(self.command(["bisect", word])).await?;
-        Ok(parse_progress(&out.stdout_str()))
+        // Where git prints each line has changed between versions: read
+        // both streams.
+        let mut p = parse_progress(&format!("{}\n{}", out.stdout_str(), out.stderr));
+        if p.first_bad.is_none() && p.remaining.is_none() {
+            // Neither "Bisecting:" nor a result: the bisect log, whose
+            // format is stable, records the result once there is one.
+            let log = self.exec(self.command(["bisect", "log"])).await?;
+            p.first_bad = first_bad_in_log(&log.stdout_str());
+        }
+        Ok(p)
     }
 
     async fn bisect_reset(&self) -> Result<()> {
@@ -87,6 +104,9 @@ mod tests {
         );
         let id = "c".repeat(40);
         let p = parse_progress(&format!("{id} is the first bad commit\ncommit {id}\n"));
-        assert_eq!(p.first_bad.map(|o| o.to_string()), Some(id));
+        assert_eq!(p.first_bad.map(|o| o.to_string()), Some(id.clone()));
+        let log = format!("git bisect good abc\n# first bad commit: [{id}] c5\n");
+        assert_eq!(first_bad_in_log(&log).map(|o| o.to_string()), Some(id));
+        assert_eq!(first_bad_in_log("git bisect start\n"), None);
     }
 }
