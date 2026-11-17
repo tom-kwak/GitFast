@@ -605,7 +605,7 @@ impl State {
                             LineKind::Added => t.added(),
                             LineKind::Removed => t.removed(),
                         };
-                        colored(t, line.content.replace('\t', "    "), color)
+                        colored(t, widgets::format::code_line(&line.content), color)
                             .wrapping(Wrapping::None)
                             .into()
                     }
@@ -925,7 +925,10 @@ impl State {
                     Message::SelectFile(self.file + 1),
                 ));
         }
-        if self.current_path().is_some() {
+        // Blame needs text lines: a binary file has none (and its bytes
+        // are not worth drawing).
+        let binary = self.diff.files.get(self.file).is_some_and(|f| f.is_binary);
+        if self.current_path().is_some() && !binary {
             header = header
                 .push(widgets::tip(
                     t,

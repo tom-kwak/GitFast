@@ -112,7 +112,10 @@ impl State {
         let side = |label: String, text: &'a str, color: Color, picked: bool| {
             let mut col = Column::new().push(colored(t, label, color));
             for line in text.lines() {
-                col = col.push(widgets::mono(t, format!("  {line}")).wrapping(Wrapping::None));
+                col = col.push(
+                    widgets::mono(t, format!("  {}", widgets::format::code_line(line)))
+                        .wrapping(Wrapping::None),
+                );
             }
             if text.is_empty() {
                 col = col.push(dim(t, "  (nothing)"));
