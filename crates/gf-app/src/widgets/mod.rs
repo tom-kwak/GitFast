@@ -264,6 +264,24 @@ pub fn collapsed_strip<'a, M: Clone + 'a>(
     )
 }
 
+/// Full-width button standing in for a closed panel above or below the content.
+pub fn collapsed_bar<'a, M: Clone + 'a>(
+    t: &'a Tokens,
+    label: &'a str,
+    hint: &str,
+    on_press: M,
+) -> Element<'a, M> {
+    tip(
+        t,
+        button(colored(t, label, t.accent()))
+            .width(Length::Fill)
+            .padding(Padding::from([2, 6]))
+            .style(style::row_button(t, false))
+            .on_press(on_press),
+        hint.into(),
+    )
+}
+
 /// A vertical scroll area with a thin, terminal-like scrollbar.
 pub fn scroll<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
     scrollable(content)

@@ -54,7 +54,9 @@ impl App {
         }
         match tab.code_view {
             Role::Commit => {
-                panes.push(Pane::History);
+                if self.settings.appearance.show_history {
+                    panes.push(Pane::History);
+                }
                 if tab.blame.is_none() {
                     panes.push(Pane::Files);
                 }
@@ -73,6 +75,13 @@ impl App {
         }
         match self.active_tab().map(|t| t.code_view) {
             Some(Role::Local) => Pane::Changes,
+            Some(Role::Commit) if !self.settings.appearance.show_history => {
+                if self.active_tab().is_some_and(|tab| tab.blame.is_some()) {
+                    Pane::Diff
+                } else {
+                    Pane::Files
+                }
+            }
             _ => Pane::History,
         }
     }

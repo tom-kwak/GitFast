@@ -72,17 +72,23 @@ pub struct State {
     tick: usize,
     /// The user scrolled up to read something: new output must not move
     /// the list until they scroll back to the bottom.
-    held: bool,
+    held_offset: Option<f32>,
     /// Entries or lines were added since the last [`State::follow`].
     grew: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    Collapse,
     ToggleEntry(usize),
     ToggleBackground,
     Clear,
     Scrolled(iced::widget::scrollable::Viewport),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Output {
+    Collapse,
 }
 
 /// Whether `v` shows the end of the list.
@@ -155,13 +161,24 @@ impl State {
     pub fn clear(&mut self) {
         self.entries
             .retain(|e| matches!(e.status, EntryStatus::Running { .. }));
-        self.held = false;
+        self.held_offset = None;
+    }
+
+    /// Restore the scroll position, or follow the latest output when pinned.
+    pub fn restore_scroll(&self) -> Task<Message> {
+        match self.held_offset {
+            Some(y) => iced::widget::operation::scroll_to(
+                SCROLL_ID,
+                iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+            ),
+            None => iced::widget::operation::snap_to_end(SCROLL_ID),
+        }
     }
 
     /// Keeps the end of the list in view after it grew, unless the user is
     /// holding a position higher up. The app calls this after every update.
     pub fn follow(&mut self) -> Task<Message> {
-        if std::mem::take(&mut self.grew) && !self.held {
+        if std::mem::take(&mut self.grew) && self.held_offset.is_none() {
             // A relative offset of 1.0 stays at the end as lines keep coming.
             iced::widget::operation::snap_to_end(SCROLL_ID)
         } else {
@@ -272,10 +289,11 @@ impl State {
 
 impl Feature for State {
     type Message = Message;
-    type Output = std::convert::Infallible;
+    type Output = Output;
 
     fn update(&mut self, message: Message) -> Update<Message, Self::Output> {
         match message {
+            Message::Collapse => return Update::output(Output::Collapse),
             Message::ToggleEntry(i) => {
                 if let Some(e) = self.entries.get_mut(i) {
                     e.expanded = Some(!e.is_expanded());
@@ -284,8 +302,8 @@ impl Feature for State {
             Message::ToggleBackground => self.show_background = !self.show_background,
             Message::Clear => self.clear(),
             Message::Scrolled(v) => {
-                self.held = !at_bottom(&v);
-                if !self.held {
+                self.held_offset = (!at_bottom(&v)).then(|| v.absolute_offset().y);
+                if self.held_offset.is_none() {
                     // Back at the bottom (by wheel or scrollbar): pin it there
                     // so the next output is followed.
                     return Update::task(iced::widget::operation::snap_to_end(SCROLL_ID));
@@ -320,6 +338,7 @@ impl Feature for State {
                     .any(|e| !matches!(e.status, EntryStatus::Running { .. }))
                     .then_some(Message::Clear),
             ),
+            widgets::icon_button(t, "▾", t.accent(), "hide command log ⌘J", Message::Collapse),
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);
@@ -443,7 +462,7 @@ mod tests {
         assert!(s.follow().units() > 0, "at the bottom: follow");
         assert_eq!(s.follow().units(), 0, "only once per change");
 
-        s.held = true;
+        s.held_offset = Some(12.0);
         s.note(NoteKind::Info, "b", vec![]);
         assert_eq!(s.follow().units(), 0, "scrolled up: stay put");
 

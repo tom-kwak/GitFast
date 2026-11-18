@@ -19,6 +19,7 @@ pub enum PromptCommand {
     Theme(Option<String>),
     ToggleLog,
     ToggleRefs,
+    ToggleHistory,
     ToggleLocal,
     ClearLog,
     Help,
@@ -68,6 +69,10 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ),
     (":log", "show/hide the command log                    ⌘J"),
     (":refs", "show/hide the refs sidebar                   ⌘B"),
+    (
+        ":history",
+        "show/hide the commit list                    ⌘⇧H",
+    ),
     (
         ":confirm",
         ":confirm [reset] — confirmations you chose to skip",
@@ -156,6 +161,7 @@ pub fn parse(line: &str) -> Result<Option<PromptCommand>, String> {
             "theme" => PromptCommand::Theme(arg),
             "log" => PromptCommand::ToggleLog,
             "refs" => PromptCommand::ToggleRefs,
+            "history" => PromptCommand::ToggleHistory,
             "undo" | "u" => match arg.as_deref() {
                 None => PromptCommand::Undo { list: false },
                 Some("list") => PromptCommand::Undo { list: true },
