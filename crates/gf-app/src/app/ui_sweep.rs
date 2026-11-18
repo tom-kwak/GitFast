@@ -421,6 +421,14 @@ impl Ui {
     pub fn shows(&self, label: &str) -> bool {
         self.targets().iter().any(|t| t.label.contains(label))
     }
+
+    pub fn flash(&self) -> String {
+        self.app
+            .flash
+            .as_ref()
+            .map(|f| f.text.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// A message, shortened for reports.
@@ -1077,4 +1085,11 @@ async fn clear_is_disabled_while_the_log_has_nothing_to_clear() {
     assert!(ui.press(clear.at, mouse::Button::Left).is_empty());
     ui.app.log.note(NoteKind::Info, "something", Vec::new());
     assert!(!ui.press(clear.at, mouse::Button::Left).is_empty());
+}
+
+#[tokio::test]
+async fn refresh_says_it_is_done_even_when_nothing_changed() {
+    let mut ui = Ui::open().await;
+    let fx = ui.click("[ ↻ refresh").await;
+    assert!(ui.flash().contains("refreshed"), "{fx:?}");
 }
