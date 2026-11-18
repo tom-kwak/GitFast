@@ -22,6 +22,7 @@ mod focus;
 mod ops;
 mod outputs;
 mod reveal;
+mod settings;
 #[cfg(test)]
 mod ui_sweep;
 mod undoing;
@@ -50,8 +51,8 @@ use crate::features::diff_view::DiffSource;
 use crate::features::prompt::PROMPT_ID;
 use crate::features::status_line::Flash;
 use crate::features::{
-    changes, command_log, commit_box, diff_view, history, prompt, repo_picker, sidebar,
-    status_line, tab_list, tab_switcher, tabs, toolbar, welcome,
+    changes, command_log, commit_box, diff_view, history, prompt, repo_picker, settings_view,
+    sidebar, status_line, tab_list, tab_switcher, tabs, toolbar, welcome,
 };
 use crate::nav::{Key, Nav, Pane};
 use crate::repo_tab::{History, RepoTab, Snapshot};
@@ -61,6 +62,8 @@ use crate::widgets;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shortcut {
     Open,
+    /// ⌘,: app-wide preferences.
+    Settings,
     /// ⌘⌫: forget the selected repository in the open window.
     Forget,
     /// ⌃⇥ / ⌃⇧⇥: walk the tabs in most-recently-used order.
@@ -144,6 +147,7 @@ pub enum Message {
     Picker(repo_picker::Message),
     Switcher(tab_switcher::Message),
     TabList(tab_list::Message),
+    Settings(settings_view::Message),
     /// Show the open-repository window (⌘O, `+ open`).
     OpenPicker,
     /// An animation frame (only subscribed to while something animates).
@@ -285,6 +289,7 @@ pub struct App {
     prompt: prompt::State,
     log: command_log::State,
     dialog: Option<Dialog<Purpose>>,
+    settings_open: bool,
     /// Open-repository window (modal, under a confirmation it asks for).
     picker: Option<repo_picker::State>,
     /// Tabs by last use, for ⌃⇥.
@@ -380,6 +385,7 @@ impl App {
             prompt: prompt::State::default(),
             log: command_log::State::default(),
             dialog: None,
+            settings_open: false,
             picker: None,
             mru: tab_switcher::Mru::default(),
             switcher: None,
@@ -481,6 +487,7 @@ impl App {
                 tabs::Message::Select(i) => self.select_tab(i),
                 tabs::Message::Close(i) => self.close_tab(i),
                 tabs::Message::Open => self.update(Message::OpenPicker),
+                tabs::Message::Settings => self.toggle_settings(),
                 tabs::Message::List => self.toggle_tab_list(),
             },
             Message::Toolbar(m) => self.on_toolbar(m),
@@ -497,12 +504,13 @@ impl App {
                 Task::none()
             }
             Message::TabList(m) => self.on_tab_list(m),
+            Message::Settings(m) => self.on_settings(m),
             Message::Switcher(tab_switcher::Message::Pick(i)) => {
                 self.switcher = None;
                 self.select_tab(i)
             }
-            // Keys belong to an open menu.
-            Message::Prompt(_) if self.menu.is_some() => Task::none(),
+            // Keys belong to the open menu or settings.
+            Message::Prompt(_) if self.menu.is_some() || self.settings_open => Task::none(),
             // ⌘O must open a folder, not type "o" into the prompt.
             Message::Prompt(prompt::Message::Input(_)) if self.modifiers.command() => Task::none(),
             Message::Prompt(m) => {
@@ -1261,8 +1269,16 @@ impl App {
                 _ => Task::none(),
             };
         }
+        if self.settings_open {
+            return match k {
+                Shortcut::Settings | Shortcut::Escape => self.toggle_settings(),
+                Shortcut::Quit => iced::exit(),
+                _ => Task::none(),
+            };
+        }
         match k {
             Shortcut::Open => self.open_picker(),
+            Shortcut::Settings => self.toggle_settings(),
             Shortcut::Forget => Task::none(),
             Shortcut::CycleTab { back } => self.cycle_tab(back),
             Shortcut::TabList => self.toggle_tab_list(),
@@ -1399,12 +1415,10 @@ impl App {
             }
         };
 
-        let mut layout = column![].height(Length::Fill);
-        if !self.tabs.is_empty() {
-            layout = layout.push(
-                tabs::view(t, &self.tabs, self.active, self.tab_list.is_some()).map(Message::Tabs),
-            );
-        }
+        let mut layout = column![
+            tabs::view(t, &self.tabs, self.active, self.tab_list.is_some()).map(Message::Tabs)
+        ]
+        .height(Length::Fill);
         if let Some(tab) = tab {
             layout = layout.push(
                 toolbar::view(t, tab, self.sync.as_ref().map(|(s, _)| s), spinner)
@@ -1452,6 +1466,7 @@ impl App {
         let modal: Option<Element<'_, Message>> =
             match (&self.dialog, &self.picker, &self.rebase_editor) {
                 (Some(d), _, _) => Some(d.view(t).map(Message::Dialog)),
+                _ if self.settings_open => Some(settings_view::view(t).map(Message::Settings)),
                 (None, Some(p), _) => Some(p.view(cx).map(Message::Picker)),
                 _ if self.switcher.is_some() => Some(
                     tab_switcher::view(
@@ -1800,7 +1815,7 @@ fn shortcut(
     physical: keyboard::key::Physical,
     status: event::Status,
 ) -> Option<Shortcut> {
-    use keyboard::key::{Key, Named};
+    use keyboard::key::{Code, Key, Named, Physical};
     // ⌃⇥ (Ctrl+Tab everywhere; on macOS ⌘ is a different key).
     if modifiers.control()
         && !modifiers.logo()
@@ -1811,6 +1826,9 @@ fn shortcut(
         });
     }
     if modifiers.command() {
+        if physical == Physical::Code(Code::Comma) && !modifiers.shift() && !modifiers.alt() {
+            return Some(Shortcut::Settings);
+        }
         match key.as_ref() {
             Key::Named(Named::Enter) => return Some(Shortcut::Commit),
             Key::Named(Named::Backspace) => return Some(Shortcut::Forget),
@@ -1955,6 +1973,19 @@ mod tests {
                 event::Status::Ignored
             ),
             Some(Shortcut::CodeView(diff_view::Role::Commit))
+        );
+    }
+
+    #[test]
+    fn settings_shortcut_uses_the_physical_comma_key() {
+        assert_eq!(
+            press(
+                Key::Character(",".into()),
+                Code::Comma,
+                keyboard::Modifiers::COMMAND,
+                event::Status::Captured,
+            ),
+            Some(Shortcut::Settings)
         );
     }
 

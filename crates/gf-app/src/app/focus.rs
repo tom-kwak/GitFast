@@ -85,6 +85,9 @@ impl App {
     /// After a dialog, menu or command: back to the prompt only if the user
     /// was typing there (or there is nothing else to focus).
     pub(super) fn restore_focus(&self) -> Task<Message> {
+        if self.settings_open {
+            return Task::none();
+        }
         if self.picker.is_some() {
             return operation::focus(repo_picker::FILTER_ID);
         }
@@ -115,6 +118,17 @@ impl App {
                 }
                 None => run(self, k.shortcut),
             };
+        }
+        if self.settings_open && self.dialog.is_none() {
+            match k.nav.map(|nav| nav.key) {
+                Some(Key::Up) => self.cycle_theme(true),
+                Some(Key::Down) => self.cycle_theme(false),
+                _ => return run(self, k.shortcut),
+            }
+            return Task::none();
+        }
+        if k.shortcut == Some(Shortcut::Settings) {
+            return self.on_shortcut(Shortcut::Settings);
         }
         if self.switcher.is_some() {
             return self.switcher_key(k);

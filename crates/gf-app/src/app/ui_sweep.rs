@@ -653,6 +653,8 @@ fn modal(app: &App) -> Option<&'static str> {
         Some("dialog")
     } else if app.menu.is_some() {
         Some("menu")
+    } else if app.settings_open {
+        Some("settings")
     } else if app.picker.is_some() {
         Some("picker")
     } else if app.tab_list.is_some() {
@@ -1228,6 +1230,51 @@ async fn dragging_the_divider_resizes_the_file_list_and_remembers_it() {
 
 // Fast checks for buttons the sweep found doing nothing (these run with
 // every `cargo test`; the sweeps above are `--ignored`).
+
+#[tokio::test]
+async fn settings_from_the_welcome_screen_apply_and_remember_the_theme() {
+    let mut ui = Ui::welcome().await;
+    let _ = ui.click("[ Settings ⌘, ]").await;
+    assert!(ui.app.settings_open);
+    let _ = ui.click("gf-light").await;
+    assert_eq!(ui.app.tokens.name, "gf-light");
+    assert!(ui.app.settings_open);
+
+    let selected = ui
+        .targets()
+        .into_iter()
+        .find(|target| target.label == "gf-light")
+        .expect("selected theme");
+    assert!(ui.press(selected.at, mouse::Button::Left).is_empty());
+
+    let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
+    let (reopened, _) = App::boot(ui.app.paths.clone(), saved);
+    assert_eq!(reopened.tokens.name, "gf-light");
+
+    let _ = ui.click("[ Done Esc ]").await;
+    assert!(!ui.app.settings_open);
+}
+
+#[tokio::test]
+async fn settings_keys_change_the_theme_without_navigating_the_repository() {
+    let mut ui = Ui::open().await;
+    let active = ui.app.pane();
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    assert!(ui.app.settings_open);
+    let _ = ui
+        .send(Message::KeyInput(focus::KeyInput {
+            shortcut: None,
+            menu: None,
+            nav: Some(Nav::plain(Key::Up)),
+        }))
+        .await;
+    assert_eq!(ui.app.tokens.name, "dracula");
+    assert_eq!(ui.app.pane(), active);
+
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    assert!(!ui.app.settings_open);
+    assert_eq!(ui.app.tokens.name, "dracula");
+}
 
 #[tokio::test]
 async fn clear_is_disabled_while_the_log_has_nothing_to_clear() {
