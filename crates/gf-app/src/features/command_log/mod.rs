@@ -310,7 +310,16 @@ impl Feature for State {
                 None,
                 Some(Message::ToggleBackground),
             ),
-            widgets::text_button(t, "clear", None, Some(Message::Clear)),
+            // Running commands stay: with nothing else, clear has nothing to do.
+            widgets::text_button(
+                t,
+                "clear",
+                None,
+                self.entries
+                    .iter()
+                    .any(|e| !matches!(e.status, EntryStatus::Running { .. }))
+                    .then_some(Message::Clear),
+            ),
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);

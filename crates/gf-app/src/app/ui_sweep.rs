@@ -1061,3 +1061,20 @@ async fn dragging_the_divider_resizes_the_file_list_and_remembers_it() {
         (ui.app.settings.appearance.list_cols - gf_config::DEFAULT_LIST_COLS).abs() < f32::EPSILON
     );
 }
+
+// Fast checks for buttons the sweep found doing nothing (these run with
+// every `cargo test`; the sweeps above are `--ignored`).
+
+#[tokio::test]
+async fn clear_is_disabled_while_the_log_has_nothing_to_clear() {
+    let mut ui = Ui::welcome().await;
+    ui.settle();
+    let clear = ui
+        .targets()
+        .into_iter()
+        .find(|t| t.label == "[ clear ]")
+        .expect("clear button");
+    assert!(ui.press(clear.at, mouse::Button::Left).is_empty());
+    ui.app.log.note(NoteKind::Info, "something", Vec::new());
+    assert!(!ui.press(clear.at, mouse::Button::Left).is_empty());
+}
