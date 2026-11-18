@@ -1238,6 +1238,10 @@ pub(super) fn stash_options(
 
 /// Shows `path` selected in the file manager (Finder on macOS).
 fn reveal(path: &std::path::Path) -> std::io::Result<()> {
+    // Tests check the path exists instead of opening Finder windows.
+    if cfg!(test) {
+        return std::fs::metadata(path).map(|_| ());
+    }
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = std::process::Command::new("open");
         c.arg("-R").arg(path);

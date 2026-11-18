@@ -1,0 +1,1063 @@
+//! Clicks every button gf shows and checks that each one does something.
+//!
+//! The real view is laid out headless (`iced_test`), every visible piece of
+//! text is clicked (left and right button) and the messages it produces
+//! run through [`App::update`] with their tasks, like the runtime would.
+//! A click that produces a message but changes nothing (app state, the
+//! repository, focus, clipboard) is a button that "silently does nothing".
+//!
+//! Screens with their own buttons (dialogs, menus, the open window, ...)
+//! are reached by clicking from the base screens, then swept the same way.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use gf_test_support::TestRepo;
+use iced::futures::StreamExt;
+use iced_test::core::{Point, Size, mouse};
+use iced_test::runtime::{self, Action};
+use iced_test::selector::Candidate;
+
+use super::*;
+
+const WINDOW: Size = Size::new(1280.0, 820.0);
+
+/// Longest a single task may take before it counts as still running.
+const TASK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A repository with something in every list: commits on two branches, a
+/// tag, a stash, a remote with a pushed branch, and staged, modified and
+/// untracked files.
+pub(super) struct Fixture {
+    pub repo: TestRepo,
+}
+
+impl Fixture {
+    /// A fresh copy of the fixture (built once, then copied: tests click
+    /// hundreds of times, each from a fresh repository).
+    pub fn new() -> Self {
+        static TEMPLATE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+        let template = TEMPLATE.get_or_init(Self::build);
+        Self {
+            repo: template.repo.duplicate(),
+        }
+    }
+
+    fn build() -> Self {
+        let repo = TestRepo::new();
+        // The remote lives inside `.git` (a relative url), so one copy of
+        // the folder copies both; no hook samples to copy either.
+        let _ = std::fs::remove_dir_all(repo.path().join(".git/hooks"));
+        let remote = repo.path().join(".git/remote.git");
+        let out = repo
+            .command()
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .arg(&remote)
+            .output()
+            .expect("git init");
+        assert!(out.status.success(), "{out:?}");
+        let _ = std::fs::remove_dir_all(remote.join("hooks"));
+        repo.write("a.txt", "one\ntwo\nthree\n");
+        repo.write("src/lib.rs", "fn main() {}\n");
+        repo.commit_all("first");
+        repo.write("a.txt", "one\ntwo\nthree\nfour\n");
+        repo.commit_all("second");
+        repo.git(&["tag", "v1"]);
+        repo.git(&["branch", "feature"]);
+        repo.write("src/lib.rs", "fn main() {\n    println!(\"hi\");\n}\n");
+        repo.commit_all("third");
+        repo.git(&["remote", "add", "origin", "./.git/remote.git"]);
+        repo.git(&["push", "-q", "-u", "origin", "main", "feature"]);
+        repo.write("a.txt", "stashed\n");
+        repo.git(&["stash", "push", "-q", "-m", "wip"]);
+        repo.write("a.txt", "one\ntwo\nchanged\nfour\n");
+        repo.write("b.txt", "new staged\n");
+        repo.git(&["add", "b.txt"]);
+        repo.write("c.txt", "untracked\n");
+        Self { repo }
+    }
+}
+
+/// What running a click (or a message) did.
+#[derive(Debug, Default)]
+pub(super) struct Effects {
+    /// Messages handled, the clicked ones first, then task outputs.
+    pub messages: Vec<String>,
+    pub state_changed: bool,
+    /// The window looks different afterwards (checked for clicks only).
+    pub screen_changed: bool,
+    pub repo_changed: bool,
+    pub widget_ops: usize,
+    pub clipboard: usize,
+    pub window: usize,
+    /// A task was still running after [`TASK_TIMEOUT`].
+    pub timed_out: bool,
+}
+
+impl Effects {
+    fn silent(&self) -> bool {
+        !self.messages.is_empty()
+            && !self.screen_changed
+            && !self.repo_changed
+            && self.widget_ops == 0
+            && self.clipboard == 0
+            && self.window == 0
+    }
+}
+
+/// A clickable spot: a piece of text and where it is.
+#[derive(Debug, Clone)]
+pub(super) struct Target {
+    pub label: String,
+    pub at: Point,
+}
+
+pub(super) struct Ui {
+    pub app: App,
+    pub fixture: Fixture,
+    /// More repositories open in other tabs.
+    pub others: Vec<Fixture>,
+    _home: tempfile::TempDir,
+}
+
+impl Ui {
+    /// gf with the fixture repository open in a tab, fully loaded.
+    pub async fn open() -> Self {
+        let mut ui = Self::welcome().await;
+        let path = ui.fixture.repo.path().to_path_buf();
+        let _ = ui.send(Message::Open(path)).await;
+        assert_eq!(ui.app.tabs.len(), 1, "the fixture opens in a tab");
+        ui
+    }
+
+    /// gf with the fixture open after `setup` changed it (a conflict, a
+    /// bisect, ...).
+    pub async fn open_with(setup: impl FnOnce(&TestRepo)) -> Self {
+        let mut ui = Self::welcome().await;
+        setup(&ui.fixture.repo);
+        let path = ui.fixture.repo.path().to_path_buf();
+        let _ = ui.send(Message::Open(path)).await;
+        assert_eq!(ui.app.tabs.len(), 1, "the fixture opens in a tab");
+        ui
+    }
+
+    /// gf with no tab open; the fixture is in the recent list.
+    pub async fn welcome() -> Self {
+        let fixture = Fixture::new();
+        let home = tempfile::tempdir().expect("home");
+        let mut settings = gf_config::Settings::default();
+        settings.remember_repo(fixture.repo.path());
+        let (mut app, _boot) = App::boot(gf_config::AppPaths::under(home.path()), settings);
+        // git runs isolated from the developer's config, as in every test.
+        app.runner = app
+            .runner
+            .clone()
+            .with_cleared_env()
+            .with_env(fixture.repo.env());
+        Self {
+            app,
+            fixture,
+            others: Vec::new(),
+            _home: home,
+        }
+    }
+
+    /// Runs a message and every task it starts.
+    pub async fn send(&mut self, message: Message) -> Effects {
+        self.run(vec![message], false).await
+    }
+
+    /// Runs `messages` and their tasks; `look` compares the window before
+    /// and after (a click must show something).
+    async fn run(&mut self, messages: Vec<Message>, look: bool) -> Effects {
+        let mut fx = Effects::default();
+        let frame = self._home.path().join("frame.png");
+        let _ = std::fs::remove_file(self.frame_file(&frame));
+        if look {
+            let _ = self.looks_like(&frame);
+        }
+        let state_before = self.state();
+        let repo_before = self.repo_state();
+        let mut tasks = VecDeque::new();
+        for m in messages {
+            fx.messages.push(short(&m));
+            tasks.push_back(self.handle_native(m, &mut fx));
+        }
+        while let Some(task) = tasks.pop_front() {
+            let Some(mut stream) = runtime::task::into_stream(task) else {
+                continue;
+            };
+            loop {
+                match tokio::time::timeout(TASK_TIMEOUT, stream.next()).await {
+                    Ok(Some(Action::Output(m))) => {
+                        fx.messages.push(short(&m));
+                        tasks.push_back(self.handle_native(m, &mut fx));
+                    }
+                    Ok(Some(Action::Widget(_))) => fx.widget_ops += 1,
+                    Ok(Some(Action::Clipboard(_))) => fx.clipboard += 1,
+                    Ok(Some(Action::Window(_) | Action::Exit)) => fx.window += 1,
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(_) => {
+                        fx.timed_out = true;
+                        break;
+                    }
+                }
+            }
+        }
+        fx.state_changed = self.state() != state_before;
+        fx.screen_changed = look && !self.looks_like(&frame);
+        fx.repo_changed = self.repo_state() != repo_before;
+        fx
+    }
+
+    /// Native windows (the folder chooser) cannot open in a test: they
+    /// count as what the click did, and the chooser is cancelled.
+    fn handle_native(&mut self, m: Message, fx: &mut Effects) -> Task<Message> {
+        match m {
+            Message::PickFolder => {
+                fx.window += 1;
+                Task::none()
+            }
+            m => self.app.update(m),
+        }
+    }
+
+    /// Whether the window looks like the frame saved at `path` (the first
+    /// call saves it).
+    fn looks_like(&self, path: &std::path::Path) -> bool {
+        let theme = self.app.theme();
+        self.simulator()
+            .snapshot(&theme)
+            .and_then(|s| s.matches_hash(path))
+            .expect("render the window")
+    }
+
+    /// Where [`Self::looks_like`] keeps the frame saved at `path`.
+    fn frame_file(&self, path: &std::path::Path) -> PathBuf {
+        let dir = path.parent().expect("dir");
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.extension().is_some_and(|e| e == "sha256")
+                    && p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("frame-"))
+            })
+            .unwrap_or_else(|| dir.join("frame-none.sha256"))
+    }
+
+    /// Everything the app holds, as text (the pointer is left out: every
+    /// click moves it).
+    fn state(&self) -> String {
+        let mut s = format!("{:?}", self.app);
+        if let Some(start) = s.find("pointer: Pointer {")
+            && let Some(len) = s[start..].find("}, ")
+        {
+            s.replace_range(start..start + len, "");
+        }
+        s
+    }
+
+    /// The repository as git sees it: refs, index and working tree, stashes.
+    fn repo_state(&self) -> String {
+        let r = &self.fixture.repo;
+        [
+            r.git(&["for-each-ref", "--format=%(refname) %(objectname)"]),
+            // Detached (bisect, rebase): no branch, not an error.
+            String::from_utf8_lossy(
+                &r.git_output(&["symbolic-ref", "-q", "--short", "HEAD"])
+                    .stdout,
+            )
+            .into_owned(),
+            r.git(&["status", "--porcelain=v2", "--untracked-files=all"]),
+            r.git(&["stash", "list"]),
+            r.git(&["config", "--local", "--list"]),
+        ]
+        .join("\n")
+    }
+
+    fn simulator(&self) -> iced_test::Simulator<'_, Message> {
+        let settings = iced_test::core::Settings {
+            default_font: iced::Font::MONOSPACE,
+            ..iced_test::core::Settings::default()
+        };
+        iced_test::Simulator::with_size(settings, WINDOW, self.app.view())
+    }
+
+    /// Every piece of text shown, where it can be clicked.
+    pub fn targets(&self) -> Vec<Target> {
+        let mut found = Vec::new();
+        {
+            let found = &mut found;
+            let mut sim = self.simulator();
+            let _ = sim.find(move |c: Candidate<'_>| -> Option<()> {
+                if let Candidate::Text {
+                    visible_bounds: Some(b),
+                    content,
+                    ..
+                } = c
+                    && !content.trim().is_empty()
+                    && b.width >= 1.0
+                    && b.height >= 1.0
+                {
+                    found.push(Target {
+                        label: content.to_owned(),
+                        at: b.center(),
+                    });
+                }
+                None
+            });
+        }
+        found
+    }
+
+    /// The messages a press of `button` at `at` produces (nothing runs).
+    pub fn press(&self, at: Point, button: mouse::Button) -> Vec<Message> {
+        let mut sim = self.simulator();
+        sim.point_at(at);
+        let _ = sim.simulate([
+            iced::Event::Mouse(mouse::Event::CursorMoved { position: at }),
+            iced::Event::Mouse(mouse::Event::ButtonPressed(button)),
+            iced::Event::Mouse(mouse::Event::ButtonReleased(button)),
+        ]);
+        // Hovering is the pointer passing by, not what the click did.
+        sim.into_messages()
+            .filter(|m| {
+                let m = format!("{m:?}");
+                !m.contains("(Hover(") && !m.ends_with("(DragEnd)")
+            })
+            .collect()
+    }
+
+    /// Drags the mouse from `from` to `to` (a text selection) and runs
+    /// what it does.
+    /// Drags in one go, without drawing the window in between (for a
+    /// widget that follows the drag itself, like the divider).
+    pub async fn drag_through(&mut self, from: Point, to: Point) -> Effects {
+        let messages = {
+            let mut sim = self.simulator();
+            sim.point_at(from);
+            let _ = sim.simulate([
+                iced::Event::Mouse(mouse::Event::CursorMoved { position: from }),
+                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            ]);
+            sim.point_at(to);
+            let _ = sim.simulate([
+                iced::Event::Mouse(mouse::Event::CursorMoved { position: to }),
+                iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            ]);
+            sim.into_messages().collect()
+        };
+        self.run(messages, true).await
+    }
+
+    pub async fn drag(&mut self, from: Point, to: Point) -> Effects {
+        // The window is drawn again between the steps, as it would be.
+        let step = |ui: &Self, at: Point, event: mouse::Event| -> Vec<Message> {
+            let mut sim = ui.simulator();
+            sim.point_at(at);
+            let _ = sim.simulate([
+                iced::Event::Mouse(mouse::Event::CursorMoved { position: at }),
+                iced::Event::Mouse(event),
+            ]);
+            sim.into_messages().collect()
+        };
+        let pressed = step(self, from, mouse::Event::ButtonPressed(mouse::Button::Left));
+        let mut fx = self.run(pressed, true).await;
+        let moved = step(self, to, mouse::Event::CursorMoved { position: to });
+        let released = step(self, to, mouse::Event::ButtonReleased(mouse::Button::Left));
+        let end = self
+            .run(moved.into_iter().chain(released).collect(), true)
+            .await;
+        fx.messages.extend(end.messages);
+        fx.screen_changed |= end.screen_changed;
+        fx
+    }
+
+    /// Clicks the first text equal to `label` (or starting with it) and
+    /// runs what it does.
+    pub async fn click(&mut self, label: &str) -> Effects {
+        self.click_with(label, mouse::Button::Left).await
+    }
+
+    pub async fn right_click(&mut self, label: &str) -> Effects {
+        self.click_with(label, mouse::Button::Right).await
+    }
+
+    async fn click_with(&mut self, label: &str, button: mouse::Button) -> Effects {
+        self.settle();
+        let targets = self.targets();
+        let target = targets
+            .iter()
+            .find(|t| t.label == label)
+            .or_else(|| targets.iter().find(|t| t.label.trim().starts_with(label)))
+            .or_else(|| targets.iter().find(|t| t.label.contains(label)))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no {label:?} on screen; shown: {:?}",
+                    targets.iter().map(|t| &t.label).collect::<Vec<_>>()
+                )
+            })
+            .clone();
+        self.click_at(&target, button).await
+    }
+
+    pub async fn click_at(&mut self, target: &Target, button: mouse::Button) -> Effects {
+        let messages = self.press(target.at, button);
+        self.run(messages, true).await
+    }
+
+    /// Clears the flash: one already shown would hide one the next click
+    /// shows again. Done before looking for targets, as the status line
+    /// is laid out differently with a flash.
+    pub fn settle(&mut self) {
+        self.app.flash = None;
+    }
+
+    pub fn shows(&self, label: &str) -> bool {
+        self.targets().iter().any(|t| t.label.contains(label))
+    }
+}
+
+/// A message, shortened for reports.
+fn short(m: &Message) -> String {
+    let s = format!("{m:?}");
+    if s.len() > 160 {
+        let cut = (0..=160)
+            .rev()
+            .find(|i| s.is_char_boundary(*i))
+            .unwrap_or(0);
+        format!("{}…", &s[..cut])
+    } else {
+        s
+    }
+}
+
+/// What kind of click a message is, to try a few of many alike rows (a
+/// commit, a file, a branch) but every distinct button.
+fn kind(m: &str) -> String {
+    let row_like = ["Oid(", "Ref(", "\"", "Point {"];
+    if !row_like.iter().any(|p| m.contains(p)) {
+        return m.to_owned();
+    }
+    let mut depth = 0;
+    let mut end = m.len();
+    for (i, c) in m.char_indices() {
+        if c == '(' || c == '{' || c == ' ' {
+            depth += 1;
+            if depth == 2 {
+                end = i;
+                break;
+            }
+        }
+    }
+    m[..end].to_owned()
+}
+
+/// Picking what is already picked (the shown tab, the mode or pane in
+/// use, the chosen option) rightly changes nothing.
+fn reselect(messages: &[String]) -> bool {
+    let picks = [
+        "Tabs(Select(",
+        "CodeView(",
+        "FocusPane(",
+        "Dialog(Choose(",
+        "History(Select(",
+        "Changes(Select(",
+        "Sidebar(Select(",
+        "CommitDiff(SelectFile(",
+        "LocalDiff(SelectFile(",
+        "Blame(Select(",
+    ];
+    messages.len() == 1 && picks.iter().any(|p| messages[0].starts_with(p))
+}
+
+/// One click that did nothing.
+#[derive(Debug)]
+pub(super) struct Silent {
+    pub screen: String,
+    pub label: String,
+    pub button: &'static str,
+    pub messages: Vec<String>,
+}
+
+/// How to get to a screen from the base one: the clicks, by label.
+type Path = Vec<(String, mouse::Button)>;
+
+struct Screen {
+    name: String,
+    path: Path,
+    /// Labels the screen it was reached from already had: only the new
+    /// ones are tried (the rest were, there).
+    known: Option<std::collections::HashSet<String>>,
+}
+
+/// How many screens deep from the base screen clicks are followed: one
+/// by default (the dialogs and menus the base screen opens),
+/// `GF_SWEEP_DEPTH=2` for what those open too (about ten minutes).
+fn depth() -> usize {
+    std::env::var("GF_SWEEP_DEPTH")
+        .ok()
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(1)
+}
+
+/// Sweeps the screen `build` gives and the screens its clicks lead to
+/// (dialogs, menus, a selected commit's files, ...). Returns the clicks
+/// that did nothing.
+pub(super) async fn sweep<F, Fut>(name: &str, build: F) -> Vec<Silent>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Ui>,
+{
+    let mut silent = Vec::new();
+    let mut screens = VecDeque::from([Screen {
+        name: name.to_owned(),
+        path: Vec::new(),
+        known: None,
+    }]);
+    let mut seen_screens = std::collections::HashSet::new();
+    let mut tried = std::collections::HashSet::new();
+    while let Some(screen) = screens.pop_front() {
+        let Some(base) = reach(&build, &screen.path).await else {
+            continue;
+        };
+        let targets = base.targets();
+        let labels: std::collections::HashSet<String> =
+            targets.iter().map(|t| t.label.clone()).collect();
+        // Which spots react at all, a couple per kind of message.
+        let mut by_kind: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+        let mut plan = Vec::new();
+        for target in &targets {
+            if screen
+                .known
+                .as_ref()
+                .is_some_and(|k| k.contains(&target.label))
+            {
+                continue;
+            }
+            for (button, button_name) in [
+                (mouse::Button::Left, "click"),
+                (mouse::Button::Right, "right-click"),
+            ] {
+                let messages = base.press(target.at, button);
+                if messages.is_empty() {
+                    continue;
+                }
+                let k: Vec<String> = messages.iter().map(|m| kind(&short(m))).collect();
+                let key = (k.join(" "), button_name);
+                let n = by_kind.entry(key.clone()).or_default();
+                *n += 1;
+                // One row of a kind (a commit, a file), every button; once
+                // overall when it does not depend on the screen.
+                if *n > 1 || (screen.known.is_some() && tried.contains(&key)) {
+                    continue;
+                }
+                plan.push((target.clone(), button, button_name, key));
+            }
+        }
+        let modal_before = modal(&base.app);
+        drop(base);
+        for (target, button, button_name, key) in plan {
+            let _ = tried.insert(key.clone());
+            let Some(mut ui) = reach(&build, &screen.path).await else {
+                continue;
+            };
+            let fx = ui.click_at(&target, button).await;
+            let quiet = fx.silent() && !reselect(&fx.messages);
+            println!(
+                "{} › {button_name} {:?} → {}{}",
+                screen.name,
+                target.label.trim(),
+                fx.messages.join(" · "),
+                if quiet { "  [SILENT]" } else { "" }
+            );
+            if quiet {
+                silent.push(Silent {
+                    screen: screen.name.clone(),
+                    label: target.label.clone(),
+                    button: button_name,
+                    messages: fx.messages.clone(),
+                });
+            }
+            // Another tab is another screen, swept by its own test.
+            let elsewhere = [
+                "Welcome(OpenRecent",
+                "Tabs(Select",
+                "Tabs(Close",
+                "TabList(Pick",
+                "TabList(CloseTab",
+                "Picker(Pick",
+            ];
+            if screen.path.len() >= depth()
+                || !(fx.state_changed || fx.repo_changed)
+                || elsewhere.iter().any(|e| fx.messages[0].starts_with(e))
+            {
+                continue;
+            }
+            // Follow clicks that show new buttons: a dialog or menu, or
+            // what a selection brings up.
+            ui.settle();
+            let opened = modal(&ui.app);
+            let new_labels = ui.targets().iter().any(|t| !labels.contains(&t.label));
+            if !(new_labels || opened != modal_before) {
+                continue;
+            }
+            let id = format!("{opened:?} {}", key.0);
+            if seen_screens.insert(id) {
+                let mut path = screen.path.clone();
+                path.push((target.label.clone(), button));
+                screens.push_back(Screen {
+                    name: format!("{} › {button_name} {:?}", screen.name, target.label.trim()),
+                    path,
+                    known: (opened == modal_before).then(|| labels.clone()),
+                });
+            }
+        }
+    }
+    silent
+}
+
+/// The base screen, then the clicks along `path`.
+async fn reach<F, Fut>(build: &F, path: &Path) -> Option<Ui>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Ui>,
+{
+    let mut ui = build().await;
+    ui.settle();
+    for (label, button) in path {
+        let targets = ui.targets();
+        let target = targets.iter().find(|t| &t.label == label)?.clone();
+        let _ = ui.click_at(&target, *button).await;
+        ui.settle();
+    }
+    Some(ui)
+}
+
+/// Which layer above the main window is open, if any.
+fn modal(app: &App) -> Option<&'static str> {
+    if app.dialog.is_some() {
+        Some("dialog")
+    } else if app.menu.is_some() {
+        Some("menu")
+    } else if app.picker.is_some() {
+        Some("picker")
+    } else if app.tab_list.is_some() {
+        Some("tab list")
+    } else if app.undo_list.is_some() {
+        Some("undo list")
+    } else if app.rebase_editor.is_some() {
+        Some("rebase editor")
+    } else {
+        None
+    }
+}
+
+pub(super) fn report(silent: &[Silent]) -> String {
+    silent
+        .iter()
+        .map(|s| {
+            format!(
+                "{} › {} {:?}\n    {}",
+                s.screen,
+                s.button,
+                s.label.trim(),
+                s.messages.join("\n    ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_welcome() {
+    let silent = sweep("welcome", Ui::welcome).await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_history() {
+    let silent = sweep("history", Ui::open).await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_working_tree() {
+    let silent = sweep("working tree", || async {
+        let mut ui = Ui::open().await;
+        let _ = ui.send(Message::CodeView(diff_view::Role::Local)).await;
+        ui
+    })
+    .await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+/// Main and `feature` both change the first line of `a.txt`; the work
+/// tree is clean.
+fn diverged(repo: &TestRepo) {
+    repo.git(&["reset", "-q", "--hard"]);
+    repo.git(&["clean", "-qfd"]);
+    repo.git(&["switch", "-q", "feature"]);
+    repo.write("a.txt", "feature\n");
+    repo.commit_all("feature edit");
+    repo.git(&["switch", "-q", "main"]);
+    repo.write("a.txt", "main\n");
+    repo.commit_all("main edit");
+}
+
+async fn working_tree(ui: Ui) -> Ui {
+    let mut ui = ui;
+    let _ = ui.send(Message::CodeView(diff_view::Role::Local)).await;
+    ui
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_merge_conflict() {
+    let silent = sweep("merge conflict", || async {
+        working_tree(
+            Ui::open_with(|r| {
+                diverged(r);
+                let _ = r.git_output(&["merge", "feature"]);
+            })
+            .await,
+        )
+        .await
+    })
+    .await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_rebase_stopped() {
+    let silent = sweep("rebase stopped", || async {
+        working_tree(
+            Ui::open_with(|r| {
+                diverged(r);
+                let _ = r.git_output(&["rebase", "feature"]);
+            })
+            .await,
+        )
+        .await
+    })
+    .await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_bisect() {
+    let silent = sweep("bisect", || async {
+        Ui::open_with(|r| {
+            r.git(&["reset", "-q", "--hard"]);
+            r.git(&["clean", "-qfd"]);
+            r.git(&["bisect", "start", "HEAD", "HEAD~2"]);
+        })
+        .await
+    })
+    .await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_two_tabs_and_undo() {
+    let silent = sweep("two tabs, undo", || async {
+        let mut ui = Ui::open().await;
+        // A second tab, then back to the first.
+        let other = Fixture::new();
+        let path = other.repo.path().to_path_buf();
+        ui.others.push(other);
+        let _ = ui.send(Message::Open(path)).await;
+        let _ = ui.send(Message::Tabs(tabs::Message::Select(0))).await;
+        let _ = ui
+            .send(Message::Changes(changes::Message::Stage("a.txt".into())))
+            .await;
+        assert!(ui.app.tabs.len() == 2, "two tabs");
+        ui
+    })
+    .await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+/// The working tree with `a.txt`'s unstaged changes shown.
+async fn a_txt_shown() -> Ui {
+    let mut ui = working_tree(Ui::open().await).await;
+    let _ = ui
+        .send(Message::Changes(changes::Message::Select(
+            "a.txt".into(),
+            changes::Group::Unstaged,
+        )))
+        .await;
+    ui
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_file_diff() {
+    let silent = sweep("a.txt diff", a_txt_shown).await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_selected_lines() {
+    let silent = sweep("selected lines", drag_selected).await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_rebase_editor() {
+    let silent = sweep("rebase editor", || async {
+        let mut ui = Ui::open_with(|r| {
+            r.git(&["reset", "-q", "--hard"]);
+            r.git(&["clean", "-qfd"]);
+        })
+        .await;
+        let _ = ui.right_click("first").await;
+        let _ = ui.click("rebase -i from here").await;
+        assert!(ui.app.rebase_editor.is_some(), "the rebase editor opens");
+        ui
+    })
+    .await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_left_changes() {
+    let silent = sweep("left changes", || async {
+        let ui = Ui::open_with(|r| {
+            r.git(&["reset", "-q", "--hard"]);
+            r.git(&["clean", "-qfd"]);
+            r.write("a.txt", "left behind\n");
+            r.git(&["stash", "push", "-q", "-m", "gf: left on main"]);
+        })
+        .await;
+        assert!(
+            ui.shows("left on main") || ui.shows("left"),
+            "the banner shows"
+        );
+        ui
+    })
+    .await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+async fn drag_selected() -> Ui {
+    let mut ui = a_txt_shown().await;
+    ui.settle();
+    let lines: Vec<Target> = ui
+        .targets()
+        .into_iter()
+        .filter(|t| {
+            ui.press(t.at, mouse::Button::Left)
+                .iter()
+                .any(|m| matches!(m, Message::LocalDiff(diff_view::Message::LinePressed(_))))
+        })
+        .collect();
+    let (first, last) = (
+        lines.first().expect("diff lines"),
+        lines.last().expect("diff lines"),
+    );
+    let fx = ui.drag(first.at, last.at).await;
+    assert!(fx.screen_changed, "dragging selects lines: {fx:?}");
+    ui
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_conflict_resolver() {
+    let silent = sweep("conflict resolver", || async {
+        let mut ui = working_tree(
+            Ui::open_with(|r| {
+                diverged(r);
+                let _ = r.git_output(&["merge", "feature"]);
+            })
+            .await,
+        )
+        .await;
+        let _ = ui
+            .send(Message::Changes(changes::Message::Select(
+                "a.txt".into(),
+                changes::Group::Conflicts,
+            )))
+            .await;
+        // One choice made: Apply can run.
+        let _ = ui
+            .send(Message::Conflict(
+                crate::features::conflict_view::Message::Choose(0, gf_git::conflict::Choice::Ours),
+            ))
+            .await;
+        ui
+    })
+    .await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+#[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
+async fn sweep_rebase_resolved() {
+    let silent = sweep("rebase resolved", || async {
+        working_tree(
+            Ui::open_with(|r| {
+                diverged(r);
+                let _ = r.git_output(&["rebase", "feature"]);
+                r.write("a.txt", "resolved\n");
+                r.git(&["add", "a.txt"]);
+            })
+            .await,
+        )
+        .await
+    })
+    .await;
+    assert!(
+        silent.is_empty(),
+        "clicks that did nothing:\n{}",
+        report(&silent)
+    );
+}
+
+#[tokio::test]
+async fn clicking_a_tab_in_the_switcher_shows_it() {
+    let mut ui = Ui::open().await;
+    let other = Fixture::new();
+    let path = other.repo.path().to_path_buf();
+    let name = path
+        .file_name()
+        .expect("name")
+        .to_string_lossy()
+        .into_owned();
+    ui.others.push(other);
+    let _ = ui.send(Message::Open(path)).await;
+    let _ = ui.send(Message::Tabs(tabs::Message::Select(0))).await;
+    // ⌃ held, ⌃⇥ pressed: the switcher shows over the window.
+    let _ = ui.send(Message::Modifiers(keyboard::Modifiers::CTRL)).await;
+    let _ = ui
+        .send(Message::Key(Shortcut::CycleTab { back: false }))
+        .await;
+    assert!(ui.app.switcher.is_some());
+    ui.settle();
+    // The switcher's row (the last label with the name is on top).
+    let row = ui
+        .targets()
+        .into_iter()
+        .rfind(|t| t.label.contains(&name))
+        .expect("the other tab in the switcher");
+    let _ = ui.click_at(&row, mouse::Button::Left).await;
+    assert_eq!(ui.app.active, 1, "the clicked tab is shown");
+    assert!(ui.app.switcher.is_none());
+}
+
+#[tokio::test]
+async fn dragging_the_divider_resizes_the_file_list_and_remembers_it() {
+    let mut ui = working_tree(Ui::open().await).await;
+    ui.settle();
+    let diff = ui
+        .targets()
+        .into_iter()
+        .find(|t| t.label.starts_with("━ LOCAL CHANGES"))
+        .expect("the diff panel");
+    // The divider is just left of the diff panel: find where a press
+    // starts a resize.
+    let y = diff.at.y + 40.0;
+    let x = (0..40)
+        .map(|dx| diff.at.x - 60.0 - dx as f32)
+        .chain((0..200).map(|dx| diff.at.x - dx as f32))
+        .find(|&x| {
+            ui.press(Point::new(x, y), mouse::Button::Left)
+                .iter()
+                .any(|m| matches!(m, Message::ResizeListStart))
+        })
+        .expect("the divider");
+    let before = ui.app.settings.appearance.list_cols;
+    let fx = ui
+        .drag_through(Point::new(x, y), Point::new(x + 80.0, y))
+        .await;
+    let after = ui.app.settings.appearance.list_cols;
+    assert!(after > before, "{before} → {after}: {fx:?}");
+    let saved = gf_config::Settings::load(&ui.app.paths.settings_file()).expect("saved");
+    assert!((saved.appearance.list_cols - after).abs() < f32::EPSILON);
+
+    // A double-click puts it back.
+    ui.settle();
+    let at = Point::new(x + 80.0, y);
+    let messages = {
+        let mut sim = ui.simulator();
+        sim.point_at(at);
+        let click = [
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ];
+        let _ = sim.simulate(
+            std::iter::once(iced::Event::Mouse(mouse::Event::CursorMoved {
+                position: at,
+            }))
+            .chain(click.clone())
+            .chain(click),
+        );
+        sim.into_messages().collect()
+    };
+    let _ = ui.run(messages, false).await;
+    assert!(
+        (ui.app.settings.appearance.list_cols - gf_config::DEFAULT_LIST_COLS).abs() < f32::EPSILON
+    );
+}

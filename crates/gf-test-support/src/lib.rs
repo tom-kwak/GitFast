@@ -110,6 +110,22 @@ impl TestRepo {
         self.git(&["rev-parse", "HEAD"])
     }
 
+    /// An exact copy of this repository (working tree, index, history,
+    /// config) in its own temp dir: cheaper than building it again.
+    pub fn duplicate(&self) -> TestRepo {
+        let copy = Self::empty_dir();
+        let out = Command::new("cp")
+            .arg("-Rp")
+            .arg(self.path().join("."))
+            .arg(copy.path())
+            .output()
+            .unwrap();
+        assert_success(&["cp -Rp"], &out);
+        copy.clock
+            .store(self.clock.load(Ordering::SeqCst), Ordering::SeqCst);
+        copy
+    }
+
     /// Creates a clone of this repository next to it (in its own temp dir).
     pub fn clone_repo(&self) -> TestRepo {
         let clone = Self::empty_dir();

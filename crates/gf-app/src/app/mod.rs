@@ -22,6 +22,8 @@ mod focus;
 mod ops;
 mod outputs;
 mod reveal;
+#[cfg(test)]
+mod ui_sweep;
 mod undoing;
 
 use std::hash::{Hash, Hasher};
@@ -740,6 +742,8 @@ impl App {
                 self.note_active();
                 Task::batch(tasks)
             }
+            // Tests cannot show the system's folder chooser: it is cancelled.
+            Message::PickFolder if cfg!(test) => Task::done(Message::Picked(None)),
             Message::PickFolder => Task::perform(
                 async {
                     rfd::AsyncFileDialog::new()
