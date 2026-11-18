@@ -16,10 +16,19 @@ opens without a Gatekeeper prompt. Run it again to update. gf needs `git`
 
 ## Releases
 
-Every push to `main` runs the checks, builds a universal `.dmg`
-(`scripts/package-macos.sh`) and publishes it as a GitHub release tagged
-`release-<version>` (the workspace version in `Cargo.toml`; bump it for the
-next release, or the tag gets a `-build.<n>` suffix).
+A release is a tag `release-<version>` on a commit in `main`, where
+`<version>` is the workspace version in `Cargo.toml`:
+
+```bash
+git tag release-0.0.2
+git push origin release-0.0.2
+```
+
+Pushing the tag onto a commit `main` already has releases at once; a tag on
+a commit that is not in `main` yet (on `develop`) releases when `main` gets
+it, e.g. when `develop` is merged. The checks and the UI sweep run on that
+commit, then a universal `.dmg` (`scripts/package-macos.sh`) is published as
+the GitHub release. A tag whose version does not match `Cargo.toml` fails.
 See `.github/workflows/release.yml`.
 
 ## Development

@@ -1,38 +1,83 @@
 name: Release
 
-# Every push to main (a merge or a direct push): check, then publish a
-# release with the macOS .dmg.
+# A tag `release-<version>` (the workspace version in Cargo.toml) on a
+# commit that is in main publishes a release with the macOS .dmg: either
+# the tag is pushed onto a commit main already has, or main gets the
+# tagged commit later (a merge of develop). A tag on a commit main does
+# not have waits until main has it.
+#
+#   git tag release-0.0.2 && git push origin release-0.0.2
 on:
   push:
     branches: [main]
-  workflow_dispatch:
+    tags: ["release-*"]
 
+# One at a time: a push of main and its tag together release once.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
+  # Which tag to release: the newest release-* tag in main that has no
+  # release yet (none: nothing to do).
+  resolve:
+    name: Find the tag to release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.find.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch -q --tags origin +refs/heads/main:refs/remotes/origin/main
+          released="$(gh release list --limit 1000 --json tagName -q '.[].tagName')"
+          tag=""
+          for t in $(git tag -l 'release-*' --merged origin/main --sort=-v:refname); do
+            if ! grep -qxF "$t" <<<"$released"; then tag="$t"; fi
+            break
+          done
+          if [ -z "$tag" ]; then
+            echo "No release tag in main without a release: nothing to publish."
+          else
+            echo "Releasing $tag ($(git rev-parse "$tag^{commit}"))"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   ci:
+    needs: resolve
+    if: needs.resolve.outputs.tag != ''
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.resolve.outputs.tag }}
 
   # Runs beside the checks and the .dmg build; the release waits for it.
   ui-sweep:
     name: UI sweep (every button does something)
+    needs: resolve
+    if: needs.resolve.outputs.tag != ''
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p gf-app -- --ignored sweep_
 
   macos:
     name: Package (macOS)
-    needs: ci
+    needs: [resolve, ci]
     runs-on: macos-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
@@ -43,14 +88,15 @@ jobs:
       - name: Version
         id: version
         run: |
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          # release-<version>; a later push before the version is bumped
-          # gets release-<version>-build.<run> (tags are never reused).
-          tag="release-$version"
-          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
-            tag="$tag-build.$GITHUB_RUN_NUMBER"
+          tag="${{ needs.resolve.outputs.tag }}"
+          version="${tag#release-}"
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          # The app reports Cargo.toml's version: the tag must say the same.
+          if [ "$version" != "$crate" ]; then
+            echo "::error::tag $tag does not match the version in Cargo.toml ($crate): bump it, or tag release-$crate"
+            exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Build gf.app and .dmg (Apple silicon + Intel)
@@ -104,8 +150,9 @@ jobs:
 
           Universal build (Apple silicon + Intel), macOS 11+.
           NOTES
+          # The tag already exists (on a commit in main).
           gh release create "$TAG" "$DMG" "$DMG.sha256" \
-            --target "$GITHUB_SHA" \
+            --verify-tag \
             --title "gf ${TAG#release-}" \
             --notes-file notes.md \
             --generate-notes \

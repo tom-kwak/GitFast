@@ -2,8 +2,15 @@ name: CI
 
 on:
   pull_request:
-  # Pushes to main run this from release.yml, before releasing.
+  push:
+    branches: [main, develop]
+  # release.yml runs this on the commit it is about to release.
   workflow_call:
+    inputs:
+      ref:
+        description: Commit to check (default the one that triggered)
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,6 +27,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -28,14 +37,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
-  # Clicks every button on screen headless (app/ui_sweep.rs). Pull
-  # requests only: on main, release.yml runs it beside the .dmg build.
+  # Clicks every button on screen headless (app/ui_sweep.rs). For a
+  # release, release.yml runs it beside the .dmg build instead.
   ui-sweep:
     name: UI sweep (every button does something)
-    if: github.event_name == 'pull_request'
+    if: ${{ github.workflow == 'CI' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p gf-app -- --ignored sweep_
@@ -45,4 +56,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: EmbarkStudios/cargo-deny-action@v2
