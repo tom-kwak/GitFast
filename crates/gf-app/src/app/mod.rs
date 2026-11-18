@@ -558,7 +558,8 @@ impl App {
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
-                let Update { task, output } = tab.changes.update(m);
+                let snap = tab.snapshot.clone();
+                let Update { task, output } = tab.changes.update_with(m, snap.as_deref());
                 let task = task.map(Message::Changes);
                 match output {
                     Some(o) => Task::batch([task, self.on_changes(o)]),

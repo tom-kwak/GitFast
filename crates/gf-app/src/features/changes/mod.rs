@@ -35,6 +35,8 @@ pub struct State {
     scroll: ScrollPos,
     /// Widest entry of the status shown, in columns.
     widest: Memo<memo::Id, usize>,
+    /// Files the last commit does not have (set before a menu opens).
+    new_files: Vec<PathBuf>,
 }
 
 /// One row of the flattened list: a group header or a file.
@@ -122,8 +124,9 @@ pub fn ignore_patterns(path: &std::path::Path) -> Vec<(char, String, String)> {
 }
 
 /// The actions for `path` as listed in `group`, with the git command each
-/// runs as its hint.
-fn file_menu(path: &std::path::Path, group: Group) -> Menu<Message> {
+/// runs as its hint. `in_head`: the last commit has the file (so it has
+/// a history and a blame).
+fn file_menu(path: &std::path::Path, group: Group, in_head: bool) -> Menu<Message> {
     let p = path.display().to_string();
     let act = |o: Output| Message::Act(o);
     let pb = path.to_path_buf();
@@ -214,7 +217,7 @@ fn file_menu(path: &std::path::Path, group: Group) -> Menu<Message> {
     };
     entries.push(Entry::Separator);
     // A new file has no history or blame yet.
-    if matches!(group, Group::Staged | Group::Unstaged) {
+    if in_head && matches!(group, Group::Staged | Group::Unstaged) {
         entries.push(Entry::item(
             'h',
             "file history",
@@ -531,6 +534,41 @@ impl State {
     }
 }
 
+impl State {
+    /// [`Feature::update`] knowing the repository: the file menus leave
+    /// out history and blame for files the last commit does not have yet
+    /// (added, or the new name of a rename).
+    pub fn update_with(
+        &mut self,
+        message: Message,
+        snap: Option<&crate::repo_tab::Snapshot>,
+    ) -> Update<Message, Output> {
+        // Only menus need it (not every scroll).
+        if !matches!(message, Message::RightClick(..) | Message::OpenActions) {
+            return self.update(message);
+        }
+        self.new_files = snap.map_or_else(Vec::new, |s| {
+            s.status
+                .entries
+                .iter()
+                .filter_map(|e| match e {
+                    StatusEntry::Changed {
+                        path,
+                        index: ChangeKind::Added | ChangeKind::Renamed | ChangeKind::Copied,
+                        ..
+                    } => Some(path.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        self.update(message)
+    }
+
+    fn in_head(&self, path: &std::path::Path) -> bool {
+        !self.new_files.iter().any(|p| p == path)
+    }
+}
+
 impl Feature for State {
     type Message = Message;
     type Output = Output;
@@ -570,13 +608,13 @@ impl Feature for State {
                     .then(|| diff_source(path.clone(), group));
                 Update::output(Output::Menu {
                     show,
-                    menu: file_menu(&path, group),
+                    menu: file_menu(&path, group, self.in_head(&path)),
                 })
             }
             Message::OpenActions => match self.selected.clone() {
                 Some((path, group)) => Update::output(Output::Menu {
                     show: None,
-                    menu: file_menu(&path, group),
+                    menu: file_menu(&path, group, self.in_head(&path)),
                 }),
                 None => Update::none(),
             },
@@ -744,14 +782,22 @@ mod tests {
             Some(Output::Menu { show: None, .. })
         ));
 
-        assert_eq!(keys(&file_menu("a.rs".as_ref(), Group::Staged)), "uzhbyf");
         assert_eq!(
-            keys(&file_menu("a.rs".as_ref(), Group::Conflicts)),
+            keys(&file_menu("a.rs".as_ref(), Group::Staged, true)),
+            "uzhbyf"
+        );
+        assert_eq!(
+            keys(&file_menu("a.rs".as_ref(), Group::Conflicts, true)),
             "rotsyf"
         );
         assert_eq!(
-            keys(&file_menu("logs/x.log".as_ref(), Group::Untracked)),
+            keys(&file_menu("logs/x.log".as_ref(), Group::Untracked, true)),
             "siegdyf"
+        );
+        // A file new in the index has no history or blame to show yet.
+        assert_eq!(
+            keys(&file_menu("a.rs".as_ref(), Group::Staged, false)),
+            "uzyf"
         );
     }
 
