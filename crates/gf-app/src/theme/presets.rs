@@ -36,6 +36,7 @@ fn gf_dark() -> Tokens {
         dim: rgb(0x6b7280),
         border: rgb(0x2a2f38),
         selection: rgb(0x26303d),
+        diff_selection: (rgb(0x315b9c), rgb(0xffffff)),
         ansi: Ansi {
             black: rgb(0x1d2026),
             red: rgb(0xf26d6d),
@@ -60,6 +61,7 @@ fn gf_light() -> Tokens {
         dim: rgb(0x7a7f87),
         border: rgb(0xd5d5cf),
         selection: rgb(0xdde6f0),
+        diff_selection: (rgb(0x9bc3ff), rgb(0x102544)),
         ansi: Ansi {
             black: rgb(0x24292f),
             red: rgb(0xc4302b),
@@ -84,6 +86,7 @@ fn dracula() -> Tokens {
         dim: rgb(0x6272a4),
         border: rgb(0x44475a),
         selection: rgb(0x44475a),
+        diff_selection: (rgb(0x6952a3), rgb(0xf8f8f2)),
         ansi: Ansi {
             black: rgb(0x21222c),
             red: rgb(0xff5555),
@@ -108,5 +111,25 @@ mod tests {
             assert_eq!(preset(name).name, *name);
         }
         assert_eq!(preset("nope").name, "gf-dark");
+    }
+
+    #[test]
+    fn diff_selection_text_contrasts_with_its_background_in_every_theme() {
+        fn luminance(c: Color) -> f32 {
+            let linear = |v: f32| {
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
+        }
+
+        for name in PRESET_NAMES {
+            let (bg, fg) = preset(name).diff_selection;
+            let (bg, fg) = (luminance(bg), luminance(fg));
+            assert!((bg.max(fg) + 0.05) / (bg.min(fg) + 0.05) >= 4.5, "{name}");
+        }
     }
 }

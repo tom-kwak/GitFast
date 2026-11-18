@@ -118,7 +118,7 @@ impl Item {
                 Self::Pick(Selection::Submodule(m.path.clone()), Some(Action::Open))
             }
             SideRow::Lfs(p) => Self::Pick(Selection::LfsPattern((*p).clone()), None),
-            SideRow::Hint(_) => return None,
+            SideRow::Hint(_) | SideRow::UnbornBranch(_) => return None,
         })
     }
 }
@@ -225,6 +225,7 @@ enum SideRow<'a> {
     Submodule(&'a gf_git::Submodule),
     Lfs(&'a String),
     Hint(&'static str),
+    UnbornBranch(&'a str),
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +249,7 @@ pub enum Message {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     NewBranch,
+    BranchHere,
     NewTag,
     NewStash,
     Checkout,
@@ -290,6 +292,7 @@ pub enum Output {
     ShowStash(StashEntry),
     NewBranch {
         from: Option<String>,
+        branch_here: bool,
     },
     NewTag,
     NewStash,
@@ -424,14 +427,21 @@ impl State {
         let mut rows: Vec<SideRow<'a>> = Vec::new();
         let open = |sec: Section| !self.collapsed.contains(&sec);
 
+        let head = &snap.status.head;
+        let unborn = head
+            .branch
+            .as_deref()
+            .filter(|name| head.oid.is_none() && self.matches(name));
         rows.push(SideRow::Header(
             Section::Branches,
             "BRANCHES",
-            locals.len(),
+            locals.len() + usize::from(unborn.is_some()),
             Some((Action::NewBranch, "new branch…")),
         ));
         if open(Section::Branches) {
-            if locals.is_empty() {
+            if let Some(name) = unborn {
+                rows.push(SideRow::UnbornBranch(name));
+            } else if locals.is_empty() {
                 rows.push(SideRow::Hint(if self.filter.is_empty() {
                     "none yet — make a first commit"
                 } else {
@@ -933,7 +943,7 @@ impl State {
                 'b',
                 "branch from here…",
                 "create a branch starting at it",
-                Action::NewBranch,
+                Action::BranchHere,
             )
         };
         let entries = match self.selected.as_ref()? {
@@ -1027,12 +1037,15 @@ impl State {
 
     fn output_for(&self, action: Action, snap: Option<&Snapshot>) -> Option<Output> {
         match action {
-            Action::NewBranch => {
+            Action::NewBranch | Action::BranchHere => {
                 let from = match &self.selected {
                     Some(Selection::Ref(r)) => Some(r.clone()),
                     _ => None,
                 };
-                return Some(Output::NewBranch { from });
+                return Some(Output::NewBranch {
+                    from,
+                    branch_here: action == Action::BranchHere,
+                });
             }
             Action::NewTag => return Some(Output::NewTag),
             Action::NewStash => return Some(Output::NewStash),
@@ -1231,6 +1244,7 @@ impl Feature for State {
                 SideRow::Submodule(m) => columns(&m.path.display().to_string()) + 24,
                 SideRow::Lfs(p) => columns(p),
                 SideRow::Hint(h) => columns(h),
+                SideRow::UnbornBranch(name) => columns(name) + columns("●  (no commits yet)"),
                 SideRow::Header(..) => 18,
             })
             .max()
@@ -1260,6 +1274,9 @@ impl Feature for State {
                     SideRow::Submodule(m) => self.submodule_row(t, m),
                     SideRow::Lfs(p) => self.lfs_row(t, p),
                     SideRow::Hint(h) => widgets::empty_hint(t, h),
+                    SideRow::UnbornBranch(name) => {
+                        colored(t, format!("  ● {name} (no commits yet)"), t.head()).into()
+                    }
                 };
                 match Item::of(&rows[i]) {
                     Some(Item::Pick(sel, _)) => iced::widget::mouse_area(el)
@@ -1329,7 +1346,9 @@ mod tests {
         let out = s
             .update_with(Message::Act(Action::NewBranch), Some(&snap))
             .output;
-        assert!(matches!(out, Some(Output::NewBranch { from: Some(f) }) if f == "refs/heads/dev"));
+        assert!(
+            matches!(out, Some(Output::NewBranch { from: Some(f), branch_here: false }) if f == "refs/heads/dev")
+        );
     }
 
     #[test]

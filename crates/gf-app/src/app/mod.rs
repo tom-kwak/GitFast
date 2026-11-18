@@ -101,6 +101,7 @@ pub enum Shortcut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpKind {
     Generic,
+    RemoveWorktree(PathBuf),
     Commit,
     Fetch,
     Push {
@@ -927,17 +928,21 @@ impl App {
         // ⌘-press adds to the line selection, ⇧-press extends it (as in
         // the history list).
         let m = match m {
-            diff_view::Message::LinePressed(k) if self.modifiers.command() => {
-                diff_view::Message::LinePressedAdd(k)
+            diff_view::Message::LineClicked(key, p)
+                if p.button == iced::mouse::Button::Left && self.modifiers.command() =>
+            {
+                diff_view::Message::LinePressedAdd((key, p.caret))
             }
-            diff_view::Message::LinePressed(k) if self.modifiers.shift() => {
-                diff_view::Message::LinePressedRange(k)
+            diff_view::Message::LineClicked(key, p)
+                if p.button == iced::mouse::Button::Left && self.modifiers.shift() =>
+            {
+                diff_view::Message::LinePressedRange((key, p.caret))
             }
             other => other,
         };
         match m {
             diff_view::Message::SelectFile(_) => self.focus_pane(Pane::Files),
-            diff_view::Message::LinePressed(_)
+            diff_view::Message::LineClicked(..)
             | diff_view::Message::LinePressedAdd(_)
             | diff_view::Message::LinePressedRange(_) => self.focus_pane(Pane::Diff),
             _ => {}

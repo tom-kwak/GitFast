@@ -270,6 +270,10 @@ impl App {
                 })
             }
             diff_view::Output::Copy { text, what } => self.copy_text(text, &what),
+            diff_view::Output::Menu(menu) => self.open_menu(menu.map(|m| match role {
+                diff_view::Role::Local => Message::LocalDiff(m),
+                diff_view::Role::Commit => Message::CommitDiff(m),
+            })),
             diff_view::Output::DiscardSubmodule(path) => {
                 self.confirm_discard(vec![path], Vec::new())
             }
@@ -399,7 +403,9 @@ impl App {
                 tab.history.set_revision(None);
                 Task::none()
             }
-            history::Output::NewBranchAt(oid) => self.new_branch_dialog(Some(oid.to_string())),
+            history::Output::NewBranchAt(oid) => {
+                self.new_branch_dialog(Some(oid.to_string()), true)
+            }
             history::Output::NewTagAt(oid) => self.new_tag_dialog(Some(oid.to_string())),
             history::Output::CheckoutDetached(oid) => self.confirm(Confirm::change(
                 "checkout",
@@ -466,7 +472,9 @@ impl App {
                 let open = self.open_menu(menu.map(Message::Sidebar));
                 Task::batch([shown, open])
             }
-            sidebar::Output::NewBranch { from } => self.new_branch_dialog(from),
+            sidebar::Output::NewBranch { from, branch_here } => {
+                self.new_branch_dialog(from, branch_here)
+            }
             sidebar::Output::NewTag => self.new_tag_dialog(None),
             sidebar::Output::NewStash => self.stash_dialog(),
             sidebar::Output::Checkout(b) => self.checkout(b),

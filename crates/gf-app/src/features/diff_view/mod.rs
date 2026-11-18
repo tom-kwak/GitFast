@@ -20,15 +20,18 @@ use std::sync::Arc;
 
 use gf_core::model::{DiffLine, FileChange, FileDiff, LineKind, Oid};
 use gf_git::{DiffOptions, DiffTarget, Repository, patch};
+use iced::advanced::mouse::{Button, Click, click};
 use iced::widget::text::Wrapping;
 use iced::widget::{column, container, row};
 use iced::{Color, Element, Length, Padding, Task};
 
 use crate::feature::{Cx, Update};
+use crate::features::context_menu::{Entry, Menu};
 use crate::highlight::{self, Spans};
 use crate::nav::{self, Key, Moved, Nav};
 use crate::theme::{Tokens, style};
 use crate::widgets::memo::{self, Memo};
+use crate::widgets::selectable_line::TextPointer;
 use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
 use crate::widgets::{self, colored, dim, mono};
 
@@ -259,6 +262,7 @@ pub struct LoadedDiff {
     pub first_spans: Option<Arc<FileSpans>>,
     /// Widest line of each file in monospace columns (for sideways scroll).
     pub widths: Vec<usize>,
+    line_counts: Vec<select::LineCounts>,
 }
 
 impl LoadedDiff {
@@ -280,10 +284,12 @@ impl LoadedDiff {
                     .unwrap_or(0)
             })
             .collect();
+        let line_counts = files.iter().map(select::LineCounts::new).collect();
         Self {
             files,
             first_spans,
             widths,
+            line_counts,
         }
     }
 }
@@ -378,6 +384,9 @@ pub struct State {
     /// The mouse button is down after a press on a line: moving extends
     /// the last range.
     dragging: bool,
+    last_click: Option<(LineKey, Click)>,
+    /// For a double/triple-click drag, keep the original whole word/line.
+    drag_unit: Option<(click::Kind, Range)>,
     /// Where the mouse last went down: where ⇧-click extends from.
     caret: Option<Pos>,
     ignore_whitespace: bool,
@@ -390,20 +399,20 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Mouse down in a line's text: a new selection starts there.
-    LinePressed(Pos),
+    /// Raw pointer press, before applying the app's keyboard modifiers.
+    LineClicked(LineKey, TextPointer),
     /// ⌘ + mouse down: another selection starts there, keeping the others.
     LinePressedAdd(Pos),
     /// ⇧ + mouse down: the selection now runs from where it started (or
     /// the last press) to here.
     LinePressedRange(Pos),
     /// The mouse moved to `Pos` while the button is down.
-    LineDragged(Pos),
+    LineDragged(LineKey, TextPointer),
     /// Mouse up, or the mouse left the diff.
     DragEnd,
     /// ⌘A: all the text of the shown file.
     SelectAll,
-    /// The `copy` button: the selection, or the whole file's diff.
+    /// Copy the selected diff text.
     Copy,
     ClearSelection,
     Hunk {
@@ -424,8 +433,12 @@ pub enum Message {
 
 #[derive(Debug, Clone)]
 pub enum Output {
+    Menu(Menu<Message>),
     /// Blame the shown file at `rev` (`None` = working tree).
-    Blame { path: PathBuf, rev: Option<String> },
+    Blame {
+        path: PathBuf,
+        rev: Option<String>,
+    },
     /// Show the commits that touched the shown file.
     FileHistory(PathBuf),
     /// Apply these patches in order. Discards must be confirmed first.
@@ -443,7 +456,10 @@ pub enum Output {
     /// [`State::highlighted`].
     Highlight(usize, Box<FileDiff>),
     /// Put `text` on the clipboard; `what` says what it is (`3 lines`).
-    Copy { text: String, what: String },
+    Copy {
+        text: String,
+        what: String,
+    },
 }
 
 impl State {
@@ -458,6 +474,8 @@ impl State {
             error: None,
             ranges: Vec::new(),
             dragging: false,
+            last_click: None,
+            drag_unit: None,
             caret: None,
             ignore_whitespace: false,
             scroll: ScrollPos::default(),
@@ -538,7 +556,10 @@ impl State {
                         .is_some_and(|h| l < h.lines.len())
                 };
                 self.ranges.retain(|r| exists(r.anchor) && exists(r.head));
+                self.caret = self.caret.filter(|p| exists(*p));
                 self.dragging = false;
+                self.drag_unit = None;
+                self.last_click = None;
                 if self.file >= diff.files.len() {
                     self.file = 0;
                 }
@@ -575,7 +596,13 @@ impl State {
     fn clear_selection(&mut self) {
         self.ranges.clear();
         self.dragging = false;
+        self.drag_unit = None;
+        self.last_click = None;
         self.caret = None;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.ranges.iter().any(|r| !r.is_empty())
     }
 
     /// Lines with selected text (or whose line break is selected).
@@ -613,11 +640,16 @@ impl State {
             return Vec::new();
         };
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        f.hunks
-            .iter()
-            .enumerate()
-            .flat_map(|(h, hunk)| (0..hunk.lines.len()).map(move |l| (self.file, h, l)))
-            .filter(|k| *k >= a && *k <= b)
+        (a.1..=b.1)
+            .flat_map(|h| {
+                let start = if h == a.1 { a.2 } else { 0 };
+                let end = if h == b.1 {
+                    b.2 + 1
+                } else {
+                    f.hunks[h].lines.len()
+                };
+                (start..end).map(move |l| (self.file, h, l))
+            })
             .collect()
     }
 
@@ -649,49 +681,6 @@ impl State {
             (n, _) => format!("{n} lines"),
         };
         Some((text, what))
-    }
-
-    /// The shown file's diff as text (`--- a/…`, `+++ b/…`, hunks).
-    fn file_diff_text(&self) -> Option<(String, String)> {
-        let f = self.diff.files.get(self.file)?;
-        if f.hunks.is_empty() {
-            return None;
-        }
-        let side = |p: Option<&PathBuf>, prefix: &str| {
-            p.map_or_else(
-                || "/dev/null".to_owned(),
-                |p| format!("{prefix}{}", p.display()),
-            )
-        };
-        let mut out = format!(
-            "--- {}\n+++ {}\n",
-            side(f.old_path.as_ref(), "a/"),
-            side(f.new_path.as_ref(), "b/")
-        );
-        for h in &f.hunks {
-            out.push_str(&format!(
-                "@@ -{},{} +{},{} @@{}{}\n",
-                h.old_start,
-                h.old_lines,
-                h.new_start,
-                h.new_lines,
-                if h.section.is_empty() { "" } else { " " },
-                h.section
-            ));
-            for l in &h.lines {
-                out.push(select::marker(l.kind));
-                out.push_str(&l.content);
-                out.push('\n');
-                if l.no_newline_at_eof {
-                    out.push_str("\\ No newline at end of file\n");
-                }
-            }
-        }
-        let name = f
-            .display_path()
-            .and_then(|p| p.file_name())
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        Some((out, format!("the diff of {name}")))
     }
 
     fn selection_by_hunk(&self) -> Vec<(usize, usize, Option<BTreeSet<usize>>)> {
@@ -879,11 +868,13 @@ impl State {
                     container(text_row).width(Length::Fill).height(Length::Fill),
                     &line.content,
                     geometry,
-                    move |pos| Message::LinePressed((key, pos)),
+                    move |pointer| Message::LineClicked(key, pointer),
                 )
                 .background(style::diff_line_color(t, line.kind))
-                .selected(spans, t.selection)
-                .on_drag(self.dragging, move |pos| Message::LineDragged((key, pos)))
+                .selected(spans, t.diff_selection, marker)
+                .on_drag(self.dragging, move |pointer| {
+                    Message::LineDragged(key, pointer)
+                })
                 .into()
             }
         }
@@ -956,21 +947,72 @@ impl State {
         Some(Moved::stay().with_task(task))
     }
 
+    fn click_range(&self, key: LineKey, pointer: TextPointer, kind: click::Kind) -> Range {
+        let at = (key, pointer.caret);
+        let Some(line) = self.line_at(key) else {
+            return Range::caret(at);
+        };
+        match kind {
+            click::Kind::Single => Range::caret(at),
+            click::Kind::Double => select::word(&line.content, (key, pointer.hit)),
+            click::Kind::Triple => Range {
+                anchor: (key, 0),
+                head: (key, select::len(&line.content)),
+            },
+        }
+    }
+
+    fn line_clicked(&mut self, key: LineKey, pointer: TextPointer) -> Update<Message, Output> {
+        let at = (key, pointer.caret);
+        if pointer.button == Button::Right {
+            let hit = (key, pointer.hit);
+            if !self.ranges.iter().any(|r| {
+                let (start, end) = r.ordered();
+                start <= hit && hit < end
+            }) {
+                self.clear_selection();
+                self.caret = Some(at);
+            }
+            self.last_click = None;
+            let mut entries = Vec::new();
+            if self.has_selection() {
+                entries.push(Entry::item('c', "Copy", "⌘C", Message::Copy));
+            }
+            entries.push(Entry::item('a', "Select All", "⌘A", Message::SelectAll));
+            return Update::output(Output::Menu(Menu {
+                title: "Diff".into(),
+                entries,
+            }));
+        }
+
+        let previous = self
+            .last_click
+            .filter(|(last, _)| *last == key)
+            .map(|(_, click)| click);
+        let click = Click::new(pointer.point, pointer.button, previous);
+        self.last_click = Some((key, click));
+        let range = self.click_range(key, pointer, click.kind());
+        self.ranges = vec![range];
+        self.caret = Some(range.anchor);
+        self.dragging = true;
+        self.drag_unit = (click.kind() != click::Kind::Single).then_some((click.kind(), range));
+        Update::none()
+    }
+
     pub fn update(&mut self, message: Message) -> Update<Message, Output> {
         match message {
-            Message::LinePressed(at) => {
-                self.ranges = vec![Range::caret(at)];
-                self.caret = Some(at);
-                self.dragging = true;
-                Update::none()
-            }
+            Message::LineClicked(key, pointer) => self.line_clicked(key, pointer),
             Message::LinePressedAdd(at) => {
+                self.last_click = None;
+                self.drag_unit = None;
                 self.ranges.push(Range::caret(at));
                 self.caret = Some(at);
                 self.dragging = true;
                 Update::none()
             }
             Message::LinePressedRange(at) => {
+                self.last_click = None;
+                self.drag_unit = None;
                 let anchor = self
                     .ranges
                     .last()
@@ -983,21 +1025,45 @@ impl State {
                 self.dragging = true;
                 Update::none()
             }
-            Message::LineDragged(at) => {
-                if self.dragging
-                    && let Some(r) = self.ranges.last_mut()
-                {
-                    r.head = at;
+            Message::LineDragged(key, pointer) => {
+                if !self.dragging {
+                    return Update::none();
+                }
+                let unit = self.drag_unit.map(|(kind, start)| {
+                    let next = self.click_range(key, pointer, kind);
+                    if next.anchor < start.anchor {
+                        Range {
+                            anchor: start.head,
+                            head: next.anchor,
+                        }
+                    } else {
+                        Range {
+                            anchor: start.anchor,
+                            head: next.head.max(start.head),
+                        }
+                    }
+                });
+                if let Some(r) = self.ranges.last_mut() {
+                    let next = unit.unwrap_or(Range {
+                        anchor: r.anchor,
+                        head: (key, pointer.caret),
+                    });
+                    if *r != next {
+                        *r = next;
+                        self.last_click = None;
+                    }
                 }
                 Update::none()
             }
             Message::DragEnd => {
                 self.dragging = false;
+                self.drag_unit = None;
                 // A click without a drag only places the caret.
                 self.ranges.retain(|r| !r.is_empty());
                 Update::none()
             }
             Message::SelectAll => {
+                self.clear_selection();
                 if let Some(f) = self.diff.files.get(self.file) {
                     let fi = self.file;
                     let first = f.hunks.iter().position(|h| !h.lines.is_empty());
@@ -1013,7 +1079,7 @@ impl State {
                 }
                 Update::none()
             }
-            Message::Copy => match self.selected_text().or_else(|| self.file_diff_text()) {
+            Message::Copy => match self.selected_text() {
                 Some((text, what)) => Update::output(Output::Copy { text, what }),
                 None => Update::none(),
             },
@@ -1252,14 +1318,6 @@ impl State {
                     "commits that touched this file (follows renames)".into(),
                 ));
         }
-        if files.get(self.file).is_some_and(|f| !f.hunks.is_empty()) {
-            header = header.push(widgets::tip(
-                t,
-                widgets::text_button(t, "copy", None, Some(Message::Copy)),
-                "copy the selected text (⌘C), or this file's whole diff · drag to select, ⌘A all"
-                    .into(),
-            ));
-        }
         header = header
             .push(widgets::tip(
                 t,
@@ -1278,8 +1336,8 @@ impl State {
             .push(widgets::icon_button(t, "✕", t.dim, "close", Message::Close));
 
         let mut toolbar = column![header];
-        let selected = self.selected_lines().len();
-        if self.ranges.iter().any(|r| !r.is_empty()) {
+        if self.has_selection() {
+            let (selected, changes) = self.diff.line_counts[self.file].selected(&self.ranges);
             let mut sel = row![colored(
                 t,
                 format!(
@@ -1298,7 +1356,6 @@ impl State {
             // Stage / unstage the changed lines the selection touches (no
             // discard here: a selection is for reading and copying, and
             // hunks keep their own discard).
-            let changes = self.selected_changes().len();
             let partial = files.get(self.file).is_some_and(patch::supports_partial);
             for &a in source
                 .actions()
@@ -1322,9 +1379,9 @@ impl State {
             toolbar = toolbar.push(bar_line(t, sel));
         } else if !files.is_empty() {
             let hint = if source.actions().is_empty() {
-                "drag to select text · ⌘ adds · ⇧ extends · ⌘C copies · ⌘A all"
+                "drag to select · double-click a word · ⇧ extends · ⌘A all"
             } else {
-                "drag to select text · ⌘ adds · ⇧ extends · ⌘C copies · stage the changed lines"
+                "drag to select · double-click a word · ⇧ extends · stage selected changes"
             };
             toolbar = toolbar.push(bar_line(t, dim(t, hint)));
         }
@@ -1432,10 +1489,61 @@ index 1111111..2222222 100644
         (0, 0, l)
     }
 
+    fn pointer(caret: usize, hit: usize) -> TextPointer {
+        TextPointer {
+            caret,
+            hit,
+            point: iced::Point::new(40.0, 20.0),
+            button: Button::Left,
+        }
+    }
+
+    fn press((key, caret): Pos) -> Message {
+        Message::LineClicked(key, pointer(caret, caret))
+    }
+
     fn drag(s: &mut State, press: Message, to: Pos) {
         let _ = s.update(press);
-        let _ = s.update(Message::LineDragged(to));
+        let _ = s.update(Message::LineDragged(to.0, pointer(to.1, to.1)));
         let _ = s.update(Message::DragEnd);
+    }
+
+    #[test]
+    fn repeated_clicks_select_a_word_then_the_line_and_word_drags_expand_by_word() {
+        let mut s = state(DiffSource::WorkTree("f.txt".into()));
+        let on_b = Message::LineClicked(line(2), pointer(2, 1));
+        let _ = s.update(on_b.clone());
+        let _ = s.update(Message::DragEnd);
+        assert!(!s.has_selection());
+        let _ = s.update(on_b.clone());
+        let _ = s.update(Message::DragEnd);
+        assert_eq!(s.selected_text().map(|t| t.0).as_deref(), Some("B"));
+        let _ = s.update(on_b.clone());
+        let _ = s.update(Message::DragEnd);
+        assert_eq!(s.selected_text().map(|t| t.0).as_deref(), Some("+B"));
+
+        let _ = s.update(Message::ClearSelection);
+        let _ = s.update(on_b.clone());
+        let _ = s.update(Message::DragEnd);
+        drag(&mut s, on_b, (line(1), 1));
+        assert_eq!(s.selected_text().map(|t| t.0).as_deref(), Some("b\n+B"));
+        assert_eq!(s.diff.line_counts[0].selected(&s.ranges), (2, 2));
+    }
+
+    #[test]
+    fn context_menu_keeps_a_selection_only_when_opened_on_its_text() {
+        let mut s = state(DiffSource::WorkTree("f.txt".into()));
+        drag(&mut s, press((line(2), 1)), (line(2), 2));
+        let right = TextPointer {
+            button: Button::Right,
+            ..pointer(2, 1)
+        };
+        let menu = s.update(Message::LineClicked(line(2), right)).output;
+        assert!(matches!(menu, Some(Output::Menu(menu)) if menu.entries.len() == 2));
+        assert_eq!(s.selected_text().map(|t| t.0).as_deref(), Some("B"));
+        let menu = s.update(Message::LineClicked(line(3), right)).output;
+        assert!(matches!(menu, Some(Output::Menu(menu)) if menu.entries.len() == 1));
+        assert!(!s.has_selection());
     }
 
     #[test]
@@ -1443,7 +1551,7 @@ index 1111111..2222222 100644
         let oid: Oid = "a".repeat(40).parse().expect("oid");
         let mut s = state(DiffSource::Commit(oid));
         // From the code of ` a` (position 1) to after the `+` of `+B`.
-        drag(&mut s, Message::LinePressed((line(0), 1)), (line(2), 1));
+        drag(&mut s, press((line(0), 1)), (line(2), 1));
         assert_eq!(
             s.selected_text(),
             Some(("a\n-b\n+".to_owned(), "3 lines".to_owned()))
@@ -1454,13 +1562,13 @@ index 1111111..2222222 100644
         }
         // Dragging upwards selects the same way; from the gutter (0) the
         // marker is included.
-        drag(&mut s, Message::LinePressed((line(3), 2)), (line(1), 0));
+        drag(&mut s, press((line(3), 2)), (line(1), 0));
         assert_eq!(
             s.selected_text().map(|t| t.0),
             Some("-b\n+B\n c".to_owned())
         );
         // Within one line: just those characters.
-        drag(&mut s, Message::LinePressed((line(2), 0)), (line(2), 1));
+        drag(&mut s, press((line(2), 0)), (line(2), 1));
         assert_eq!(
             s.selected_text(),
             Some(("+".to_owned(), "1 character".to_owned()))
@@ -1471,9 +1579,9 @@ index 1111111..2222222 100644
     fn a_new_drag_replaces_the_selection_and_modifiers_add_or_extend() {
         let oid: Oid = "a".repeat(40).parse().expect("oid");
         let mut s = state(DiffSource::Commit(oid));
-        drag(&mut s, Message::LinePressed((line(0), 0)), (line(0), 2));
+        drag(&mut s, press((line(0), 0)), (line(0), 2));
         // A second plain drag starts over: no leftover block.
-        drag(&mut s, Message::LinePressed((line(3), 0)), (line(3), 2));
+        drag(&mut s, press((line(3), 0)), (line(3), 2));
         assert_eq!(s.selected_text().map(|t| t.0), Some(" c".to_owned()));
         // ⌘ keeps what was selected and adds another stretch.
         drag(&mut s, Message::LinePressedAdd((line(0), 0)), (line(0), 2));
@@ -1486,29 +1594,19 @@ index 1111111..2222222 100644
             Some(" a\n-b\n c".to_owned())
         );
         // A click without a drag selects nothing.
-        let _ = s.update(Message::LinePressed((line(1), 1)));
+        let _ = s.update(press((line(1), 1)));
         let _ = s.update(Message::DragEnd);
         assert_eq!(s.selected_text(), None);
         // Moving after the button was let go changes nothing.
-        let _ = s.update(Message::LineDragged((line(3), 2)));
+        let _ = s.update(Message::LineDragged(line(3), pointer(2, 1)));
         assert_eq!(s.selected_text(), None);
     }
 
     #[test]
-    fn copy_without_a_selection_takes_the_whole_file_diff() {
+    fn copy_requires_a_selection() {
         let oid: Oid = "a".repeat(40).parse().expect("oid");
         let mut s = state(DiffSource::Commit(oid));
-        assert_eq!(s.selected_text(), None, "⌘C copies nothing");
-        match s.update(Message::Copy).output {
-            Some(Output::Copy { text, what }) => {
-                assert_eq!(
-                    text,
-                    "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
-                );
-                assert_eq!(what, "the diff of f.txt");
-            }
-            other => panic!("unexpected {other:?}"),
-        }
+        assert!(s.update(Message::Copy).output.is_none());
         let _ = s.update(Message::SelectAll);
         assert_eq!(
             s.selected_text().map(|t| t.0),
@@ -1522,7 +1620,7 @@ index 1111111..2222222 100644
     fn staging_a_selection_takes_the_changed_lines_it_touches() {
         let mut s = state(DiffSource::WorkTree("f.txt".into()));
         // Part of ` a` through part of `+B`: the changed lines are -b, +B.
-        drag(&mut s, Message::LinePressed((line(0), 1)), (line(2), 1));
+        drag(&mut s, press((line(0), 1)), (line(2), 1));
         match s.update(Message::Selected(Action::Stage)).output {
             Some(Output::Apply { description, .. }) => {
                 assert_eq!(
@@ -1534,7 +1632,7 @@ index 1111111..2222222 100644
         }
         assert_eq!(s.selected_text(), None, "cleared");
         // Only +B: a partial patch.
-        drag(&mut s, Message::LinePressed((line(2), 0)), (line(2), 2));
+        drag(&mut s, press((line(2), 0)), (line(2), 2));
         match s.update(Message::Selected(Action::Stage)).output {
             Some(Output::Apply {
                 patches,

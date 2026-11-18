@@ -257,6 +257,8 @@ pub fn push_remote(upstream: Option<&str>, remotes: &[Remote]) -> Option<String>
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub status: StatusReport,
+    /// Whether the loaded status has changes other than ignored files.
+    pub has_changes: bool,
     pub branches: Vec<Branch>,
     pub tags: Vec<Tag>,
     pub remotes: Vec<Remote>,
@@ -475,6 +477,11 @@ impl Snapshot {
 
         if let Some(status) = status {
             snap.status = status.map_err(err)?;
+            snap.has_changes = snap
+                .status
+                .entries
+                .iter()
+                .any(|e| !matches!(e, StatusEntry::Ignored { .. }));
             // Counts are decoration: a failure must not block the refresh.
             snap.lines.staged = staged.and_then(Result::ok).unwrap_or_default();
             snap.lines.unstaged = unstaged.and_then(Result::ok).unwrap_or_default();

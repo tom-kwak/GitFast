@@ -172,6 +172,13 @@ impl App {
             return run(self, s);
         }
         self.typing = false;
+        if k.shortcut == Some(Shortcut::Escape)
+            && self.focus == Pane::Diff
+            && let Some(tab) = self.active_tab()
+            && tab.diff(tab.code_view).has_selection()
+        {
+            return self.on_diff_message(tab.code_view, super::diff_view::Message::ClearSelection);
+        }
         if let Some(task) = k.nav.and_then(|n| self.on_nav(n)) {
             return task;
         }

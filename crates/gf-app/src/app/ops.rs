@@ -494,6 +494,20 @@ impl App {
                     let hint = if recorded { " · ⌘Z undo" } else { "" };
                     self.flash(NoteKind::Info, format!("✓ {}{hint}", truncate(&label, 60)));
                 }
+                if let OpKind::RemoveWorktree(path) = &kind {
+                    let mut closed = false;
+                    for i in (0..self.tabs.len()).rev() {
+                        if self.tabs[i].repo.cwd().starts_with(path) {
+                            tasks.push(self.close_tab(i));
+                            closed = true;
+                        }
+                    }
+                    let suffix = if closed { " (tab closed)" } else { "" };
+                    self.flash(
+                        NoteKind::Info,
+                        format!("removed worktree {}{suffix}", path.display()),
+                    );
+                }
                 if let Some(tab) = self.tab_mut(id)
                     && kind == OpKind::Commit
                 {

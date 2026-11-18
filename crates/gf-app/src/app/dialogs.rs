@@ -28,6 +28,7 @@ use iced::widget::operation;
 use super::ops::{Changes, Record};
 use super::outputs::{names, stash_options};
 use super::{App, Message, OpKind};
+use crate::features::command_log::NoteKind;
 use crate::features::dialog::{Dialog, FIRST_FIELD_ID, Outcome, Severity};
 use crate::features::diff_view::Action;
 use crate::repo_tab::PendingTags;
@@ -49,6 +50,7 @@ pub enum Purpose {
     },
     NewBranch {
         from: Option<String>,
+        unborn: bool,
     },
     RenameBranch {
         old: String,
@@ -287,27 +289,65 @@ impl App {
         }
     }
 
-    pub(super) fn new_branch_dialog(&mut self, from: Option<String>) -> Task<Message> {
-        let start = from.as_deref().map_or_else(
-            || "the current commit (HEAD)".to_owned(),
-            |f| format!("`{}`", short_ref(f)),
-        );
+    pub(super) fn new_branch_dialog(
+        &mut self,
+        from: Option<String>,
+        branch_here: bool,
+    ) -> Task<Message> {
+        let unborn = self
+            .active_tab()
+            .and_then(|tab| tab.snapshot.as_ref())
+            .is_some_and(|s| s.status.head.oid.is_none() && s.status.head.branch.is_some());
+        if unborn {
+            return self.open_dialog(
+                Dialog::confirm(
+                    "New branch",
+                    vec![
+                        "There are no commits yet. The first commit will go on this branch.".into(),
+                    ],
+                    "Create",
+                    Purpose::NewBranch { from: None, unborn },
+                )
+                .field("name", "", "feature/my-change"),
+            );
+        }
+
         let suggested = from
             .as_deref()
             .and_then(|f| f.strip_prefix("refs/remotes/"))
             .and_then(|f| f.split_once('/'))
             .map(|(_, b)| b.to_owned())
             .unwrap_or_default();
-        self.open_dialog(
-            Dialog::confirm(
-                "New branch",
-                vec![format!("Start at {start}.")],
-                "Create",
-                Purpose::NewBranch { from },
-            )
-            .field("name", suggested, "feature/my-change")
-            .check("switch to the new branch", true),
+        let start = self
+            .active_tab()
+            .and_then(|tab| tab.snapshot.as_ref())
+            .and_then(|s| s.status.head.branch.as_deref());
+        let head = start.map_or_else(|| "HEAD".to_owned(), |name| format!("{name} (HEAD)"));
+        let other = from
+            .as_deref()
+            .filter(|f| start.is_none_or(|name| f.strip_prefix("refs/heads/") != Some(name)))
+            .map(|f| short_ref(f).to_owned());
+        let body = if other.is_none() {
+            vec![format!("Start at {head}.")]
+        } else {
+            vec![]
+        };
+        let mut dialog = Dialog::confirm(
+            "New branch",
+            body,
+            "Create",
+            Purpose::NewBranch { from, unborn },
         )
+        .field("name", suggested, "feature/my-change")
+        .check("switch to the new branch", true);
+        if let Some(other) = other {
+            dialog = dialog.choice(
+                "start at",
+                vec![(head, false), (other, false)],
+                usize::from(branch_here),
+            );
+        }
+        self.open_dialog(dialog)
     }
 
     pub(super) fn new_worktree_dialog(&mut self) -> Task<Message> {
@@ -355,6 +395,14 @@ impl App {
     }
 
     pub(super) fn stash_dialog(&mut self) -> Task<Message> {
+        if self
+            .active_tab()
+            .and_then(|tab| tab.snapshot.as_ref())
+            .is_some_and(|s| !s.has_changes)
+        {
+            self.flash(NoteKind::Info, "nothing to stash");
+            return Task::none();
+        }
         self.open_dialog(
             Dialog::confirm(
                 "Stash changes",
@@ -412,8 +460,12 @@ impl App {
                 choice,
                 dont_ask_again,
             } => {
-                // The reset mode is the dialog's choice.
+                // Map the selected option to its operation argument.
                 let purpose = match purpose {
+                    Purpose::NewBranch { from, unborn } => Purpose::NewBranch {
+                        from: from.filter(|_| choice == Some(1)),
+                        unborn,
+                    },
                     Purpose::Reset { to, mode } => Purpose::Reset {
                         to,
                         mode: choice
@@ -466,7 +518,7 @@ impl App {
             self.settings.confirm.skip(&key);
             self.save_settings();
             self.flash(
-                crate::features::command_log::NoteKind::Info,
+                NoteKind::Info,
                 format!("won't ask before {key} again — `:confirm reset` to undo"),
             );
         }
@@ -520,11 +572,16 @@ impl App {
                 action,
                 description,
             } => self.apply_patches(patches, action, description),
-            Purpose::NewBranch { from } => {
+            Purpose::NewBranch { from, unborn } => {
                 let name = value(0);
-                let checkout = check(0);
+                let checkout = unborn || check(0);
+                let label = if unborn {
+                    format!("next commit goes on {name}")
+                } else {
+                    format!("create branch {name}")
+                };
                 self.op_recorded(
-                    format!("create branch {name}"),
+                    label,
                     OpKind::Generic,
                     Some(Record::new(undo::branches(&[&name], checkout))),
                     move |r| async move { r.create_branch(&name, from.as_deref(), checkout).await },
@@ -801,7 +858,7 @@ impl App {
                 let force = check(0);
                 self.op(
                     format!("remove worktree {}", path.display()),
-                    OpKind::Generic,
+                    OpKind::RemoveWorktree(path.clone()),
                     move |r| async move { r.remove_worktree(&path, force).await },
                 )
             }
@@ -961,7 +1018,10 @@ mod tests {
 
     #[test]
     fn validates_names() {
-        let p = Purpose::NewBranch { from: None };
+        let p = Purpose::NewBranch {
+            from: None,
+            unborn: false,
+        };
         assert!(validate(&p, &["".into()]).is_some());
         assert!(validate(&p, &["has space".into()]).is_some());
         assert!(validate(&p, &["a..b".into()]).is_some());

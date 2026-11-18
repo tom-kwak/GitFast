@@ -40,6 +40,8 @@ pub struct Tokens {
     pub border: Color,
     /// Selected row / hovered button background.
     pub selection: Color,
+    /// Background and foreground of selected text in the diff.
+    pub diff_selection: (Color, Color),
     pub ansi: Ansi,
     /// Base monospace font size.
     pub font_size: f32,

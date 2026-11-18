@@ -401,7 +401,7 @@ impl App {
                 self.load_rebase_plan(base, Some(newest_first))
             }
             BatchAction::BranchAtNewest => {
-                self.new_branch_dialog(Some(newest_first[0].to_string()))
+                self.new_branch_dialog(Some(newest_first[0].to_string()), true)
             }
             BatchAction::CopyIds => {
                 self.flash(NoteKind::Info, format!("copied {n} commit ids"));

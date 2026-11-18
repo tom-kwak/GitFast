@@ -187,7 +187,8 @@ impl State {
                         } else if first_of_block {
                             row![
                                 colored(t, l.commit.short(), t.lane(color_index(&l.commit))),
-                                dim(t, format::truncate(&l.author, 12))
+                                dim(t, format::truncate_columns(&l.author, 12))
+                                    .wrapping(Wrapping::None)
                                     .width(Length::Fixed(t.cols(12))),
                                 dim(
                                     t,
@@ -195,7 +196,9 @@ impl State {
                                         .chars()
                                         .take(10)
                                         .collect::<String>()
-                                ),
+                                )
+                                .wrapping(Wrapping::None)
+                                .width(Length::Fixed(t.cols(10))),
                             ]
                             .spacing(6)
                             .into()
