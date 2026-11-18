@@ -28,6 +28,7 @@ serde_json.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-stream = { workspace = true, features = ["sync"] }
+unicode-segmentation = "1"
 
 [dev-dependencies]
 iced_test = "0.14"

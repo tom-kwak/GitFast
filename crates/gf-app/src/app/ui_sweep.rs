@@ -915,7 +915,7 @@ async fn drag_selected() -> Ui {
         .filter(|t| {
             ui.press(t.at, mouse::Button::Left)
                 .iter()
-                .any(|m| matches!(m, Message::LocalDiff(diff_view::Message::LinePressed(_))))
+                .any(|m| matches!(m, Message::LocalDiff(diff_view::Message::LineClicked(..))))
         })
         .collect();
     let (first, last) = (
@@ -925,6 +925,162 @@ async fn drag_selected() -> Ui {
     let fx = ui.drag(first.at, last.at).await;
     assert!(fx.screen_changed, "dragging selects lines: {fx:?}");
     ui
+}
+
+#[tokio::test]
+async fn a_clean_working_tree_disables_stash() {
+    let mut ui = Ui::open_with(|r| {
+        r.git(&["reset", "-q", "--hard"]);
+        r.git(&["clean", "-qfd"]);
+    })
+    .await;
+    let stash = ui
+        .targets()
+        .into_iter()
+        .find(|t| t.label == "[ ≡ stash ]")
+        .expect("stash button");
+    assert!(ui.press(stash.at, mouse::Button::Left).is_empty());
+    let _ = ui.send(Message::Toolbar(toolbar::Message::Stash)).await;
+    assert!(ui.app.dialog.is_none());
+    assert!(ui.flash().contains("nothing to stash"));
+}
+
+#[tokio::test]
+async fn new_branch_defaults_to_head_and_can_use_the_selected_ref() {
+    let mut ui = Ui::open().await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/feature".into()),
+        )))
+        .await;
+    for (name, action, option, start) in [
+        ("from-head", sidebar::Action::NewBranch, None, "HEAD"),
+        (
+            "from-feature",
+            sidebar::Action::NewBranch,
+            Some(1),
+            "feature",
+        ),
+        ("from-menu", sidebar::Action::BranchHere, None, "feature"),
+    ] {
+        let _ = ui
+            .send(Message::Sidebar(sidebar::Message::Act(action)))
+            .await;
+        let _ = ui
+            .send(Message::Dialog(dialog::Message::Field(0, name.into())))
+            .await;
+        let _ = ui.send(Message::Dialog(dialog::Message::Check(0))).await;
+        if let Some(i) = option {
+            let _ = ui.send(Message::Dialog(dialog::Message::Choose(i))).await;
+        }
+        let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+        let repo = &ui.fixture.repo;
+        assert_eq!(
+            repo.git(&["rev-parse", name]),
+            repo.git(&["rev-parse", start])
+        );
+    }
+}
+
+#[tokio::test]
+async fn removing_a_worktree_closes_its_open_tab() {
+    let mut ui = Ui::open().await;
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let path = folder
+        .path()
+        .canonicalize()
+        .expect("worktree parent path")
+        .join("wt");
+    let repo = &ui.fixture.repo;
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        path.to_str().expect("path"),
+        "feature",
+    ]);
+    let _ = ui.send(Message::Toolbar(toolbar::Message::Refresh)).await;
+    let _ = ui.send(Message::Open(path.clone())).await;
+    assert_eq!(ui.app.tabs.len(), 2);
+    let _ = ui.send(Message::Tabs(tabs::Message::Select(0))).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Worktree(path.clone()),
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Act(
+            sidebar::Action::Delete,
+        )))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert!(!path.exists());
+    assert_eq!(ui.app.tabs.len(), 1);
+}
+
+#[tokio::test]
+async fn a_branch_without_commits_stays_visible_after_renaming_head() {
+    let repo = TestRepo::new();
+    let mut ui = Ui::welcome().await;
+    let _ = ui.send(Message::Open(repo.path().to_path_buf())).await;
+    assert!(
+        ui.targets()
+            .iter()
+            .any(|t| t.label.contains("main (no commits yet)"))
+    );
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Act(
+            sidebar::Action::NewBranch,
+        )))
+        .await;
+    assert!(
+        !ui.targets()
+            .iter()
+            .any(|t| t.label.contains("switch to the new branch"))
+    );
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(0, "dev".into())))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(repo.git(&["symbolic-ref", "--short", "HEAD"]), "dev");
+    assert!(
+        ui.targets()
+            .iter()
+            .any(|t| t.label.contains("dev (no commits yet)"))
+    );
+}
+
+#[tokio::test]
+async fn blame_truncates_a_wide_author_to_the_column_width() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            r.git(&[
+                "commit",
+                "--author=가나다라마바사아 <wide@example.com>",
+                "-m",
+                "wide author",
+            ]);
+            r.write("b.txt", "new staged\nworking tree change\n");
+        })
+        .await,
+    )
+    .await;
+    let _ = ui
+        .send(Message::Changes(changes::Message::Select(
+            "b.txt".into(),
+            changes::Group::Unstaged,
+        )))
+        .await;
+    let _ = ui.send(Message::LocalDiff(diff_view::Message::Blame)).await;
+    assert!(ui.targets().iter().any(|t| t.label == "가나다라마…"));
+}
+
+#[tokio::test]
+async fn diff_exposes_copy_only_for_a_selection() {
+    let ui = a_txt_shown().await;
+    assert!(!ui.targets().iter().any(|t| t.label == "[ copy ]"));
+    let ui = drag_selected().await;
+    assert!(ui.targets().iter().any(|t| t.label == "[ copy ⌘C ]"));
 }
 
 #[tokio::test]

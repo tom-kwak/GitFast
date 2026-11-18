@@ -1373,6 +1373,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "two-face",
+ "unicode-segmentation",
 ]
 
 [[package]]

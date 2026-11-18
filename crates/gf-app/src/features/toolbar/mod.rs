@@ -169,6 +169,11 @@ pub fn view<'a>(
     spinner: &'a str,
 ) -> Element<'a, Message> {
     let has_remote = tab.snapshot.as_ref().is_some_and(|s| !s.remotes.is_empty());
+    let stash_hint = match tab.snapshot.as_ref() {
+        Some(s) if s.has_changes => None,
+        Some(_) => Some("nothing to stash"),
+        None => Some("loading status…"),
+    };
     let busy = sync.is_some();
     let enabled = |m: Message| (!busy && has_remote).then_some(m);
     let counts = tab
@@ -205,7 +210,16 @@ pub fn view<'a>(
             counts.push_hint.clone(),
         ),
         dim(t, "│"),
-        widgets::text_button(t, "≡ stash", None, Some(Message::Stash)),
+        widgets::tip(
+            t,
+            widgets::text_button(
+                t,
+                "≡ stash",
+                None,
+                stash_hint.is_none().then_some(Message::Stash)
+            ),
+            stash_hint.unwrap_or("put your local changes aside").into(),
+        ),
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center);

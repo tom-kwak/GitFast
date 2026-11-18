@@ -8,7 +8,8 @@
 //! after `n` characters of code. Where a position is on screen is the
 //! line widget's business (`widgets::selectable_line`).
 
-use gf_core::model::LineKind;
+use gf_core::model::{FileDiff, LineKind};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// `(file, hunk, line)` index of a diff line.
 pub type LineKey = (usize, usize, usize);
@@ -22,6 +23,57 @@ pub type Pos = (LineKey, usize);
 pub struct Range {
     pub anchor: Pos,
     pub head: Pos,
+}
+
+/// Prefix counts built with the diff. The selection toolbar can count
+/// across hunks without visiting hidden rows on each mouse move.
+#[derive(Debug)]
+pub struct LineCounts {
+    hunk_starts: Vec<usize>,
+    changes: Vec<usize>,
+}
+
+impl LineCounts {
+    pub fn new(file: &FileDiff) -> Self {
+        let mut hunk_starts = Vec::with_capacity(file.hunks.len());
+        let mut changes = vec![0];
+        let mut count = 0;
+        for hunk in &file.hunks {
+            hunk_starts.push(changes.len() - 1);
+            for line in &hunk.lines {
+                count += usize::from(line.kind != LineKind::Context);
+                changes.push(count);
+            }
+        }
+        Self {
+            hunk_starts,
+            changes,
+        }
+    }
+
+    pub fn selected(&self, ranges: &[Range]) -> (usize, usize) {
+        let mut intervals: Vec<_> = ranges
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| {
+                let (((_, sh, sl), _), ((_, eh, el), end)) = r.ordered();
+                let start = self.hunk_starts[sh] + sl;
+                let stop = self.hunk_starts[eh] + el + usize::from(end > 0);
+                (start, stop)
+            })
+            .collect();
+        intervals.sort_unstable();
+        let (mut lines, mut changes, mut covered) = (0, 0, 0);
+        for (start, end) in intervals {
+            let start = start.max(covered);
+            if end > start {
+                lines += end - start;
+                changes += self.changes[end] - self.changes[start];
+                covered = end;
+            }
+        }
+        (lines, changes)
+    }
 }
 
 impl Range {
@@ -65,14 +117,41 @@ impl Range {
 
 /// Positions in a line: its marker plus each character of code.
 pub fn len(content: &str) -> usize {
-    1 + content.chars().count()
+    1 + visible(content).chars().count()
+}
+
+fn visible(content: &str) -> &str {
+    content.strip_suffix('\r').unwrap_or(content)
+}
+
+/// Unicode word boundaries in selectable columns. The diff marker is its
+/// own segment, so double-clicking it never pulls in the first word.
+pub fn word(content: &str, (key, hit): Pos) -> Range {
+    if hit == 0 {
+        return Range {
+            anchor: (key, 0),
+            head: (key, 1),
+        };
+    }
+    let mut start = 1;
+    for segment in visible(content).split_word_bounds() {
+        let end = start + segment.chars().count();
+        if hit < end {
+            return Range {
+                anchor: (key, start),
+                head: (key, end),
+            };
+        }
+        start = end;
+    }
+    Range::caret((key, start))
 }
 
 /// The selectable text of a line: marker then code.
 pub fn text(kind: LineKind, content: &str) -> String {
     let mut s = String::with_capacity(content.len() + 1);
     s.push(marker(kind));
-    s.push_str(content);
+    s.push_str(visible(content));
     s
 }
 
@@ -112,6 +191,23 @@ mod tests {
     const K0: LineKey = (0, 0, 0);
     const K1: LineKey = (0, 0, 1);
     const K2: LineKey = (0, 0, 2);
+
+    #[test]
+    fn word_selection_uses_unicode_boundaries_and_keeps_the_marker_separate() {
+        let content = "hello_world, 한글 테스트 e\u{301}\r";
+        let selected_at = |hit| {
+            range_text(
+                &word(content, (K0, hit)),
+                [(K0, LineKind::Added, content)].into_iter(),
+            )
+        };
+        assert_eq!(selected_at(0), "+");
+        assert_eq!(selected_at(11), "hello_world");
+        assert_eq!(selected_at(12), ",");
+        assert_eq!(selected_at(15), "한글");
+        assert_eq!(selected_at(22), "e\u{301}");
+        assert_eq!(selected_at(len(content)), "");
+    }
 
     #[test]
     fn a_range_covers_exactly_what_was_dragged_over() {
