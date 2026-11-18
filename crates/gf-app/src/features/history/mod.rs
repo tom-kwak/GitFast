@@ -289,9 +289,14 @@ impl State {
         snap: Option<&Snapshot>,
     ) -> Update<Message, Output> {
         self.head = snap.and_then(|s| s.status.head.oid.clone());
-        let (commits, more): (Vec<Commit>, bool) = match snap.and_then(|s| self.history(s)) {
-            Some(h) => (h.commits.clone(), h.more),
-            None => (Vec::new(), false),
+        // Shared, not copied: this runs for every scroll event.
+        let shown = snap.and_then(|s| match (&self.revision, &self.data) {
+            (None, _) => Some(s.history.clone()),
+            (Some(_), d) => d.clone(),
+        });
+        let (commits, more): (&[Commit], bool) = match &shown {
+            Some(h) => (&h.commits, h.more),
+            None => (&[], false),
         };
         // Reaching the end (by scrolling or by moving onto the last row)
         // loads the next page.
@@ -309,7 +314,7 @@ impl State {
                 Update::none()
             };
         }
-        let mut up = self.update_list(message, &commits);
+        let mut up = self.update_list(message, commits);
         if at_end && more && !self.loading_more && !self.loading {
             up.task = Task::batch([up.task, Task::done(Message::LoadMore)]);
         }
