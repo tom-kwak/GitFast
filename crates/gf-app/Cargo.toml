@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+iced_test = "0.14"
 gf-test-support.workspace = true
 tempfile.workspace = true
 

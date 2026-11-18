@@ -28,6 +28,18 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
+  # Clicks every button on screen headless (app/ui_sweep.rs). Pull
+  # requests only: on main, release.yml runs it beside the .dmg build.
+  ui-sweep:
+    name: UI sweep (every button does something)
+    if: github.event_name == 'pull_request'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p gf-app -- --ignored sweep_
+
   deny:
     name: cargo-deny (licenses, advisories)
     runs-on: ubuntu-latest
