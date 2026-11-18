@@ -15,6 +15,7 @@ pub enum Message {
     Select(usize),
     Close(usize),
     Open,
+    Settings,
     /// `▾ N tabs`: open (or close) the tab dropdown.
     List,
 }
@@ -87,11 +88,18 @@ pub fn view<'a>(
                 .into(),
         ));
     }
-    line = line.push(widgets::text_button(
+    if !tabs.is_empty() {
+        line = line.push(widgets::text_button(
+            t,
+            "+ open",
+            Some("⌘O"),
+            Some(Message::Open),
+        ));
+    }
+    line = line.push(widgets::tip(
         t,
-        "+ open",
-        Some("⌘O"),
-        Some(Message::Open),
+        widgets::text_button(t, "Settings", Some("⌘,"), Some(Message::Settings)),
+        "Open app settings (⌘,)".into(),
     ));
 
     container(line)

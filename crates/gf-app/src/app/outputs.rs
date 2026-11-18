@@ -1099,9 +1099,10 @@ impl App {
                 self.select_tab(i)
             }
             PromptCommand::Refresh => self.refresh_active(),
+            PromptCommand::Settings => self.toggle_settings(),
             PromptCommand::Theme(name) => {
-                let next = match name {
-                    Some(n) if theme::PRESET_NAMES.contains(&n.as_str()) => n,
+                match name {
+                    Some(n) if theme::PRESET_NAMES.contains(&n.as_str()) => self.set_theme(&n),
                     Some(n) => {
                         self.flash(
                             NoteKind::Error,
@@ -1110,21 +1111,9 @@ impl App {
                                 theme::PRESET_NAMES.join(", ")
                             ),
                         );
-                        return Task::none();
                     }
-                    None => {
-                        let i = theme::PRESET_NAMES
-                            .iter()
-                            .position(|p| *p == self.tokens.name)
-                            .map_or(0, |i| (i + 1) % theme::PRESET_NAMES.len());
-                        theme::PRESET_NAMES[i].to_owned()
-                    }
-                };
-                self.tokens =
-                    theme::preset(&next).with_font_size(self.settings.appearance.font_size);
-                self.flash(NoteKind::Info, format!("theme: {next}"));
-                self.settings.appearance.theme = next;
-                self.save_settings();
+                    None => self.cycle_theme(false),
+                }
                 Task::none()
             }
             PromptCommand::ToggleLog => self.on_shortcut(Shortcut::ToggleLog),

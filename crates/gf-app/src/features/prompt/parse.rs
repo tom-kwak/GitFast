@@ -14,6 +14,7 @@ pub enum PromptCommand {
     CloseTab,
     SelectTab(usize),
     Refresh,
+    Settings,
     /// `:theme [name]` — no name cycles through presets.
     Theme(Option<String>),
     ToggleLog,
@@ -57,6 +58,10 @@ pub const BUILTINS: &[(&str, &str)] = &[
         ":tab N — switch to tab N                       ⌘1-9",
     ),
     (":refresh", "reload the current repository               ⌘R"),
+    (
+        ":settings",
+        "open app settings                           ⌘,",
+    ),
     (":theme", ":theme [gf-dark|gf-light|dracula]"),
     (":log", "show/hide the command log                    ⌘J"),
     (":refs", "show/hide the refs sidebar                   ⌘B"),
@@ -144,6 +149,7 @@ pub fn parse(line: &str) -> Result<Option<PromptCommand>, String> {
                 PromptCommand::SelectTab(n - 1)
             }
             "refresh" | "r" => PromptCommand::Refresh,
+            "settings" => PromptCommand::Settings,
             "theme" => PromptCommand::Theme(arg),
             "log" => PromptCommand::ToggleLog,
             "refs" => PromptCommand::ToggleRefs,
@@ -359,6 +365,7 @@ mod tests {
         );
         assert_eq!(parse(":open"), Ok(Some(PromptCommand::Open(None))));
         assert_eq!(parse(":tab 2"), Ok(Some(PromptCommand::SelectTab(1))));
+        assert_eq!(parse(":settings"), Ok(Some(PromptCommand::Settings)));
         assert!(parse(":tab 0").is_err());
         assert_eq!(
             parse(":theme dracula"),

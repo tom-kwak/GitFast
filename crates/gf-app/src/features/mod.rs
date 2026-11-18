@@ -15,6 +15,7 @@ pub mod op_banner;
 pub mod prompt;
 pub mod rebase_editor;
 pub mod repo_picker;
+pub mod settings_view;
 pub mod sidebar;
 pub mod status_line;
 pub mod tab_list;
