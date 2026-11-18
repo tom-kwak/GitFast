@@ -42,11 +42,14 @@ pub fn view<'a, M: Clone + 'a>(
         None => left = left.push(dim(t, "no repository")),
         Some(tab) => {
             if let Some(err) = &tab.error {
-                left = left.push(colored(
-                    t,
-                    format!("⚠ {}", widgets::format::truncate(err, 80)),
-                    t.error(),
-                ));
+                left = left.push(
+                    colored(
+                        t,
+                        format!("⚠ {}", widgets::format::truncate(err, 80)),
+                        t.error(),
+                    )
+                    .wrapping(iced::widget::text::Wrapping::None),
+                );
             }
             if let Some(snap) = &tab.snapshot {
                 let head = &snap.status.head;
@@ -108,7 +111,12 @@ pub fn view<'a, M: Clone + 'a>(
             NoteKind::Info => t.success(),
             NoteKind::Error => t.error(),
         };
-        right = right.push(colored(t, widgets::format::truncate(&f.text, 60), color));
+        // One line, always: a wrapped flash would make the bar taller and
+        // move every button above it while the user aims at one.
+        right = right.push(
+            colored(t, widgets::format::truncate(&f.text, 60), color)
+                .wrapping(iced::widget::text::Wrapping::None),
+        );
     }
     let undo = undo.filter(|b| b.undo.is_some() || b.redo.is_some());
     // The key hints make room for the undo buttons (the prompt shows the
@@ -143,7 +151,10 @@ pub fn view<'a, M: Clone + 'a>(
         right = right.push(buttons);
     }
     if hints {
-        right = right.push(dim(t, "⌘O open · ⌘R refresh · ⌘L prompt · ⌘J log · ? help"));
+        right = right.push(
+            dim(t, "⌘O open · ⌘R refresh · ⌘L prompt · ⌘J log · ? help")
+                .wrapping(iced::widget::text::Wrapping::None),
+        );
     }
 
     container(
@@ -153,6 +164,7 @@ pub fn view<'a, M: Clone + 'a>(
     )
     .padding(Padding::from([3, 8]))
     .width(Length::Fill)
+    .clip(true)
     .style(style::bar(t))
     .into()
 }
