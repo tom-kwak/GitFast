@@ -71,12 +71,26 @@ pub fn icon_button<'a, M: Clone + 'a>(
     hint: impl Into<String>,
     on_press: M,
 ) -> Element<'a, M> {
+    icon_button_maybe(t, glyph, color, hint, Some(on_press))
+}
+
+/// [`icon_button`] that is disabled (dimmed, not clickable) without a
+/// message, e.g. "move up" on the first row. It keeps its place so the
+/// rows stay aligned.
+pub fn icon_button_maybe<'a, M: Clone + 'a>(
+    t: &'a Tokens,
+    glyph: &'a str,
+    color: Color,
+    hint: impl Into<String>,
+    on_press: Option<M>,
+) -> Element<'a, M> {
+    let color = if on_press.is_some() { color } else { t.dim };
     tip(
         t,
         button(mono(t, glyph))
             .padding(Padding::from([1, 5]))
             .style(style::text_button(t, color))
-            .on_press(on_press),
+            .on_press_maybe(on_press),
         hint.into(),
     )
 }

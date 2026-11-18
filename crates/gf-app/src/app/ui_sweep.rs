@@ -1112,3 +1112,24 @@ async fn the_conflicts_button_opens_the_next_conflicted_file() {
     let fx = ui.click("[ 1 conflict").await;
     assert!(ui.flash().contains("only conflict"), "{fx:?}");
 }
+
+#[tokio::test]
+async fn rebase_rows_cannot_move_past_the_ends() {
+    let mut ui = Ui::open_with(|r| {
+        r.git(&["reset", "-q", "--hard"]);
+        r.git(&["clean", "-qfd"]);
+    })
+    .await;
+    let _ = ui.right_click("first").await;
+    let _ = ui.click("rebase -i from here").await;
+    ui.settle();
+    let targets = ui.targets();
+    let ups: Vec<&Target> = targets.iter().filter(|t| t.label == "↑").collect();
+    let downs: Vec<&Target> = targets.iter().filter(|t| t.label == "↓").collect();
+    assert_eq!((ups.len(), downs.len()), (2, 2), "two commits to rebase");
+    let press = |t: &Target| ui.press(t.at, mouse::Button::Left).len();
+    assert_eq!(press(ups[0]), 0, "the first row has nothing above it");
+    assert_eq!(press(downs[1]), 0, "the last row has nothing below it");
+    assert_eq!(press(ups[1]), 1);
+    assert_eq!(press(downs[0]), 1);
+}

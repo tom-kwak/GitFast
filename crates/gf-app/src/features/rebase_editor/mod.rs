@@ -253,13 +253,20 @@ impl State {
                 colored(t, item.commit.summary.clone(), summary_color)
                     .wrapping(Wrapping::None)
                     .width(Length::Fill),
-                widgets::icon_button(t, "↑", t.accent(), "move up (earlier)", Message::MoveUp(i)),
-                widgets::icon_button(
+                // Nothing above the first row or below the last.
+                widgets::icon_button_maybe(
+                    t,
+                    "↑",
+                    t.accent(),
+                    "move up (earlier)",
+                    (i > 0).then_some(Message::MoveUp(i)),
+                ),
+                widgets::icon_button_maybe(
                     t,
                     "↓",
                     t.accent(),
                     "move down (later)",
-                    Message::MoveDown(i)
+                    (i + 1 < self.items.len()).then_some(Message::MoveDown(i)),
                 ),
             ]
             .spacing(6)
