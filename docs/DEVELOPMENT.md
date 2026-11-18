@@ -83,6 +83,8 @@ src/
 - 상태가 있으면 `Feature`를 구현합니다. 상태가 없으면 `pub fn view(...)` 함수만 둡니다.
 - 비동기 작업은 `Update::task(Task)`로 돌려줍니다. UI 스레드에서 git이나 파일 I/O를 하지 않습니다.
 
+diff 로딩을 바꿀 때는 `features/diff_view/loading.rs`에서 요청 생성과 결과 수락 조건을 함께 확인합니다. App은 `RepoId`와 패널 역할로 결과를 전달합니다. 같은 파일을 다시 읽어도 최신 요청만 본문을 교체하며, 추가 구문 강조는 계산에 사용한 diff에만 붙입니다. `cargo test -p gf-app features::diff_view`로 응답 순서, 선택·복사, 부분 stage를 검증합니다.
+
 ### 3.2 코드 뼈대
 
 ```rust

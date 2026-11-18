@@ -43,7 +43,7 @@ pub fn classify(path: &Path, workdir: Option<&Path>, git_dir: &Path) -> Option<C
             // decide the banner: merge, cherry-pick, revert, rebase, bisect).
             "HEAD" | "ORIG_HEAD" | "FETCH_HEAD" | "MERGE_HEAD" | "CHERRY_PICK_HEAD"
             | "REVERT_HEAD" | "BISECT_LOG" | "rebase-merge" | "rebase-apply" | "packed-refs"
-            | "refs" => Some(Change::Refs),
+            | "refs" | "reftable" | "shallow" => Some(Change::Refs),
             "config" => Some(Change::Config),
             _ => None,
         };
@@ -367,6 +367,9 @@ mod tests {
             classify(Path::new("/r/.git/objects/ab/cd"), Some(w), g),
             None
         );
+        for path in ["/r/.git/shallow", "/r/.git/reftable/tables.list"] {
+            assert_eq!(classify(Path::new(path), Some(w), g), Some(Change::Refs));
+        }
         assert_eq!(classify(Path::new("/r/.git/index.lock"), Some(w), g), None);
         assert_eq!(
             classify(Path::new("/r/.git/rebase-merge/done"), Some(w), g),

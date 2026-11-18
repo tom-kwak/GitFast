@@ -661,7 +661,7 @@ fn modal(app: &App) -> Option<&'static str> {
         Some("tab list")
     } else if app.undo_list.is_some() {
         Some("undo list")
-    } else if app.rebase_editor.is_some() {
+    } else if app.rebase_editor().is_some() {
         Some("rebase editor")
     } else {
         None
@@ -872,7 +872,7 @@ async fn sweep_rebase_editor() {
         .await;
         let _ = ui.right_click("first").await;
         let _ = ui.click("rebase -i from here").await;
-        assert!(ui.app.rebase_editor.is_some(), "the rebase editor opens");
+        assert!(ui.app.rebase_editor().is_some(), "the rebase editor opens");
         ui
     })
     .await;
@@ -1354,4 +1354,54 @@ async fn a_flash_does_not_move_the_window_contents() {
         "✗ a long message about what went wrong, long enough to need room in the status line",
     );
     assert_eq!(commit(&ui), without, "buttons stay where they were");
+}
+
+#[tokio::test]
+async fn delayed_rebase_plan_belongs_to_its_original_tab() {
+    use crate::features::{dialog, rebase_editor};
+    let mut ui = Ui::open_with(|r| {
+        r.git(&["reset", "--hard"]);
+        r.git(&["clean", "-fd"]);
+    })
+    .await;
+    let other = ui.fixture.repo.duplicate();
+    let _ = ui.send(Message::Open(other.path().to_owned())).await;
+    let original_head = other.head();
+    ui.app.active = 0;
+    let base = ui
+        .fixture
+        .repo
+        .git(&["rev-parse", "HEAD~2"])
+        .trim()
+        .parse()
+        .expect("base oid");
+    let task = ui.app.open_rebase_editor(base);
+    ui.app.active = 1;
+    let mut stream = runtime::task::into_stream(task).expect("plan task");
+    let Some(Action::Output(done)) = stream.next().await else {
+        panic!("expected plan")
+    };
+    let _ = ui.send(done.clone()).await;
+    assert!(ui.app.rebase_editor().is_none(), "B must not show A's plan");
+    ui.app.active = 0;
+    let editor = ui.app.tabs[0].rebase_editor.as_mut().expect("plan on A");
+    editor.items.last_mut().expect("two commits").action = gf_git::TodoAction::Drop;
+    let _ = ui
+        .send(Message::RebaseEditor(rebase_editor::Message::Start))
+        .await;
+    assert!(ui.app.dialog.is_some());
+    ui.app.active = 1;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_ne!(ui.fixture.repo.head(), original_head, "A was rewritten");
+    assert_eq!(other.head(), original_head);
+    assert!(other.git(&["status", "--porcelain"]).is_empty());
+    assert_eq!(ui.app.tabs[0].undo.undo.len(), 1);
+    assert!(ui.app.tabs[1].undo.undo.is_empty());
+
+    let _ = ui.app.close_tab(0);
+    let _ = ui.send(done).await;
+    assert!(
+        ui.app.rebase_editor().is_none(),
+        "closed tab's result is discarded"
+    );
 }

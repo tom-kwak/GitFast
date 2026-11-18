@@ -259,8 +259,8 @@ pub struct Snapshot {
     pub status: StatusReport,
     /// Whether the loaded status has changes other than ignored files.
     pub has_changes: bool,
-    pub branches: Vec<Branch>,
-    pub tags: Vec<Tag>,
+    pub branches: Arc<[Branch]>,
+    pub tags: Arc<[Tag]>,
     pub remotes: Vec<Remote>,
     pub stashes: Vec<StashEntry>,
     /// Shared between snapshots while its refs do not move.
@@ -475,8 +475,11 @@ impl Snapshot {
             lfs,
         );
 
+        let mut head_changed = false;
         if let Some(status) = status {
-            snap.status = status.map_err(err)?;
+            let status = status.map_err(err)?;
+            head_changed = status.head != snap.status.head;
+            snap.status = status;
             snap.has_changes = snap
                 .status
                 .entries
@@ -490,10 +493,10 @@ impl Snapshot {
             snap.lines.untracked_stamps = stamps;
         }
         if let Some(b) = branches {
-            snap.branches = b.map_err(err)?;
+            snap.branches = b.map_err(err)?.into();
         }
         if let Some(t) = tags {
-            snap.tags = t.map_err(err)?;
+            snap.tags = t.map_err(err)?.into();
         }
         if let Some(s) = stashes {
             snap.stashes = s.map_err(err)?;
@@ -521,14 +524,19 @@ impl Snapshot {
                 .ok();
         }
         if status_part {
-            // Without an upstream, ahead/behind are unknown; count what a
-            // first push would publish instead.
-            snap.unpublished =
-                if snap.status.head.upstream.is_none() && snap.status.head.branch.is_some() {
-                    repo.unpushed_count().await.ok()
-                } else {
-                    None
-                };
+            let head = &snap.status.head;
+            if head.upstream.is_some() || head.branch.is_none() {
+                snap.unpublished = None;
+            } else if refs_part
+                || head_changed
+                || snap.unpublished.is_none()
+                || repo.handle().git_dir != repo.cwd().join(".git")
+            {
+                // File edits do not change reachability. Linked worktrees
+                // watch their private git dir, so a shared remote ref can
+                // move without a refs event in this tab.
+                snap.unpublished = repo.unpushed_count().await.ok();
+            }
         }
 
         if refs_part {
@@ -550,8 +558,7 @@ impl Snapshot {
                 });
         }
 
-        if status_part {
-            // HEAD (detached or not) comes with the status, refs with it too.
+        if refs_part || head_changed {
             snap.badges = Arc::new(crate::badges::build(
                 &snap.branches,
                 &snap.tags,
@@ -559,14 +566,18 @@ impl Snapshot {
             ));
         }
 
-        let key = history_key(
-            snap.status.head.oid.as_ref(),
-            &snap.branches,
-            &snap.tags,
-            &snap.stashes,
-            all_branches,
-            history_limit,
-        );
+        let key = if refs_part || parts.history {
+            history_key(
+                snap.status.head.oid.as_ref(),
+                &snap.branches,
+                &snap.tags,
+                &snap.stashes,
+                all_branches,
+                history_limit,
+            )
+        } else {
+            snap.history_key
+        };
         // Only a refresh that read the refs knows where they are now (a
         // status-only one sees a new HEAD before the branch it moved).
         let history = parts.history || (refs_part && key != snap.history_key);
@@ -708,6 +719,8 @@ pub struct RepoTab {
     pub sidebar: sidebar::State,
     pub changes: changes::State,
     pub history: history::State,
+    /// A rewrite plan belongs to the repository that produced it.
+    pub rebase_editor: Option<crate::features::rebase_editor::State>,
     /// Changes of a working tree file (editable).
     pub local_diff: diff_view::State,
     /// Changes of a commit or stash (read-only, with a file list).
@@ -758,6 +771,7 @@ impl RepoTab {
             sidebar: sidebar::State::default(),
             changes: changes::State::default(),
             history: history::State::default(),
+            rebase_editor: None,
             local_diff: diff_view::State::new(diff_view::Role::Local),
             commit_diff: diff_view::State::new(diff_view::Role::Commit),
             code_view: diff_view::Role::Commit,
@@ -990,15 +1004,58 @@ mod tests {
             "history reused"
         );
         assert!(!saved.loaded.history);
+        assert!(Arc::ptr_eq(&saved.badges, &first.badges));
+        assert!(Arc::ptr_eq(&saved.branches, &first.branches));
+        assert!(Arc::ptr_eq(&saved.tags, &first.tags));
+        assert_eq!(saved.unpublished, Some(1));
 
         // A refresh after an operation reads the refs; they did not move.
         let same = load(Some(saved.clone()), Parts::ALL).await.expect("all");
         assert!(Arc::ptr_eq(&same.history, &first.history));
 
         repo.commit_all("second");
-        let moved = load(Some(same), Parts::ALL).await.expect("refs moved");
+        let edited_head = load(Some(same), Parts::STATUS).await.expect("HEAD moved");
+        assert_eq!(edited_head.unpublished, Some(2));
+        let moved = load(Some(edited_head), Parts::ALL)
+            .await
+            .expect("refs moved");
         assert!(moved.loaded.history);
         assert_eq!(moved.history.commits.len(), 2);
+
+        repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let fetched = load(Some(moved), Parts::ALL)
+            .await
+            .expect("remote refs moved");
+        assert_eq!(fetched.unpublished, Some(0));
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_sees_shared_remote_refs_on_a_status_refresh() {
+        let main = gf_test_support::TestRepo::new();
+        main.write("a", "first");
+        main.commit_all("init");
+        let parent = tempfile::tempdir().expect("temp dir");
+        let path = parent.path().join("linked");
+        main.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "linked",
+            path.to_str().expect("path"),
+        ]);
+        let runner = gf_git::GitRunner::new()
+            .with_cleared_env()
+            .with_env(main.env());
+        let repo = Repository::open(path, runner).await.expect("linked repo");
+        let first = Snapshot::load(repo.clone(), None, Parts::RELOAD, false, 100)
+            .await
+            .expect("initial load");
+        assert_eq!(first.unpublished, Some(1));
+        main.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let next = Snapshot::load(repo, Some(first), Parts::STATUS, false, 100)
+            .await
+            .expect("status");
+        assert_eq!(next.unpublished, Some(0));
     }
 
     #[tokio::test]

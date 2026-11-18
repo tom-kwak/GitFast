@@ -47,7 +47,6 @@ use crate::feature::{Cx, Feature, Update};
 use crate::features::command_log::NoteKind;
 use crate::features::context_menu;
 use crate::features::dialog::{self, Dialog};
-use crate::features::diff_view::DiffSource;
 use crate::features::prompt::PROMPT_ID;
 use crate::features::status_line::Flash;
 use crate::features::{
@@ -175,12 +174,7 @@ pub enum Message {
     Picked(Option<PathBuf>),
     Loaded(RepoId, Result<Arc<Snapshot>, String>),
     HistoryLoaded(RepoId, String, Result<Arc<History>, String>),
-    DiffLoaded(
-        RepoId,
-        DiffSource,
-        Result<Arc<diff_view::LoadedDiff>, String>,
-    ),
-    DiffHighlighted(RepoId, DiffSource, usize, Arc<diff_view::FileSpans>),
+    DiffFinished(RepoId, diff_view::Role, diff_view::Completion),
     AmendTextLoaded(RepoId, Option<String>),
     SyncProgress(Progress),
     OpDone {
@@ -216,6 +210,7 @@ pub enum Message {
     BisectDone(RepoId, Result<gf_git::BisectProgress, String>),
     /// Plan for the rebase editor; the ids, when given, are preset to squash.
     RebasePlanLoaded(
+        RepoId,
         gf_core::model::Oid,
         Result<Vec<gf_git::TodoItem>, String>,
         Option<Vec<gf_core::model::Oid>>,
@@ -224,6 +219,7 @@ pub enum Message {
     /// What the squash dialog shows; `selected` is how many of the ids the
     /// user picked (the rest filled a gap).
     SquashPreviewed {
+        repo: RepoId,
         ids: Vec<gf_core::model::Oid>,
         selected: usize,
         result: Result<gf_git::SquashPreview, String>,
@@ -305,7 +301,6 @@ pub struct App {
     /// Where the mouse was last pressed: menus open there.
     pointer: crate::widgets::pointer::Pointer,
     /// Interactive rebase plan being edited (modal).
-    rebase_editor: Option<crate::features::rebase_editor::State>,
     /// Running fetch/pull/push and its cancel handle.
     sync: Option<(toolbar::Sync, CancellationToken)>,
     flash: Option<Flash>,
@@ -393,7 +388,6 @@ impl App {
             undo_list: None,
             menu: None,
             pointer: crate::widgets::pointer::Pointer::default(),
-            rebase_editor: None,
             sync: None,
             flash: None,
             tick: 0,
@@ -424,6 +418,10 @@ impl App {
 
     pub fn theme(&self) -> iced::Theme {
         self.tokens.iced_theme()
+    }
+
+    fn rebase_editor(&self) -> Option<&crate::features::rebase_editor::State> {
+        self.active_tab()?.rebase_editor.as_ref()
     }
 
     fn active_tab(&self) -> Option<&RepoTab> {
@@ -794,16 +792,12 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DiffLoaded(id, source, result) => {
+            Message::DiffFinished(id, role, done) => {
                 if let Some(tab) = self.tab_mut(id) {
-                    tab.diff_mut(source.role()).loaded(&source, result);
-                }
-                Task::none()
-            }
-            Message::DiffHighlighted(id, source, file, spans) => {
-                if let Some(tab) = self.tab_mut(id) {
-                    tab.diff_mut(source.role())
-                        .highlighted(&source, file, spans);
+                    return tab
+                        .diff_mut(role)
+                        .finish(done)
+                        .map(move |next| Message::DiffFinished(id, role, next));
                 }
                 Task::none()
             }
@@ -889,15 +883,16 @@ impl App {
                 Task::none()
             }
             Message::BisectDone(id, result) => self.on_bisect_done(id, result),
-            Message::RebasePlanLoaded(base, plan, squash) => {
-                self.on_rebase_plan(base, plan, squash)
+            Message::RebasePlanLoaded(id, base, plan, squash) => {
+                self.on_rebase_plan(id, base, plan, squash)
             }
             Message::RebaseEditor(m) => self.on_rebase_editor(m),
             Message::SquashPreviewed {
+                repo,
                 ids,
                 selected,
                 result,
-            } => self.on_squash_preview(ids, selected, result),
+            } => self.on_squash_preview(repo, ids, selected, result),
             Message::Undo => self.undo_steps(false, 1),
             Message::Redo => self.undo_steps(true, 1),
             Message::UndoList(m) => self.on_undo_list(m),
@@ -1323,9 +1318,8 @@ impl App {
             Shortcut::Commit => self.update(Message::Commit(commit_box::Message::Submit {
                 amend: false,
             })),
-            Shortcut::Escape if self.rebase_editor.is_some() => {
-                self.rebase_editor = None;
-                Task::none()
+            Shortcut::Escape if self.rebase_editor().is_some() => {
+                self.on_rebase_editor(crate::features::rebase_editor::Message::Cancel)
             }
             Shortcut::Escape => {
                 if let Some((_, token)) = &self.sync {
@@ -1464,7 +1458,7 @@ impl App {
         // A confirmation sits above the window (picker, rebase editor) that
         // asked for it.
         let modal: Option<Element<'_, Message>> =
-            match (&self.dialog, &self.picker, &self.rebase_editor) {
+            match (&self.dialog, &self.picker, self.rebase_editor()) {
                 (Some(d), _, _) => Some(d.view(t).map(Message::Dialog)),
                 _ if self.settings_open => Some(settings_view::view(t).map(Message::Settings)),
                 (None, Some(p), _) => Some(p.view(cx).map(Message::Picker)),
