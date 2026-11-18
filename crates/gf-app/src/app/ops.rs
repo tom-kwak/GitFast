@@ -198,8 +198,12 @@ impl App {
 
     /// ⌘R: everything, the history included.
     pub(super) fn refresh_active(&mut self) -> Task<Message> {
-        match self.active_tab().map(|t| t.repo.id()) {
-            Some(id) => self.request_parts(id, Parts::RELOAD),
+        match self.active_tab_mut() {
+            Some(tab) => {
+                tab.refresh_asked = true;
+                let id = tab.repo.id();
+                self.request_parts(id, Parts::RELOAD)
+            }
             None => Task::none(),
         }
     }
@@ -213,6 +217,8 @@ impl App {
             return Task::none();
         };
         tab.loading = false;
+        // The refresh asked for is done once no read is left queued.
+        let refreshed = tab.queued.is_empty() && std::mem::take(&mut tab.refresh_asked);
         let touched = std::mem::take(&mut tab.loading_touched);
         // A page requested while this load ran arrives with the next one.
         if tab.queued.is_empty() {
@@ -312,6 +318,9 @@ impl App {
                 if let Some(source) = stale {
                     tab.local_diff.show(source);
                     tasks.push(load_diff(tab, diff_view::Role::Local));
+                }
+                if refreshed {
+                    self.flash(NoteKind::Info, "↻ refreshed");
                 }
             }
             Err(e) => {

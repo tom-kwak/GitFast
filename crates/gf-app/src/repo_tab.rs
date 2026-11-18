@@ -683,6 +683,9 @@ pub struct RepoTab {
     pub repo: Repository,
     pub snapshot: Option<Arc<Snapshot>>,
     pub loading: bool,
+    /// The user asked for a refresh (⌘R): say so when it is done, as a
+    /// refresh that finds nothing new changes nothing on screen.
+    pub refresh_asked: bool,
     /// Parts asked for and not read yet: while a refresh runs, or while
     /// the tab is in the background (see [`RepoTab::load_due`]).
     pub queued: Parts,
@@ -737,6 +740,7 @@ impl RepoTab {
             repo,
             snapshot: None,
             loading: false,
+            refresh_asked: false,
             // Read by `App::load_due` once the tab's turn comes.
             queued: Parts::RELOAD,
             touched: Touched::all(),
