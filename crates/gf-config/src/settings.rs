@@ -31,6 +31,8 @@ pub struct AppearanceSettings {
     pub show_command_log: bool,
     /// Show the refs sidebar (left).
     pub show_refs: bool,
+    /// Show the commit list in History mode.
+    pub show_history: bool,
     /// Width of the file list beside the diff, in character columns; the
     /// same in HISTORY and WORKING TREE. Dragged with the divider.
     pub list_cols: f32,
@@ -46,6 +48,7 @@ impl Default for AppearanceSettings {
             font_size: 13,
             show_command_log: true,
             show_refs: true,
+            show_history: true,
             list_cols: DEFAULT_LIST_COLS,
         }
     }
@@ -144,6 +147,7 @@ mod tests {
         let path = dir.path().join("cfg/settings.toml");
         let mut s = Settings::default();
         s.appearance.font_size = 15;
+        s.appearance.show_history = false;
         s.git.executable = Some("/opt/git/bin/git".into());
         s.repos.open = vec!["/a".into(), "/b".into()];
         s.repos.active = Some(1);
@@ -162,6 +166,7 @@ mod tests {
         .expect("write");
         let s = Settings::load(&path).expect("load");
         assert_eq!(s.appearance.font_size, 16);
+        assert!(s.appearance.show_history);
         assert_eq!(s.appearance.theme, "gf-dark");
     }
 

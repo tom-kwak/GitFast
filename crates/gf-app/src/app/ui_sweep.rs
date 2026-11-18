@@ -1279,6 +1279,41 @@ async fn settings_keys_change_the_theme_without_navigating_the_repository() {
 }
 
 #[tokio::test]
+async fn history_and_command_log_can_be_collapsed_and_reopened_by_clicking() {
+    let mut ui = Ui::open().await;
+    ui.app.focus_pane(Pane::History);
+    ui.app
+        .log
+        .note(NoteKind::Info, "keep this log entry", Vec::new());
+    let _ = ui.click("▴").await;
+    assert!(!ui.app.panes().contains(&Pane::History));
+    assert_eq!(ui.app.pane(), Pane::Files);
+    let collapse_log = ui
+        .targets()
+        .into_iter()
+        .filter(|t| t.label == "▾")
+        .max_by(|a, b| a.at.x.total_cmp(&b.at.x))
+        .expect("collapse log button at the right edge");
+    let _ = ui.click_at(&collapse_log, mouse::Button::Left).await;
+    assert!(!ui.app.settings.appearance.show_command_log);
+
+    let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
+    assert!(!saved.appearance.show_history);
+    assert!(!saved.appearance.show_command_log);
+
+    let _ = ui.click("▾ HISTORY").await;
+    assert!(ui.app.panes().contains(&Pane::History));
+    assert_eq!(ui.app.pane(), Pane::History);
+    let _ = ui.click("▴ COMMAND LOG").await;
+    assert!(ui.app.settings.appearance.show_command_log);
+    assert!(
+        ui.targets()
+            .iter()
+            .any(|target| target.label.contains("keep this log entry"))
+    );
+}
+
+#[tokio::test]
 async fn clear_is_disabled_while_the_log_has_nothing_to_clear() {
     let mut ui = Ui::welcome().await;
     ui.settle();

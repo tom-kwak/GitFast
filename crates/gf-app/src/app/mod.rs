@@ -83,6 +83,7 @@ pub enum Shortcut {
     FocusPrompt,
     ToggleLog,
     ToggleRefs,
+    ToggleHistory,
     ToggleLocal,
     HistoryPrev,
     HistoryNext,
@@ -466,6 +467,14 @@ impl App {
         }
     }
 
+    /// Make the commit list visible when an action explicitly shows history.
+    fn expand_history(&mut self) {
+        if !self.settings.appearance.show_history {
+            self.settings.appearance.show_history = true;
+            self.save_settings();
+        }
+    }
+
     // ------------------------------------------------------------- update
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -540,8 +549,11 @@ impl App {
                 }
             }
             Message::Log(m) => {
-                let Update { task, .. } = self.log.update(m);
-                task.map(Message::Log)
+                let Update { task, output } = self.log.update(m);
+                match output {
+                    Some(command_log::Output::Collapse) => self.on_shortcut(Shortcut::ToggleLog),
+                    None => task.map(Message::Log),
+                }
             }
             Message::Sidebar(m) => {
                 if matches!(m, sidebar::Message::Select(_) | sidebar::Message::Toggle(_)) {
@@ -1296,6 +1308,18 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
+            Shortcut::ToggleHistory => {
+                self.settings.appearance.show_history = !self.settings.appearance.show_history;
+                self.save_settings();
+                self.active_tab()
+                    .filter(|tab| {
+                        self.settings.appearance.show_history
+                            && tab.code_view == diff_view::Role::Commit
+                    })
+                    .map_or_else(Task::none, |tab| {
+                        tab.history.restore_scroll().map(Message::History)
+                    })
+            }
             // ⌘E opens/closes the working tree (swaps the main area mode).
             Shortcut::ToggleLocal => {
                 if let Some(tab) = self.active_tab_mut() {
@@ -1310,7 +1334,11 @@ impl App {
                 self.settings.appearance.show_command_log =
                     !self.settings.appearance.show_command_log;
                 self.save_settings();
-                Task::none()
+                if self.settings.appearance.show_command_log {
+                    self.log.restore_scroll().map(Message::Log)
+                } else {
+                    Task::none()
+                }
             }
             Shortcut::HistoryPrev => self.update(Message::Prompt(prompt::Message::HistoryPrev)),
             Shortcut::HistoryNext => self.update(Message::Prompt(prompt::Message::HistoryNext)),
@@ -1402,7 +1430,8 @@ impl App {
                         tab,
                         cx,
                         active,
-                        self.settings.appearance.list_cols,
+                        appearance.list_cols,
+                        appearance.show_history,
                     ))
                     .into();
                 row![left, main].spacing(4).height(Length::Fill).into()
@@ -1429,6 +1458,16 @@ impl App {
                 container(self.log.view(cx).map(Message::Log))
                     .padding(Padding::from([0, 4]))
                     .height(Length::Fixed(t.font_size * 11.0)),
+            );
+        } else {
+            layout = layout.push(
+                container(widgets::collapsed_bar(
+                    t,
+                    "▴ COMMAND LOG",
+                    "show command log ⌘J",
+                    Message::Key(Shortcut::ToggleLog),
+                ))
+                .padding(Padding::from([0, 4])),
             );
         }
         layout = layout
@@ -1605,6 +1644,7 @@ fn main_area<'a>(
     cx: Cx<'a>,
     active: Pane,
     list_cols: f32,
+    show_history: bool,
 ) -> Element<'a, Message> {
     let frame =
         |pane: Pane, content: Element<'a, Message>| focus::pane_frame(t, pane, active, content);
@@ -1655,7 +1695,20 @@ fn main_area<'a>(
 
     match tab.code_view {
         Role::Commit => {
-            let top = frame(Pane::History, tab.history.view(cx).map(Message::History));
+            let top = if show_history {
+                container(frame(
+                    Pane::History,
+                    tab.history.view(cx).map(Message::History),
+                ))
+                .height(Length::FillPortion(2))
+            } else {
+                container(widgets::collapsed_bar(
+                    t,
+                    "▾ HISTORY",
+                    "show history ⌘⇧H",
+                    Message::Key(Shortcut::ToggleHistory),
+                ))
+            };
             let changes: Element<'a, Message> = match &tab.blame {
                 Some(b) => frame(Pane::Diff, b.view(t).map(Message::Blame)),
                 None => list_split(
@@ -1671,14 +1724,10 @@ fn main_area<'a>(
                     ),
                 ),
             };
-            column![
-                tabs,
-                container(top).height(Length::FillPortion(2)),
-                container(changes).height(Length::FillPortion(3)),
-            ]
-            .spacing(4)
-            .width(Length::Fill)
-            .into()
+            column![tabs, top, container(changes).height(Length::FillPortion(3)),]
+                .spacing(4)
+                .width(Length::Fill)
+                .into()
         }
         // WORKING TREE: changed files over the commit box on the left, the
         // selected file's changes on the right.
@@ -1844,6 +1893,7 @@ fn shortcut(
             'r' => Shortcut::Refresh,
             'l' => Shortcut::FocusPrompt,
             'j' => Shortcut::ToggleLog,
+            'h' | 'H' if modifiers.shift() && !modifiers.alt() => Shortcut::ToggleHistory,
             'b' => Shortcut::ToggleRefs,
             'e' => Shortcut::ToggleLocal,
             // ⌘⇧[ / ⌘⇧]: previous / next repository tab (Safari, Terminal).
@@ -1919,6 +1969,29 @@ mod tests {
                 event::Status::Ignored
             ),
             Some(Shortcut::Redo)
+        );
+    }
+
+    #[test]
+    fn history_toggle_uses_shift_command_and_the_physical_key() {
+        let cmd = keyboard::Modifiers::COMMAND;
+        assert_eq!(
+            press(
+                Key::Character("ㅗ".into()),
+                Code::KeyH,
+                cmd,
+                event::Status::Captured
+            ),
+            None
+        );
+        assert_eq!(
+            press(
+                Key::Character("ㅗ".into()),
+                Code::KeyH,
+                cmd | keyboard::Modifiers::SHIFT,
+                event::Status::Captured
+            ),
+            Some(Shortcut::ToggleHistory)
         );
     }
 

@@ -74,6 +74,7 @@ pub enum Message {
     Select(Oid),
     Scrolled(ScrollPos),
     ToggleAllBranches,
+    Collapse,
     BranchHere,
     TagHere,
     Checkout,
@@ -126,6 +127,7 @@ pub enum CommitAction {
 
 #[derive(Debug, Clone)]
 pub enum Output {
+    Collapse,
     ShowCommit(Oid),
     ToggleAllBranches,
     NewBranchAt(Oid),
@@ -280,6 +282,17 @@ impl State {
             .filter(|c| self.marked.contains(&c.id))
             .cloned()
             .collect()
+    }
+
+    /// Restore the list position after its widget has been recreated.
+    pub fn restore_scroll(&self) -> Task<Message> {
+        iced::widget::operation::scroll_to(
+            LIST_ID,
+            iced::widget::scrollable::AbsoluteOffset {
+                x: 0.0,
+                y: self.scroll.offset,
+            },
+        )
     }
 
     /// Range/toggle selection needs the list being shown.
@@ -860,6 +873,7 @@ impl Feature for State {
                 Update::none()
             }
             Message::ToggleAllBranches => Update::output(Output::ToggleAllBranches),
+            Message::Collapse => Update::output(Output::Collapse),
             Message::BranchHere => {
                 selected.map_or_else(Update::none, |o| Update::output(Output::NewBranchAt(o)))
             }
@@ -914,22 +928,28 @@ impl Feature for State {
             ));
         }
 
+        let panel = |title: String, content: Element<'a, Message>| {
+            widgets::panel_with_action(
+                t,
+                title,
+                widgets::icon_button(t, "▴", t.accent(), "hide history ⌘⇧H", Message::Collapse),
+                content,
+            )
+        };
         let Some(snap) = cx.snapshot else {
-            return widgets::panel(t, "HISTORY".into(), widgets::empty_hint(t, "loading…"));
+            return panel("HISTORY".into(), widgets::empty_hint(t, "loading…"));
         };
         if self.loading {
-            return widgets::panel(
-                t,
+            return panel(
                 "HISTORY".into(),
-                column![toolbar, widgets::empty_hint(t, "loading history…")],
+                column![toolbar, widgets::empty_hint(t, "loading history…")].into(),
             );
         }
         let Some(history) = self.history(snap) else {
-            return widgets::panel(t, "HISTORY".into(), toolbar);
+            return panel("HISTORY".into(), toolbar.into());
         };
         if history.commits.is_empty() {
-            return widgets::panel(
-                t,
+            return panel(
                 "HISTORY".into(),
                 column![
                     toolbar,
@@ -937,7 +957,8 @@ impl Feature for State {
                         t,
                         "no commits yet — open the working tree (⌘E) to stage and commit"
                     )
-                ],
+                ]
+                .into(),
             );
         }
 
@@ -1011,7 +1032,7 @@ impl Feature for State {
         }
         let count = history.commits.len();
         let more = if history.more { "+" } else { "" };
-        widgets::panel(t, format!("HISTORY ({count}{more})"), content)
+        panel(format!("HISTORY ({count}{more})"), content.into())
     }
 }
 

@@ -374,6 +374,7 @@ impl App {
 
     pub(super) fn on_history(&mut self, out: history::Output) -> Task<Message> {
         match out {
+            history::Output::Collapse => self.on_shortcut(Shortcut::ToggleHistory),
             history::Output::ShowCommit(oid) => self.show_diff(DiffSource::Commit(oid)),
             history::Output::ToggleAllBranches => {
                 let Some(tab) = self.active_tab_mut() else {
@@ -447,7 +448,9 @@ impl App {
                 // A branch/tag's history is only visible in HISTORY mode.
                 tab.code_view = diff_view::Role::Commit;
                 tab.history.set_revision(rev.clone());
-                rev.map_or_else(Task::none, |r| load_history(tab, r))
+                let task = rev.map_or_else(Task::none, |r| load_history(tab, r));
+                self.expand_history();
+                task
             }
             sidebar::Output::ShowStash(s) => self.show_diff(DiffSource::Stash {
                 index: s.index,
@@ -1119,6 +1122,7 @@ impl App {
             }
             PromptCommand::ToggleLog => self.on_shortcut(Shortcut::ToggleLog),
             PromptCommand::ToggleRefs => self.on_shortcut(Shortcut::ToggleRefs),
+            PromptCommand::ToggleHistory => self.on_shortcut(Shortcut::ToggleHistory),
             PromptCommand::ToggleLocal => self.on_shortcut(Shortcut::ToggleLocal),
             PromptCommand::ClearLog => {
                 self.log.clear();

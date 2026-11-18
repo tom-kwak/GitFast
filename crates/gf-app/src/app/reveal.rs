@@ -42,6 +42,7 @@ impl App {
             return Task::none();
         };
         if let Some(task) = tab.history.reveal(&oid, &snap, &tokens) {
+            self.expand_history();
             return task.map(Message::History);
         }
         let repo = tab.repo.clone();
@@ -140,6 +141,7 @@ impl App {
                 self.request_parts(id, Parts::HISTORY)
             }
         };
+        self.expand_history();
         if !notes.is_empty() {
             self.flash(
                 NoteKind::Info,
