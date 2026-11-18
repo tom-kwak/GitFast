@@ -1093,3 +1093,22 @@ async fn refresh_says_it_is_done_even_when_nothing_changed() {
     let fx = ui.click("[ ↻ refresh").await;
     assert!(ui.flash().contains("refreshed"), "{fx:?}");
 }
+
+#[tokio::test]
+async fn the_conflicts_button_opens_the_next_conflicted_file() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            diverged(r);
+            let _ = r.git_output(&["merge", "feature"]);
+        })
+        .await,
+    )
+    .await;
+    // Already in the working tree, where it used to do nothing.
+    let _ = ui.click("[ 1 conflict").await;
+    let open = ui.app.active_tab().and_then(|t| t.conflict.as_ref());
+    assert_eq!(open.map(|c| c.path.clone()), Some(PathBuf::from("a.txt")));
+    // The only one is open: it says so.
+    let fx = ui.click("[ 1 conflict").await;
+    assert!(ui.flash().contains("only conflict"), "{fx:?}");
+}

@@ -441,11 +441,48 @@ impl App {
                 "Abort",
                 Purpose::AbortOperation,
             )),
+            // Opens the next conflicted file in the resolver (the first, or
+            // the one after the file open), in the working tree.
             op_banner::Message::ShowConflicts => {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.code_view = Role::Local;
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.code_view = Role::Local;
+                let conflicted: Vec<std::path::PathBuf> = tab
+                    .snapshot
+                    .iter()
+                    .flat_map(|s| &s.status.entries)
+                    .filter_map(|e| match e {
+                        gf_core::model::StatusEntry::Conflicted { path, .. } => Some(path.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let open = tab.conflict.as_ref().map(|c| c.path.clone());
+                let next = match open
+                    .as_ref()
+                    .and_then(|o| conflicted.iter().position(|p| p == o))
+                {
+                    Some(i) => conflicted.get((i + 1) % conflicted.len()),
+                    None => conflicted.first(),
                 }
-                Task::none()
+                .cloned();
+                self.focus_pane(crate::nav::Pane::Changes);
+                match next {
+                    Some(path) if Some(&path) != open.as_ref() => {
+                        self.update(Message::Changes(crate::features::changes::Message::Select(
+                            path,
+                            crate::features::changes::Group::Conflicts,
+                        )))
+                    }
+                    Some(path) => {
+                        self.flash(
+                            NoteKind::Info,
+                            format!("{} is the only conflict left", path.display()),
+                        );
+                        Task::none()
+                    }
+                    None => Task::none(),
+                }
             }
             // Same as popping it from the sidebar (same confirmation).
             op_banner::Message::PopLeft(i) => {
