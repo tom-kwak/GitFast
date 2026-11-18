@@ -46,6 +46,11 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 tokio-stream = { version = "0.1", default-features = false }
 
+[patch.crates-io]
+# Backport rust-windowing/winit#4478 to 0.30.13 for macOS Korean IME.
+# Remove it when the fix ships in a winit release supported by iced.
+winit = { git = "https://github.com/zilhak/winit-ime-fix", rev = "065d1a09cde54e476dd7f611855f00a1a36bbe10" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
