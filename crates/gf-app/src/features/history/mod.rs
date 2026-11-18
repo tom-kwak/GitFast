@@ -43,6 +43,8 @@ pub struct State {
     revision: Option<String>,
     /// History for `revision`, loaded by the app.
     data: Option<Arc<History>>,
+    /// The commit checked out, as of the last update (menus).
+    head: Option<Oid>,
     loading: bool,
     /// Single selection, and the anchor for shift-click ranges.
     selected: Option<Oid>,
@@ -286,6 +288,7 @@ impl State {
         message: Message,
         snap: Option<&Snapshot>,
     ) -> Update<Message, Output> {
+        self.head = snap.and_then(|s| s.status.head.oid.clone());
         let (commits, more): (Vec<Commit>, bool) = match snap.and_then(|s| self.history(s)) {
             Some(h) => (h.commits.clone(), h.more),
             None => (Vec::new(), false),
@@ -382,7 +385,7 @@ impl State {
                 self.marked.clear();
                 Update::output(Output::Menu {
                     show: changed.then_some(oid),
-                    menu: commit_menu(c),
+                    menu: commit_menu(c, self.head.as_ref() == Some(&c.id)),
                 })
             }
             Message::OpenActions if self.marked.len() > 1 => Update::output(Output::Menu {
@@ -397,7 +400,7 @@ impl State {
                 match c {
                     Some(c) => Update::output(Output::Menu {
                         show: None,
-                        menu: commit_menu(c),
+                        menu: commit_menu(c, self.head.as_ref() == Some(&c.id)),
                     }),
                     None => Update::none(),
                 }
@@ -606,10 +609,10 @@ fn actions_button(t: &Tokens) -> Element<'_, Message> {
     )
 }
 
-/// Actions for one commit.
-fn commit_menu(c: &Commit) -> Menu<Message> {
+/// Actions for one commit; `is_head`: it is the commit checked out.
+fn commit_menu(c: &Commit, is_head: bool) -> Menu<Message> {
     let act = |a| Message::Act(a);
-    Menu {
+    let mut menu = Menu {
         title: format!("{} {}", c.id.short(), format::truncate(&c.summary, 40)),
         entries: vec![
             Entry::item(
@@ -670,7 +673,13 @@ fn commit_menu(c: &Commit) -> Menu<Message> {
             Entry::Separator,
             Entry::item('y', "copy id", "copy the full commit id", Message::CopyId),
         ],
+    };
+    // Bisecting needs a good commit before HEAD (the bad one).
+    if is_head {
+        menu.entries
+            .retain(|e| !matches!(e, Entry::Item { key: 's', .. }));
     }
+    menu
 }
 
 /// Actions for several commits (newest first).
@@ -1169,6 +1178,23 @@ mod tests {
         }));
         s.set_revision(Some("refs/heads/x".into()));
         assert_eq!(s.scroll, ScrollPos::default());
+    }
+
+    #[test]
+    fn bisect_is_offered_only_below_head() {
+        let c = &commits(1)[0];
+        let keys = |m: Menu<Message>| -> String {
+            m.entries
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::Item { key, .. } => Some(*key),
+                    Entry::Separator => None,
+                })
+                .collect()
+        };
+        assert!(keys(commit_menu(c, false)).contains('s'));
+        // HEAD would be both the bad and the good commit: git refuses.
+        assert!(!keys(commit_menu(c, true)).contains('s'));
     }
 
     fn commits(n: u8) -> Vec<Commit> {
