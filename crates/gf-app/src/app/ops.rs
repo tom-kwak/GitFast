@@ -14,7 +14,7 @@ use super::dialogs::{Confirm, Purpose};
 use super::{App, Message, OpKind};
 use crate::features::command_log::NoteKind;
 use crate::features::dialog::Dialog;
-use crate::features::diff_view::{self, DiffSource};
+use crate::features::diff_view::DiffSource;
 use crate::features::toolbar;
 use crate::git_actions;
 use crate::repo_tab::{History, Parts, RepoTab, Snapshot, Touched};
@@ -98,17 +98,13 @@ pub fn load_history(tab: &RepoTab, revision: String) -> Task<Message> {
     )
 }
 
-pub fn load_diff(tab: &RepoTab, role: diff_view::Role) -> Task<Message> {
-    let view = tab.diff(role);
-    let Some(source) = view.source().cloned() else {
-        return Task::none();
-    };
+pub fn load_diff(tab: &mut RepoTab, source: DiffSource) -> Task<Message> {
     let repo = tab.repo.clone();
     let id = repo.id();
-    let ws = view.ignore_whitespace();
-    Task::perform(diff_view::load(repo, source.clone(), ws), move |result| {
-        Message::DiffLoaded(id, source.clone(), result)
-    })
+    let role = source.role();
+    tab.diff_mut(role)
+        .request(repo, source)
+        .map(move |done| Message::DiffFinished(id, role, done))
 }
 
 impl App {
@@ -233,10 +229,6 @@ impl App {
                 }
                 // A file that moved between groups keeps its diff visible.
                 let followed = tab.changes.follow(&snap.status.entries);
-                let moved = followed.is_some();
-                if let Some(source) = followed {
-                    tab.local_diff.show(source);
-                }
                 // Keep an open conflict resolver in sync: reload it while the
                 // file is still conflicted, close it once resolved.
                 let conflict_path = tab
@@ -310,14 +302,11 @@ impl App {
                     .and_then(|s| match s {
                         DiffSource::WorkTree(p)
                         | DiffSource::Staged(p)
-                        | DiffSource::Untracked(p) => {
-                            (moved || touched.includes(p)).then(|| s.clone())
-                        }
+                        | DiffSource::Untracked(p) => touched.includes(p).then(|| s.clone()),
                         _ => None,
                     });
-                if let Some(source) = stale {
-                    tab.local_diff.show(source);
-                    tasks.push(load_diff(tab, diff_view::Role::Local));
+                if let Some(source) = followed.or(stale) {
+                    tasks.push(load_diff(tab, source));
                 }
                 if refreshed {
                     self.flash(NoteKind::Info, "↻ refreshed");
@@ -598,7 +587,7 @@ impl App {
     /// Left out while another dialog or the rebase editor is open, so it
     /// never replaces a question; the command log still has the details.
     pub(super) fn show_failure(&mut self, label: &str, error: &str) -> Task<Message> {
-        if self.dialog.is_some() || self.rebase_editor.is_some() {
+        if self.dialog.is_some() || self.rebase_editor().is_some() {
             return Task::none();
         }
         let d = git_actions::diagnose(error);

@@ -41,10 +41,23 @@ impl App {
         F: FnOnce(Repository) -> Fut,
         Fut: Future<Output = gf_core::Result<Integration>> + Send + 'static,
     {
-        let label = label.into();
         let Some(tab) = self.active_tab() else {
             return Task::none();
         };
+        Self::integrate_in(tab, label, undoable, f)
+    }
+
+    fn integrate_in<F, Fut>(
+        tab: &crate::repo_tab::RepoTab,
+        label: impl Into<String>,
+        undoable: bool,
+        f: F,
+    ) -> Task<Message>
+    where
+        F: FnOnce(Repository) -> Fut,
+        Fut: Future<Output = gf_core::Result<Integration>> + Send + 'static,
+    {
+        let label = label.into();
         let pending = if undoable { None } else { tab.pending.clone() };
         let repo = tab.repo.clone();
         let id = repo.id();
@@ -566,6 +579,7 @@ impl App {
             return Task::none();
         };
         let repo = tab.repo.clone();
+        let id = repo.id();
         Task::perform(
             {
                 let base = base.clone();
@@ -575,16 +589,20 @@ impl App {
                         .map_err(|e| e.to_string())
                 }
             },
-            move |plan| Message::RebasePlanLoaded(base.clone(), plan, squash.clone()),
+            move |plan| Message::RebasePlanLoaded(id, base.clone(), plan, squash.clone()),
         )
     }
 
     pub(super) fn on_rebase_plan(
         &mut self,
+        id: RepoId,
         base: Oid,
         plan: Result<Vec<gf_git::TodoItem>, String>,
         squash: Option<Vec<Oid>>,
     ) -> Task<Message> {
+        let Some(tab) = self.tab_mut(id) else {
+            return Task::none();
+        };
         match plan {
             Ok(items) if items.is_empty() => {
                 self.flash(
@@ -596,9 +614,9 @@ impl App {
             Ok(items) => {
                 let editor = crate::features::rebase_editor::State::new(base, items);
                 match squash {
-                    None => self.rebase_editor = Some(editor),
+                    None => tab.rebase_editor = Some(editor),
                     Some(ids) => match editor.squash(&ids) {
-                        Ok(e) => self.rebase_editor = Some(e),
+                        Ok(e) => tab.rebase_editor = Some(e),
                         Err(e) => self.flash(NoteKind::Error, e),
                     },
                 }
@@ -617,16 +635,20 @@ impl App {
         m: crate::features::rebase_editor::Message,
     ) -> Task<Message> {
         use crate::features::rebase_editor::Output;
-        let Some(editor) = self.rebase_editor.as_mut() else {
+        let Some(tab) = self.active_tab_mut() else {
+            return Task::none();
+        };
+        let repo = tab.repo.id();
+        let Some(editor) = tab.rebase_editor.as_mut() else {
             return Task::none();
         };
         match editor.update(m) {
             Some(Output::Cancel) => {
-                self.rebase_editor = None;
+                tab.rebase_editor = None;
                 Task::none()
             }
             Some(Output::Start { base, items }) => {
-                self.rebase_editor = None;
+                tab.rebase_editor = None;
                 let n = items.len();
                 let mut body = vec![
                     format!("Rewrite {n} commit(s) after {} as planned?", base.short()),
@@ -641,7 +663,7 @@ impl App {
                     "Rewrite history",
                     body,
                     "Rewrite",
-                    Purpose::RebaseInteractive { base, items },
+                    Purpose::RebaseInteractive { repo, base, items },
                 ))
             }
             None => Task::none(),
@@ -650,10 +672,15 @@ impl App {
 
     pub(super) fn run_rebase_interactive(
         &mut self,
+        repo: RepoId,
         base: Oid,
         items: Vec<gf_git::TodoItem>,
     ) -> Task<Message> {
-        self.integrate_op(
+        let Some(tab) = self.tab_mut(repo) else {
+            return Task::none();
+        };
+        Self::integrate_in(
+            tab,
             format!("interactive rebase onto {}", base.short()),
             true,
             move |r| async move { r.rebase_interactive(Some(&base), &items).await },
@@ -702,12 +729,14 @@ impl App {
             return Task::none();
         };
         let repo = tab.repo.clone();
+        let id = repo.id();
         Task::perform(
             {
                 let ids = ids.clone();
                 async move { repo.squash_preview(&ids).await.map_err(|e| e.to_string()) }
             },
             move |result| Message::SquashPreviewed {
+                repo: id,
                 ids: ids.clone(),
                 selected,
                 result,
@@ -717,10 +746,14 @@ impl App {
 
     pub(super) fn on_squash_preview(
         &mut self,
+        repo: RepoId,
         ids: Vec<Oid>,
         selected: usize,
         result: Result<gf_git::SquashPreview, String>,
     ) -> Task<Message> {
+        if self.active_tab().map(|t| t.repo.id()) != Some(repo) {
+            return Task::none();
+        }
         let preview = match result {
             Ok(p) => p,
             Err(e) => {
@@ -738,20 +771,34 @@ impl App {
                     .any(|e| !matches!(e, gf_core::model::StatusEntry::Untracked { .. }))
             });
         let (summary, details) = squash_message(&preview.commits);
-        let dialog = squash_dialog(&preview, selected, dirty, &summary, &details, ids);
+        let dialog = squash_dialog(
+            &preview,
+            selected,
+            dirty,
+            &summary,
+            &details,
+            Purpose::Squash { repo, ids },
+        );
         self.open_dialog(dialog)
     }
 
     pub(super) fn run_squash(
         &mut self,
+        repo: RepoId,
         ids: Vec<Oid>,
         message: String,
         autostash: bool,
     ) -> Task<Message> {
         let n = ids.len();
-        self.integrate_op(format!("squash {n} commits"), true, move |r| async move {
-            r.squash(&ids, &message, autostash).await
-        })
+        let Some(tab) = self.tab_mut(repo) else {
+            return Task::none();
+        };
+        Self::integrate_in(
+            tab,
+            format!("squash {n} commits"),
+            true,
+            move |r| async move { r.squash(&ids, &message, autostash).await },
+        )
     }
 
     // ------------------------------------------------------------ conflicts
@@ -1008,7 +1055,7 @@ fn squash_dialog(
     dirty: bool,
     summary: &str,
     details: &str,
-    ids: Vec<Oid>,
+    purpose: Purpose,
 ) -> crate::features::dialog::Dialog<Purpose> {
     use crate::features::dialog::{Dialog, Severity};
     let n = preview.commits.len();
@@ -1039,19 +1086,14 @@ fn squash_dialog(
         ));
     }
     body.push("The oldest commit's author and date are kept; undo restores the commits.".into());
-    let mut dialog = Dialog::confirm(
-        format!("Squash {n} commits"),
-        body,
-        "Squash",
-        Purpose::Squash { ids },
-    )
-    .severity(Severity::Change)
-    .field(
-        "summary",
-        summary,
-        "one line: what the combined commit does",
-    )
-    .area("details", details, "details (optional)");
+    let mut dialog = Dialog::confirm(format!("Squash {n} commits"), body, "Squash", purpose)
+        .severity(Severity::Change)
+        .field(
+            "summary",
+            summary,
+            "one line: what the combined commit does",
+        )
+        .area("details", details, "details (optional)");
     if dirty {
         dialog = dialog.check(
             "stash my uncommitted changes and restore them afterwards",
@@ -1126,7 +1168,17 @@ mod tests {
             pushed: 1,
         };
         let ids = preview.commits.iter().map(|c| c.id.clone()).collect();
-        let d = squash_dialog(&preview, 1, true, "a", "- b", ids);
+        let d = squash_dialog(
+            &preview,
+            1,
+            true,
+            "a",
+            "- b",
+            Purpose::Squash {
+                repo: RepoId::new(),
+                ids,
+            },
+        );
         let body = d.body.join("\n");
         assert!(body.contains("Includes 1 commit(s) between"));
         assert!(body.contains("first commit of the repository"));
@@ -1134,7 +1186,17 @@ mod tests {
         assert_eq!(d.fields[0].value, "a");
         assert_eq!(d.checks.len(), 1, "stash offered for a dirty tree");
 
-        let d = squash_dialog(&preview, 2, false, "a", "", Vec::new());
+        let d = squash_dialog(
+            &preview,
+            2,
+            false,
+            "a",
+            "",
+            Purpose::Squash {
+                repo: RepoId::new(),
+                ids: Vec::new(),
+            },
+        );
         assert!(d.checks.is_empty());
         assert!(!d.body.join("\n").contains("between"));
     }

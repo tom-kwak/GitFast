@@ -12,7 +12,7 @@ impl App {
         if self.dialog.is_some()
             || self.picker.is_some()
             || self.switcher.is_some()
-            || self.rebase_editor.is_some()
+            || self.rebase_editor().is_some()
             || self.menu.is_some()
         {
             return Task::none();

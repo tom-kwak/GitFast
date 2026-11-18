@@ -157,7 +157,7 @@ impl App {
                 };
             }
         }
-        if self.dialog.is_some() || self.rebase_editor.is_some() {
+        if self.dialog.is_some() || self.rebase_editor().is_some() {
             // ⌘C / ⌘A belong to the dialog's text, not the diff behind it.
             return run(self, k.shortcut.filter(|s| !text_edit(*s)));
         }

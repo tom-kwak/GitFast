@@ -31,8 +31,7 @@ impl App {
         if tab.diff(role).is_current(&source) {
             return Task::none();
         }
-        tab.diff_mut(role).show(source);
-        load_diff(tab, role)
+        load_diff(tab, source)
     }
 
     pub(super) fn on_changes(&mut self, out: changes::Output) -> Task<Message> {
@@ -257,17 +256,14 @@ impl App {
                     self.apply_patches(patches, action, description)
                 }
             }
-            diff_view::Output::Highlight(file, diff) => {
+            diff_view::Output::Highlight(file) => {
                 let Some(tab) = self.active_tab() else {
                     return Task::none();
                 };
-                let Some(source) = tab.diff(role).source().cloned() else {
-                    return Task::none();
-                };
                 let id = tab.repo.id();
-                Task::perform(diff_view::highlight(*diff), move |spans| {
-                    Message::DiffHighlighted(id, source.clone(), file, spans)
-                })
+                tab.diff(role)
+                    .highlight_file(file)
+                    .map(move |done| Message::DiffFinished(id, role, done))
             }
             diff_view::Output::Copy { text, what } => self.copy_text(text, &what),
             diff_view::Output::Menu(menu) => self.open_menu(menu.map(|m| match role {
@@ -279,10 +275,15 @@ impl App {
             }
             diff_view::Output::Blame { path, rev } => self.open_blame(path, rev),
             diff_view::Output::FileHistory(path) => self.open_file_history(path),
-            diff_view::Output::Reload => match self.active_tab() {
-                Some(tab) => load_diff(tab, role),
-                None => Task::none(),
-            },
+            diff_view::Output::Reload => {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                match tab.diff(role).source().cloned() {
+                    Some(source) => load_diff(tab, source),
+                    None => Task::none(),
+                }
+            }
         }
     }
 

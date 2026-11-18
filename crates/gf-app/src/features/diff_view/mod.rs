@@ -11,7 +11,9 @@
 //! diffs stay responsive. Syntax highlighting runs off the UI thread: the
 //! first file when the diff loads, others when they are first selected.
 
+mod loading;
 mod select;
+pub use loading::Completion;
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -19,7 +21,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gf_core::model::{DiffLine, FileChange, FileDiff, LineKind, Oid};
-use gf_git::{DiffOptions, DiffTarget, Repository, patch};
+use gf_git::{DiffTarget, patch};
 use iced::advanced::mouse::{Button, Click, click};
 use iced::widget::text::Wrapping;
 use iced::widget::{column, container, row};
@@ -294,31 +296,6 @@ impl LoadedDiff {
     }
 }
 
-/// Loads the diff for `source` and highlights its first file off the UI thread.
-pub async fn load(
-    repo: Repository,
-    source: DiffSource,
-    ignore_whitespace: bool,
-) -> Result<Arc<LoadedDiff>, String> {
-    let (target, paths) = source.target();
-    let opts = DiffOptions {
-        ignore_whitespace,
-        paths,
-        ..DiffOptions::default()
-    };
-    let files = repo.diff(&target, &opts).await.map_err(|e| e.to_string())?;
-    tokio::task::spawn_blocking(move || Arc::new(LoadedDiff::new(files, true)))
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// Highlights one file in the background.
-pub async fn highlight(file: FileDiff) -> Arc<FileSpans> {
-    tokio::task::spawn_blocking(move || Arc::new(highlight_file(&file)))
-        .await
-        .unwrap_or_default()
-}
-
 /// Highlights each hunk twice — the old side (context + removed lines) and
 /// the new side (context + added lines) — so each side is parsed as the
 /// real file content, then picks the right result per line.
@@ -371,6 +348,7 @@ enum DiffRow {
 #[derive(Debug)]
 pub struct State {
     role: Role,
+    generation: u64,
     source: Option<DiffSource>,
     diff: Arc<LoadedDiff>,
     /// Highlighting of files other than the first, loaded on selection.
@@ -452,9 +430,8 @@ pub enum Output {
     DiscardSubmodule(PathBuf),
     /// Reload the current source (options changed).
     Reload,
-    /// File `n` needs highlighting; the app calls [`highlight`] and
-    /// [`State::highlighted`].
-    Highlight(usize, Box<FileDiff>),
+    /// Highlight file n of the currently displayed diff.
+    Highlight(usize),
     /// Put `text` on the clipboard; `what` says what it is (`3 lines`).
     Copy {
         text: String,
@@ -466,6 +443,7 @@ impl State {
     pub fn new(role: Role) -> Self {
         Self {
             role,
+            generation: 0,
             source: None,
             diff: Arc::default(),
             spans: HashMap::new(),
@@ -511,72 +489,6 @@ impl State {
                 .files
                 .get(self.file)
                 .and_then(|f| f.display_path().cloned()),
-        }
-    }
-
-    pub fn ignore_whitespace(&self) -> bool {
-        self.ignore_whitespace
-    }
-
-    /// Starts showing `source`; the app loads it and calls [`Self::loaded`].
-    pub fn show(&mut self, source: DiffSource) {
-        if self.source.as_ref() != Some(&source) {
-            self.clear_selection();
-            self.diff = Arc::default();
-            self.spans.clear();
-            self.file = 0;
-            self.scroll = ScrollPos::default();
-            self.files_scroll = ScrollPos::default();
-        }
-        self.source = Some(source);
-        self.loading = true;
-        self.error = None;
-    }
-
-    pub fn close(&mut self) {
-        *self = Self {
-            ignore_whitespace: self.ignore_whitespace,
-            ..Self::new(self.role)
-        };
-    }
-
-    pub fn loaded(&mut self, source: &DiffSource, result: Result<Arc<LoadedDiff>, String>) {
-        if self.source.as_ref() != Some(source) {
-            return; // the user moved on
-        }
-        self.loading = false;
-        match result {
-            Ok(diff) => {
-                // Keep the selection while its lines are still there (the
-                // file was saved again, say).
-                let exists = |((f, h, l), _): Pos| {
-                    diff.files
-                        .get(f)
-                        .and_then(|f| f.hunks.get(h))
-                        .is_some_and(|h| l < h.lines.len())
-                };
-                self.ranges.retain(|r| exists(r.anchor) && exists(r.head));
-                self.caret = self.caret.filter(|p| exists(*p));
-                self.dragging = false;
-                self.drag_unit = None;
-                self.last_click = None;
-                if self.file >= diff.files.len() {
-                    self.file = 0;
-                }
-                self.spans.clear();
-                if let Some(s) = &diff.first_spans {
-                    self.spans.insert(0, s.clone());
-                }
-                self.diff = diff;
-                self.error = None;
-            }
-            Err(e) => self.error = Some(e),
-        }
-    }
-
-    pub fn highlighted(&mut self, source: &DiffSource, file: usize, spans: Arc<FileSpans>) {
-        if self.source.as_ref() == Some(source) {
-            self.spans.insert(file, spans);
         }
     }
 
@@ -1129,7 +1041,7 @@ impl State {
                 if self.spans.contains_key(&i) {
                     Update::none()
                 } else {
-                    Update::output(Output::Highlight(i, Box::new(self.diff.files[i].clone())))
+                    Update::output(Output::Highlight(i))
                 }
             }
             Message::Scrolled(pos) => {
@@ -1454,9 +1366,9 @@ index 1111111..2222222 100644
 
     fn state(source: DiffSource) -> State {
         let mut s = State::new(source.role());
-        s.show(source.clone());
+        s.show(source);
         let files = parse_diff(DIFF.as_bytes()).expect("parse");
-        s.loaded(&source, Ok(Arc::new(LoadedDiff::new(files, false))));
+        let _ = s.loaded(s.generation, Ok(Arc::new(LoadedDiff::new(files, false))));
         s
     }
 
@@ -1653,9 +1565,9 @@ index 1111111..2222222 100644
         assert_eq!(s.role, Role::Commit);
         assert!(matches!(
             s.update(Message::SelectFile(1)).output,
-            Some(Output::Highlight(1, _))
+            Some(Output::Highlight(1))
         ));
-        s.highlighted(&s.source.clone().expect("source"), 1, Arc::default());
+        let _ = s.finish(Completion::Highlighted(s.diff.clone(), 1, Arc::default()));
         let _ = s.update(Message::SelectFile(0));
         assert!(
             s.update(Message::SelectFile(1)).output.is_none(),
@@ -1665,6 +1577,29 @@ index 1111111..2222222 100644
             s.update(Message::SelectFile(9)).output.is_none(),
             "out of range"
         );
+    }
+
+    #[tokio::test]
+    async fn a_reload_highlights_the_file_that_remained_selected() {
+        use iced::futures::StreamExt;
+        let source = DiffSource::WorkTree("a".into());
+        let mut s = state(source.clone());
+        let _ = s.update(Message::SelectFile(1));
+        let old = s.diff.clone();
+        let generation = s.show(source);
+        let replacement = Arc::new(LoadedDiff::new(
+            parse_diff(DIFF.as_bytes()).expect("diff"),
+            false,
+        ));
+        let task = s.finish(Completion::Loaded(generation, Ok(replacement)));
+        let _ = s.finish(Completion::Highlighted(old, 1, Arc::default()));
+        assert!(!s.spans.contains_key(&1));
+        let mut stream = iced_test::runtime::task::into_stream(task).expect("highlight");
+        let Some(iced_test::runtime::Action::Output(done)) = stream.next().await else {
+            panic!("highlight completion")
+        };
+        let _ = s.finish(done);
+        assert!(s.spans.contains_key(&1));
     }
 
     #[test]
@@ -1689,11 +1624,38 @@ index 1111111..2222222 100644
     }
 
     #[test]
+    fn latest_diff_survives_an_older_failure() {
+        let source = DiffSource::WorkTree("a".into());
+        let mut s = State::new(Role::Local);
+        let old = s.show(source.clone());
+        s.show(source.clone());
+        let _ = s.loaded(s.generation, Ok(Arc::default()));
+        let _ = s.loaded(old, Err("older".into()));
+        assert!(s.error.is_none());
+    }
+
+    #[test]
+    fn closing_and_reopening_rejects_old_content_and_highlights() {
+        let source = DiffSource::WorkTree("a".into());
+        let mut s = state(source.clone());
+        let old = s.generation;
+        let old_diff = s.diff.clone();
+        s.close();
+        let latest = s.show(source);
+        let _ = s.finish(Completion::Loaded(old, Ok(old_diff.clone())));
+        assert!(s.loading);
+        let _ = s.finish(Completion::Loaded(latest, Ok(Arc::default())));
+        let _ = s.finish(Completion::Highlighted(old_diff, 1, Arc::default()));
+        assert!(!s.spans.contains_key(&1));
+        assert!(!s.loading);
+    }
+
+    #[test]
     fn stale_results_are_ignored() {
         let mut s = State::new(Role::Local);
-        s.show(DiffSource::WorkTree("a".into()));
+        let old = s.show(DiffSource::WorkTree("a".into()));
         s.show(DiffSource::WorkTree("b".into()));
-        s.loaded(&DiffSource::WorkTree("a".into()), Ok(Arc::default()));
+        let _ = s.loaded(old, Ok(Arc::default()));
         assert!(s.loading);
     }
 

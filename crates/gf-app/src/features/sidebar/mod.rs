@@ -1313,7 +1313,7 @@ mod tests {
 
     fn snap() -> Snapshot {
         Snapshot {
-            branches: vec![branch("main", true), branch("dev", false)],
+            branches: [branch("main", true), branch("dev", false)].into(),
             ..Snapshot::default()
         }
     }
@@ -1576,11 +1576,12 @@ mod tests {
     fn keys_walk_and_fold_branch_folders() {
         let t = crate::theme::preset("gf-dark");
         let snap = Snapshot {
-            branches: vec![
+            branches: [
                 branch("main", true),
                 branch("feature/abc", false),
                 branch("feature/dasf", false),
-            ],
+            ]
+            .into(),
             ..Snapshot::default()
         };
         let mut s = State::default();

@@ -116,6 +116,7 @@ pub enum Purpose {
     /// Newest first.
     Revert(Vec<gf_core::model::Oid>),
     RebaseInteractive {
+        repo: gf_core::model::RepoId,
         base: gf_core::model::Oid,
         items: Vec<gf_git::TodoItem>,
     },
@@ -132,6 +133,7 @@ pub enum Purpose {
     /// Meld `ids` (newest first) into one commit. Values: summary, details;
     /// check 0 (when offered): stash uncommitted changes around it.
     Squash {
+        repo: gf_core::model::RepoId,
         ids: Vec<gf_core::model::Oid>,
     },
     /// A failure report was dismissed; nothing to run.
@@ -786,13 +788,15 @@ impl App {
             Purpose::RebaseOnto { onto } => self.run_rebase_onto(onto),
             Purpose::CherryPick(oids) => self.run_cherry_pick(oids),
             Purpose::Revert(oids) => self.run_revert(oids),
-            Purpose::RebaseInteractive { base, items } => self.run_rebase_interactive(base, items),
+            Purpose::RebaseInteractive { repo, base, items } => {
+                self.run_rebase_interactive(repo, base, items)
+            }
             Purpose::BisectStart { good } => self
                 .bisect_step(move |r| async move { r.bisect_start("HEAD", good.as_str()).await }),
             Purpose::Failure => self.restore_focus(),
-            Purpose::Squash { ids } => {
+            Purpose::Squash { repo, ids } => {
                 let message = super::advanced::commit_message(&value(0), &value(1));
-                self.run_squash(ids, message, check(0))
+                self.run_squash(repo, ids, message, check(0))
             }
             Purpose::BisectReset => {
                 if let Some(tab) = self.active_tab_mut() {
