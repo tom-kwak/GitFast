@@ -1133,3 +1133,22 @@ async fn rebase_rows_cannot_move_past_the_ends() {
     assert_eq!(press(ups[1]), 1);
     assert_eq!(press(downs[0]), 1);
 }
+
+#[tokio::test]
+async fn a_flash_does_not_move_the_window_contents() {
+    let mut ui = working_tree(Ui::open().await).await;
+    let commit = |ui: &Ui| {
+        ui.targets()
+            .into_iter()
+            .find(|t| t.label == "[ Commit ]")
+            .expect("commit button")
+            .at
+    };
+    ui.settle();
+    let without = commit(&ui);
+    ui.app.flash(
+        NoteKind::Error,
+        "✗ a long message about what went wrong, long enough to need room in the status line",
+    );
+    assert_eq!(commit(&ui), without, "buttons stay where they were");
+}
