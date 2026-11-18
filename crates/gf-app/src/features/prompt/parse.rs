@@ -62,7 +62,10 @@ pub const BUILTINS: &[(&str, &str)] = &[
         ":settings",
         "open app settings                           ⌘,",
     ),
-    (":theme", ":theme [gf-dark|gf-light|dracula]"),
+    (
+        ":theme",
+        ":theme [gf-dark|gf-light|dracula|cd-dark|cd-light]",
+    ),
     (":log", "show/hide the command log                    ⌘J"),
     (":refs", "show/hide the refs sidebar                   ⌘B"),
     (
