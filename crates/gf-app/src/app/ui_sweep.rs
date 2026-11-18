@@ -1236,20 +1236,22 @@ async fn settings_from_the_welcome_screen_apply_and_remember_the_theme() {
     let mut ui = Ui::welcome().await;
     let _ = ui.click("[ Settings ⌘, ]").await;
     assert!(ui.app.settings_open);
-    let _ = ui.click("gf-light").await;
-    assert_eq!(ui.app.tokens.name, "gf-light");
+    for name in ["gf-light", "cd-dark", "cd-light"] {
+        let _ = ui.click(name).await;
+        assert_eq!(ui.app.tokens.name, name);
+    }
     assert!(ui.app.settings_open);
 
     let selected = ui
         .targets()
         .into_iter()
-        .find(|target| target.label == "gf-light")
+        .find(|target| target.label == "cd-light")
         .expect("selected theme");
     assert!(ui.press(selected.at, mouse::Button::Left).is_empty());
 
     let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
     let (reopened, _) = App::boot(ui.app.paths.clone(), saved);
-    assert_eq!(reopened.tokens.name, "gf-light");
+    assert_eq!(reopened.tokens.name, "cd-light");
 
     let _ = ui.click("[ Done Esc ]").await;
     assert!(!ui.app.settings_open);
@@ -1268,12 +1270,12 @@ async fn settings_keys_change_the_theme_without_navigating_the_repository() {
             nav: Some(Nav::plain(Key::Up)),
         }))
         .await;
-    assert_eq!(ui.app.tokens.name, "dracula");
+    assert_eq!(ui.app.tokens.name, "cd-light");
     assert_eq!(ui.app.pane(), active);
 
     let _ = ui.send(Message::Key(Shortcut::Escape)).await;
     assert!(!ui.app.settings_open);
-    assert_eq!(ui.app.tokens.name, "dracula");
+    assert_eq!(ui.app.tokens.name, "cd-light");
 }
 
 #[tokio::test]

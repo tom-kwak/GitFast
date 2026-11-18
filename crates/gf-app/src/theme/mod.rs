@@ -34,6 +34,8 @@ pub struct Tokens {
     /// Bars (tab bar, status line) — slightly offset from `bg`.
     pub surface: Color,
     pub fg: Color,
+    /// Primary controls, focus rings, and the active tab.
+    accent: Color,
     /// Secondary text: hints, dates, separators.
     pub dim: Color,
     /// 1px panel separators.
@@ -82,7 +84,7 @@ impl Tokens {
         self.ansi.green
     }
     pub fn accent(&self) -> Color {
-        self.ansi.cyan
+        self.accent
     }
 
     /// Color for a syntax highlighting tone.
