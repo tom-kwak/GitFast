@@ -267,13 +267,14 @@ pub fn collapsed_strip<'a, M: Clone + 'a>(
 /// Full-width button standing in for a closed panel above or below the content.
 pub fn collapsed_bar<'a, M: Clone + 'a>(
     t: &'a Tokens,
-    label: &'a str,
+    content: impl Into<Element<'a, M>>,
     hint: &str,
     on_press: M,
 ) -> Element<'a, M> {
     tip(
         t,
-        button(colored(t, label, t.accent()))
+        button(content)
+            .clip(true)
             .width(Length::Fill)
             .padding(Padding::from([2, 6]))
             .style(style::row_button(t, false))

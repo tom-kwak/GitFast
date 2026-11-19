@@ -67,6 +67,7 @@ impl Entry {
 #[derive(Debug, Default)]
 pub struct State {
     entries: VecDeque<Entry>,
+    last_command: Option<String>,
     show_background: bool,
     /// Spinner frame for running commands, advanced by the app's tick.
     tick: usize,
@@ -89,6 +90,10 @@ pub enum Message {
 #[derive(Debug, Clone, Copy)]
 pub enum Output {
     Collapse,
+}
+
+fn single_line(title: &str) -> String {
+    title.replace(['\r', '\n'], " ")
 }
 
 /// Whether `v` shows the end of the list.
@@ -161,6 +166,12 @@ impl State {
     pub fn clear(&mut self) {
         self.entries
             .retain(|e| matches!(e.status, EntryStatus::Running { .. }));
+        self.last_command = self
+            .entries
+            .iter()
+            .rev()
+            .find(|e| !e.background)
+            .map(|e| single_line(&e.title));
         self.held_offset = None;
     }
 
@@ -186,7 +197,29 @@ impl State {
         }
     }
 
+    /// Show the most recent user command on the collapsed header.
+    pub fn collapsed_view<'a, M: Clone + 'a>(
+        &'a self,
+        t: &'a Tokens,
+        on_press: M,
+    ) -> Element<'a, M> {
+        let mut content = row![colored(t, "▴ COMMAND LOG", t.accent())]
+            .spacing(12)
+            .align_y(iced::Alignment::Center);
+        if let Some(command) = &self.last_command {
+            content = content.push(
+                dim(t, command)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fill),
+            );
+        }
+        widgets::collapsed_bar(t, content, "show command log ⌘J", on_press)
+    }
+
     fn push(&mut self, entry: Entry) {
+        if entry.command.is_some() && !entry.background {
+            self.last_command = Some(single_line(&entry.title));
+        }
         if self.entries.len() >= MAX_ENTRIES {
             self.entries.pop_front();
         }
@@ -428,6 +461,36 @@ mod tests {
         let e = &s.entries[0];
         assert_eq!(e.title, "git push");
         assert_eq!(e.lines, vec![("done".to_owned(), true)]);
+    }
+
+    #[test]
+    fn collapsed_summary_keeps_the_latest_user_command_on_one_line() {
+        let mut s = State::default();
+        for (id, arg, read_only) in [
+            (1, "status", false),
+            (2, "log\n-1", false),
+            (3, "diff", true),
+        ] {
+            s.on_command_event(&ev(
+                id,
+                CommandPhase::Started {
+                    argv: vec!["git".into(), arg.into()],
+                    read_only,
+                },
+            ));
+        }
+        s.note(NoteKind::Info, "a notice", Vec::new());
+        assert_eq!(s.last_command.as_deref(), Some("git log -1"));
+        s.on_command_event(&ev(
+            2,
+            CommandPhase::Finished {
+                exit_code: Some(0),
+                duration: Duration::ZERO,
+            },
+        ));
+        assert_eq!(s.last_command.as_deref(), Some("git log -1"));
+        s.clear();
+        assert_eq!(s.last_command.as_deref(), Some("git status"));
     }
 
     #[test]

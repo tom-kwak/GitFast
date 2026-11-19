@@ -46,7 +46,7 @@ impl Default for AppearanceSettings {
         Self {
             theme: "gf-dark".into(),
             font_size: 13,
-            show_command_log: true,
+            show_command_log: false,
             show_refs: true,
             show_history: true,
             list_cols: DEFAULT_LIST_COLS,
@@ -147,6 +147,7 @@ mod tests {
         let path = dir.path().join("cfg/settings.toml");
         let mut s = Settings::default();
         s.appearance.font_size = 15;
+        s.appearance.show_command_log = true;
         s.appearance.show_history = false;
         s.git.executable = Some("/opt/git/bin/git".into());
         s.repos.open = vec!["/a".into(), "/b".into()];
@@ -167,6 +168,7 @@ mod tests {
         let s = Settings::load(&path).expect("load");
         assert_eq!(s.appearance.font_size, 16);
         assert!(s.appearance.show_history);
+        assert!(!s.appearance.show_command_log);
         assert_eq!(s.appearance.theme, "gf-dark");
     }
 

@@ -1282,9 +1282,31 @@ async fn settings_keys_change_the_theme_without_navigating_the_repository() {
 async fn history_and_command_log_can_be_collapsed_and_reopened_by_clicking() {
     let mut ui = Ui::open().await;
     ui.app.focus_pane(Pane::History);
+    assert!(!ui.app.settings.appearance.show_command_log);
+    for (id, arg, read_only) in [(1, "status", false), (2, "rev-parse", true)] {
+        let _ = ui
+            .send(Message::Core(CoreEvent::Command(gf_core::CommandEvent {
+                id,
+                repo: None,
+                phase: gf_core::CommandPhase::Started {
+                    argv: vec!["git".into(), arg.into()],
+                    read_only,
+                },
+            })))
+            .await;
+    }
     ui.app
         .log
         .note(NoteKind::Info, "keep this log entry", Vec::new());
+    assert!(ui.targets().iter().any(|t| t.label == "git status"));
+    assert!(!ui.targets().iter().any(|t| t.label.contains("rev-parse")));
+    assert!(
+        !ui.targets()
+            .iter()
+            .any(|t| t.label.contains("keep this log entry"))
+    );
+    let _ = ui.click("git status").await;
+    assert!(ui.app.settings.appearance.show_command_log);
     let _ = ui.click("▴").await;
     assert!(!ui.app.panes().contains(&Pane::History));
     assert_eq!(ui.app.pane(), Pane::Files);
@@ -1316,6 +1338,7 @@ async fn history_and_command_log_can_be_collapsed_and_reopened_by_clicking() {
 #[tokio::test]
 async fn clear_is_disabled_while_the_log_has_nothing_to_clear() {
     let mut ui = Ui::welcome().await;
+    let _ = ui.click("▴ COMMAND LOG").await;
     ui.settle();
     let clear = ui
         .targets()

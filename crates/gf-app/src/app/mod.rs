@@ -1461,12 +1461,10 @@ impl App {
             );
         } else {
             layout = layout.push(
-                container(widgets::collapsed_bar(
-                    t,
-                    "▴ COMMAND LOG",
-                    "show command log ⌘J",
-                    Message::Key(Shortcut::ToggleLog),
-                ))
+                container(
+                    self.log
+                        .collapsed_view(t, Message::Key(Shortcut::ToggleLog)),
+                )
                 .padding(Padding::from([0, 4])),
             );
         }
@@ -1704,7 +1702,7 @@ fn main_area<'a>(
             } else {
                 container(widgets::collapsed_bar(
                     t,
-                    "▾ HISTORY",
+                    widgets::colored(t, "▾ HISTORY", t.accent()),
                     "show history ⌘⇧H",
                     Message::Key(Shortcut::ToggleHistory),
                 ))
