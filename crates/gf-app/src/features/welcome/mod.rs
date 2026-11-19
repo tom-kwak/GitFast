@@ -1,6 +1,8 @@
 //! Empty state shown when no repository is open: how to open one, recent
 //! repositories, and the most useful shortcuts (PLAN.md §4-2).
 
+mod logo;
+
 use std::path::PathBuf;
 
 use iced::widget::{Column, column, container, row};
@@ -15,11 +17,6 @@ pub enum Message {
     /// The open-repository window.
     Open,
 }
-
-const BANNER: &str = r"
-   ┌─┐┌─┐
-   │ ┬├┤    git, shaped like a terminal
-   └─┘└    ";
 
 pub fn view<'a>(t: &'a Tokens, recent: &'a [PathBuf], drop_hover: bool) -> Element<'a, Message> {
     let mut recent_list = Column::new().spacing(1);
@@ -60,7 +57,9 @@ pub fn view<'a>(t: &'a Tokens, recent: &'a [PathBuf], drop_hover: bool) -> Eleme
     };
 
     let content = column![
-        colored(t, BANNER, t.accent()),
+        row![logo::view(t), dim(t, "Git Fast · Built with Rust")]
+            .spacing(16)
+            .align_y(iced::Alignment::Center),
         row![
             widgets::text_button(t, "Open repository…", Some("⌘O"), Some(Message::Open)),
             drop_line,
@@ -84,9 +83,9 @@ pub fn view<'a>(t: &'a Tokens, recent: &'a [PathBuf], drop_hover: bool) -> Eleme
     .spacing(6)
     .max_width(900);
 
-    container(content)
-        .padding(Padding::from([24, 32]))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    widgets::scroll(
+        container(content)
+            .padding(Padding::from([24, 32]))
+            .width(Length::Fill),
+    )
 }
