@@ -547,6 +547,7 @@ impl App {
                 .field("name", name, "new-name"),
             ),
             sidebar::Output::DeleteBranch(b) => self.delete_branch_dialog(&b),
+            sidebar::Output::DeleteBranches(branches) => self.delete_branches_dialog(&branches),
             sidebar::Output::PushBranch(b) => self.push_branch(&b),
             sidebar::Output::DeleteTag(name) => self.confirm(
                 Confirm::delete(
@@ -1256,6 +1257,7 @@ impl App {
                     "  history ⇧↑/↓ range · . actions · working tree Space stage · d discard · diff n/p hunk"
                         .into(),
                 );
+                lines.push("refs: ⌘-click marks branches · ⇧-click or ⇧↑/↓ selects a range · . then d reviews deletion".into());
                 lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());
                 lines.push(
                     "click a ref for its history · click diff lines to stage just those".into(),

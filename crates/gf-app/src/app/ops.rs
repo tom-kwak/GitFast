@@ -630,10 +630,12 @@ impl App {
                 }
                 self.log
                     .note(NoteKind::Error, format!("{label} failed"), lines);
-                self.flash(
-                    NoteKind::Error,
-                    format!("✗ {} — see log", truncate(&label, 40)),
-                );
+                let hint = if recorded {
+                    " · ⌘Z undo"
+                } else {
+                    " — see log"
+                };
+                self.flash(NoteKind::Error, format!("✗ {}{hint}", truncate(&label, 40)));
                 if !asked {
                     tasks.push(self.show_failure(&label, &e));
                 }

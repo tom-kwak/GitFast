@@ -55,6 +55,7 @@ pub enum Purpose {
     RenameBranch {
         old: String,
     },
+    DeleteBranches(super::branch_delete::BranchDeletion),
     DeleteBranch {
         name: String,
     },
@@ -179,6 +180,7 @@ pub struct Confirm {
     title: String,
     body: Vec<String>,
     label: String,
+    review: Vec<String>,
     checks: Vec<(String, bool)>,
     then: Purpose,
     /// ⌘Z can undo it.
@@ -201,6 +203,7 @@ impl Confirm {
             title: title.into(),
             body,
             label: label.into(),
+            review: Vec::new(),
             checks: Vec::new(),
             then,
             undoable: false,
@@ -223,6 +226,7 @@ impl Confirm {
             title: title.into(),
             body,
             label: label.into(),
+            review: Vec::new(),
             checks: Vec::new(),
             then,
             undoable: false,
@@ -250,6 +254,11 @@ impl Confirm {
         self
     }
 
+    pub fn review(mut self, entries: Vec<String>) -> Self {
+        self.review = entries;
+        self
+    }
+
     pub fn check(mut self, label: impl Into<String>, value: bool) -> Self {
         self.checks.push((label.into(), value));
         self
@@ -269,7 +278,9 @@ impl App {
             let checks = c.checks.iter().map(|(_, v)| *v).collect();
             return self.run_purpose(c.then, Vec::new(), checks);
         }
-        let mut dialog = Dialog::confirm(c.title, c.body, c.label, c.then).severity(c.severity);
+        let mut dialog = Dialog::confirm(c.title, c.body, c.label, c.then)
+            .severity(c.severity)
+            .review(c.review);
         for (label, value) in c.checks {
             dialog = dialog.check(label, value);
         }
@@ -605,6 +616,7 @@ impl App {
                     move |r| async move { r.rename_branch(&old, &new).await },
                 )
             }
+            Purpose::DeleteBranches(selection) => self.run_delete_branches(selection, check(0)),
             Purpose::DeleteBranch { name } => {
                 let force = check(0);
                 self.op_recorded(

@@ -18,9 +18,11 @@
 //! shared `confirm` helper so every delete/change asks the same way.
 
 use iced::widget::{Column, column, container, row, space, text_editor, text_input};
-use iced::{Background, Border, Color, Element, Length, Padding};
+use iced::{Background, Border, Color, Element, Length, Padding, Task};
 
+use crate::nav::{self, Key};
 use crate::theme::{Tokens, style};
+use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
 use crate::widgets::{self, colored, dim, mono};
 
 /// Id of the multi-line text area.
@@ -28,6 +30,13 @@ pub const AREA_ID: &str = "gf-dialog-area";
 
 /// Id of the first text field, focused when the dialog opens.
 pub const FIRST_FIELD_ID: &str = "gf-dialog-field-0";
+
+const REVIEW_ID: &str = "gf-dialog-review";
+const MAX_REVIEW_ROWS: usize = 10;
+
+fn review_row_height(t: &Tokens) -> f32 {
+    (t.font_size * 1.5).round()
+}
 
 const FIELD_IDS: [&str; 4] = [
     FIRST_FIELD_ID,
@@ -169,9 +178,17 @@ impl Opt {
 }
 
 #[derive(Debug, Clone)]
+struct Review {
+    entries: Vec<String>,
+    widest: usize,
+    scroll: ScrollPos,
+}
+
+#[derive(Debug, Clone)]
 pub struct Dialog<P> {
     pub title: String,
     pub body: Vec<String>,
+    review: Option<Review>,
     pub fields: Vec<Field>,
     pub area: Option<Area>,
     pub checks: Vec<Check>,
@@ -195,6 +212,7 @@ pub struct Dialog<P> {
 pub enum Message {
     Field(usize, String),
     Area(text_editor::Action),
+    ReviewScrolled(ScrollPos),
     Check(usize),
     Choose(usize),
     DontAsk,
@@ -231,6 +249,7 @@ impl<P: Clone> Dialog<P> {
         Self {
             title: title.into(),
             body,
+            review: None,
             fields: Vec::new(),
             area: None,
             checks: Vec::new(),
@@ -253,6 +272,18 @@ impl<P: Clone> Dialog<P> {
             notice: true,
             ..Self::confirm(title, body, "OK", purpose).severity(Severity::Failure)
         }
+    }
+
+    /// A scrollable list of the exact items affected by this confirmation.
+    pub fn review(mut self, entries: Vec<String>) -> Self {
+        if let Some(widest) = entries.iter().map(|line| columns(line)).max() {
+            self.review = Some(Review {
+                entries,
+                widest,
+                scroll: ScrollPos::default(),
+            });
+        }
+        self
     }
 
     pub fn severity(mut self, severity: Severity) -> Self {
@@ -385,6 +416,12 @@ impl<P: Clone> Dialog<P> {
                 }
                 None
             }
+            Message::ReviewScrolled(scroll) => {
+                if let Some(review) = self.review.as_mut() {
+                    review.scroll = scroll;
+                }
+                None
+            }
             Message::Area(action) => {
                 if let Some(a) = self.area.as_mut() {
                     a.content.perform(action);
@@ -439,6 +476,26 @@ impl<P: Clone> Dialog<P> {
         }
     }
 
+    /// Lets a keyboard user inspect a long confirmation list.
+    pub fn review_nav(&self, key: Key, t: &Tokens) -> Option<Task<Message>> {
+        let review = self.review.as_ref()?;
+        let height = review_row_height(t);
+        let page = if review.scroll.height > height {
+            review.scroll.height - height
+        } else {
+            height * 10.0
+        };
+        Some(match key {
+            Key::Up => nav::scroll_by(REVIEW_ID, -height),
+            Key::Down => nav::scroll_by(REVIEW_ID, height),
+            Key::PageUp => nav::scroll_by(REVIEW_ID, -page),
+            Key::PageDown => nav::scroll_by(REVIEW_ID, page),
+            Key::Home => nav::scroll_y(REVIEW_ID, 0.0),
+            Key::End => iced::widget::operation::snap_to_end(REVIEW_ID),
+            _ => return None,
+        })
+    }
+
     pub fn view<'a>(&'a self, t: &'a Tokens) -> Element<'a, Message> {
         let severity = self.effective_severity();
         let danger = severity == Severity::Delete;
@@ -450,6 +507,26 @@ impl<P: Clone> Dialog<P> {
         ));
         for line in &self.body {
             col = col.push(mono(t, format!("│ {line}")));
+        }
+        if let Some(review) = &self.review {
+            let row_height = review_row_height(t);
+            let rows =
+                u16::try_from(review.entries.len().min(MAX_REVIEW_ROWS)).expect("at most 10 rows");
+            let list = virtual_list(
+                REVIEW_ID,
+                review.entries.len(),
+                row_height,
+                t.cols(review.widest + 3),
+                review.scroll,
+                |i| {
+                    mono(t, review.entries[i].as_str())
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .into()
+                },
+                Message::ReviewScrolled,
+            );
+            col = col
+                .push(container(list).height(Length::Fixed(row_height * (f32::from(rows) + 1.0))));
         }
         for (i, f) in self.fields.iter().enumerate() {
             let mut input = text_input(&f.placeholder, &f.value)

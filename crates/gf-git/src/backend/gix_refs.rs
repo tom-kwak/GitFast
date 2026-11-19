@@ -227,11 +227,19 @@ impl BranchOps for GixBackend {
         .await
     }
 
+    async fn delete_branches(&self, _names: &[String], _force: bool) -> Result<()> {
+        unsupported("delete multiple branches")
+    }
+
     async fn rename_branch(&self, _old: &str, _new: &str) -> Result<()> {
         unsupported("rename branch (reflog and config move with it)")
     }
 
     async fn delete_remote_branch(&self, _remote: &str, _branch: &str) -> Result<()> {
+        unsupported("push")
+    }
+
+    async fn delete_remote_branches(&self, _remote: &str, _branches: &[String]) -> Result<()> {
         unsupported("push")
     }
 }
