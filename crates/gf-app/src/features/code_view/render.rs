@@ -2,13 +2,14 @@
 
 use gf_core::model::LineKind;
 use iced::widget::text::Wrapping;
-use iced::widget::{column, container, mouse_area, row};
+use iced::widget::{column, container, mouse_area, rich_text, row, span};
 use iced::{Background, Element, Length, Padding};
 
 use super::{
     COMPARE_GUTTER, Code, LIST_ID, Message, Pane, PreviewRow, State, comparison, row_height,
     scroll_marks,
 };
+use crate::highlight::Spans;
 use crate::theme::{Tokens, style};
 use crate::widgets::selectable_line::{Geometry, selectable_line};
 use crate::widgets::virtual_list::{virtual_gutter, virtual_list};
@@ -30,9 +31,8 @@ impl State {
                     None => (row, LineKind::Context),
                     Some(PreviewRow::File(index, kind)) => (*index, *kind),
                     Some(PreviewRow::Removed { number, text }) => {
-                        let text = widgets::mono(t, format::code_line(text))
-                            .wrapping(Wrapping::None)
-                            .into();
+                        let hits = self.find.row_hits(row, Pane::After);
+                        let text = code_text(t, text, None, hits);
                         return row_content(
                             t,
                             Some((digits, *number as usize)),
@@ -48,7 +48,8 @@ impl State {
                         .into();
                     }
                 };
-                self.source_line(t, code, Pane::After, index, Some(digits), kind)
+                let hits = self.find.row_hits(row, Pane::After);
+                self.source_line(t, code, Pane::After, index, Some(digits), kind, hits)
             },
             Message::Scrolled,
         );
@@ -60,6 +61,7 @@ impl State {
         self.selection_area(list)
     }
 
+    #[allow(clippy::too_many_arguments)] // The display row differs from the source line in diffs.
     fn source_line<'a>(
         &'a self,
         t: &'a Tokens,
@@ -68,14 +70,15 @@ impl State {
         index: usize,
         digits: Option<usize>,
         kind: LineKind,
+        hits: impl Iterator<Item = (std::ops::Range<usize>, bool)>,
     ) -> Element<'a, Message> {
         let raw = code.line(index);
-        let text = match code.spans.as_ref().and_then(|spans| spans.get(index)) {
-            Some(spans) => widgets::highlighted_line(t, spans),
-            None => widgets::mono(t, format::code_line(raw))
-                .wrapping(Wrapping::None)
-                .into(),
-        };
+        let text = code_text(
+            t,
+            raw,
+            code.spans.as_ref().and_then(|spans| spans.get(index)),
+            hits,
+        );
         let (line, marker) = row_content(t, digits.map(|d| (d, index + 1)), kind, text);
         let code_x = t.cols(digits.unwrap_or(0) + 3);
         let selection = if self.active_pane == pane {
@@ -132,11 +135,12 @@ impl State {
                 row_height(t),
                 t.cols(code.map_or(0, |c| c.widest) + 5),
                 self.scroll,
-                move |index| {
-                    let (index, kind) = comparison_line(comparison.rows[index], side);
+                move |row| {
+                    let (index, kind) = comparison_line(comparison.rows[row], side);
                     match (code, index) {
                         (Some(source), Some(index)) => {
-                            self.source_line(t, source, side, index, None, kind)
+                            let hits = self.find.row_hits(row, side);
+                            self.source_line(t, source, side, index, None, kind, hits)
                         }
                         _ => iced::widget::space().into(),
                     }
@@ -220,6 +224,64 @@ impl State {
             mouse_area(list).into()
         }
     }
+}
+
+/// Split syntax spans at match boundaries while retaining their colors outside matches.
+fn code_text<'a>(
+    t: &'a Tokens,
+    raw: &'a str,
+    syntax: Option<&'a Spans>,
+    hits: impl Iterator<Item = (std::ops::Range<usize>, bool)>,
+) -> Element<'a, Message> {
+    let mut hits = hits.peekable();
+    if hits.peek().is_none() {
+        return match syntax {
+            Some(spans) => widgets::highlighted_line(t, spans),
+            None => widgets::mono(t, format::code_line(raw))
+                .wrapping(Wrapping::None)
+                .into(),
+        };
+    }
+    let colors = syntax
+        .into_iter()
+        .flatten()
+        .map(|(tone, text)| (text.len(), t.tone(*tone)))
+        .chain(std::iter::once((raw.len(), t.fg)));
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for (length, color) in colors {
+        let end = (at + length).min(raw.len());
+        while at < end {
+            let (next, is_match) = match hits.peek() {
+                Some((range, active)) if range.start <= at => (range.end.min(end), Some(*active)),
+                Some((range, _)) => (range.start.min(end), None),
+                None => (end, None),
+            };
+            let text = if next == raw.len() {
+                format::code_line(&raw[at..next])
+            } else {
+                format::code_text(&raw[at..next])
+            };
+            let piece = span::<(), iced::Font>(text).color(color);
+            spans.push(if let Some(active) = is_match {
+                let (background, foreground) = t.find_match(active);
+                piece.background(background).color(foreground)
+            } else {
+                piece
+            });
+            at = next;
+            if hits.peek().is_some_and(|(range, _)| range.end == at) {
+                hits.next();
+            }
+        }
+        if at == raw.len() {
+            break;
+        }
+    }
+    rich_text(spans)
+        .size(t.font_size)
+        .wrapping(Wrapping::None)
+        .into()
 }
 
 fn row_content<'a>(

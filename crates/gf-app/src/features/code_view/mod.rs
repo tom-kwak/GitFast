@@ -2,6 +2,7 @@
 //! this feature owns the loaded text, its viewport and its selection.
 
 mod comparison;
+pub(crate) mod find;
 mod render;
 mod scroll_marks;
 
@@ -233,6 +234,7 @@ pub struct State {
     comparison_labels: Option<[&'static str; 2]>,
     split: bool,
     active_pane: Pane,
+    find: find::Find,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +259,11 @@ pub enum Message {
     Scrolled(ScrollPos),
     CompareScrolled(&'static str, ScrollPos),
     SetSplit(bool),
+    FindOpen,
+    FindClose,
+    FindQuery(String),
+    FindMove { back: bool },
+    FindResults(u64, u64, Arc<[find::Hit]>),
     Pressed(Pane, usize, TextPointer),
     Extend(Pane, usize, TextPointer),
     Dragged(Pane, usize, TextPointer),
@@ -268,6 +275,7 @@ pub enum Message {
 
 #[derive(Debug)]
 pub enum Output {
+    RevealMatch,
     Copy(String),
     Menu(Menu<Message>),
     Close,
@@ -300,6 +308,7 @@ impl State {
             comparison_labels,
             split: false,
             active_pane: Pane::After,
+            find: find::Find::default(),
         };
         (state, task)
     }
@@ -484,8 +493,16 @@ impl Feature for State {
         match message {
             Message::Loaded(request, result) if request == self.request => {
                 self.loaded = Some(result);
+                return Update::task(self.search());
             }
             Message::Loaded(..) => {}
+            Message::FindOpen => return self.open_find(),
+            Message::FindClose => self.close_find(),
+            Message::FindQuery(query) => return Update::task(self.find_query(query)),
+            Message::FindMove { back } => return self.next_match(back),
+            Message::FindResults(request, generation, hits) => {
+                return self.find_results(request, generation, hits);
+            }
             Message::Scrolled(scroll) if !self.split => self.scroll = scroll,
             Message::CompareScrolled(source, scroll) if self.split => {
                 let moved = (scroll.offset - self.scroll.offset).abs() >= 0.5;
@@ -533,7 +550,7 @@ impl Feature for State {
                 } else {
                     nav::scroll_y(LIST_ID, offset)
                 };
-                return Update::task(task);
+                return Update::task(Task::batch([task, self.search()]));
             }
             Message::SetSplit(_) => {}
             Message::Pressed(pane, line, pointer) if pointer.button == Button::Right => {
@@ -624,6 +641,15 @@ impl Feature for State {
                 hint.into(),
             ));
         }
+        if self.code().is_some() && !self.find_is_open() {
+            header = header.push(widgets::icon_button(
+                t,
+                "Find",
+                t.dim,
+                "Find in file · ⌘F",
+                Message::FindOpen,
+            ));
+        }
         let header = header
             .push(widgets::icon_button(
                 t,
@@ -668,10 +694,21 @@ impl Feature for State {
                 Document::Text(code) => self.lines(t, code),
             },
         };
+        let mut details =
+            row![widgets::mono(t, self.path.display().to_string()).width(Length::Fill)]
+                .spacing(8)
+                .align_y(iced::Alignment::Center);
+        if self.find_is_open() {
+            details = details.push(
+                container(self.find_bar(t))
+                    .width(Length::Fill)
+                    .max_width(440),
+            );
+        }
         let dialog = container(
             column![
                 header,
-                widgets::mono(t, self.path.display().to_string()).width(Length::Fill),
+                details,
                 container(body)
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -707,7 +744,7 @@ impl Feature for State {
 mod tests {
     use super::*;
 
-    fn state() -> State {
+    pub(super) fn state() -> State {
         State {
             request: 2,
             path: "notes.txt".into(),
@@ -721,6 +758,7 @@ mod tests {
             comparison_labels: None,
             split: false,
             active_pane: Pane::After,
+            find: find::Find::default(),
         }
     }
 
