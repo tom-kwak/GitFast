@@ -264,19 +264,20 @@ impl App {
                 )
             }
             CommitAction::SquashIntoPrevious => {
-                let parent = self
+                let commit = self
                     .active_tab()
-                    .and_then(|t| t.history.find(&oid, t.snapshot.as_deref()))
-                    .and_then(|c| (c.parents.len() == 1).then(|| c.parents[0].clone()));
-                match parent {
-                    Some(parent) => self.ask_squash(vec![oid, parent], 2),
-                    None => {
-                        self.flash(
-                            NoteKind::Error,
-                            "nothing to squash into: this is the first commit or a merge",
-                        );
-                        Task::none()
-                    }
+                    .and_then(|t| t.history.find(&oid, t.snapshot.as_deref()));
+                match commit.map(|c| c.parents.as_slice()) {
+                    Some([parent]) => self.ask_squash(vec![oid, parent.clone()], 2),
+                    Some([]) => self.squash_unavailable(
+                        "The first commit has no previous commit.\nTo include it, select it together with the commits after it and use “squash into one”.",
+                    ),
+                    Some(_) => self.squash_unavailable(
+                        "A merge commit has more than one parent.\nSelect a range of commits after the merge to squash.",
+                    ),
+                    None => self.squash_unavailable(
+                        "The selected commit is no longer in the history view. Select it again.",
+                    ),
                 }
             }
             CommitAction::BisectFrom => self.confirm(Confirm::change(
@@ -391,22 +392,18 @@ impl App {
             }
             BatchAction::Squash => match self.fill_gaps(&commits) {
                 Ok(ids) => self.ask_squash(ids, n),
-                Err(e) => {
-                    self.flash(NoteKind::Error, e);
-                    Task::none()
-                }
+                Err(e) => self.squash_unavailable(&e),
             },
             BatchAction::SquashInEditor => {
                 if !is_chain(&commits) {
-                    self.flash(
-                        NoteKind::Error,
-                        "squash needs a continuous range: shift-click to select one",
+                    return self.squash_unavailable(
+                        "The rebase editor needs a continuous range. Shift-click to select one.",
                     );
-                    return Task::none();
                 }
                 let Some(base) = commits.last().and_then(|c| c.parents.first()).cloned() else {
-                    self.flash(NoteKind::Error, "cannot squash the root commit here");
-                    return Task::none();
+                    return self.squash_unavailable(
+                        "The rebase editor needs a commit before the selected range.\nTo include the first commit, use “squash into one” in the selection menu.",
+                    );
                 };
                 // The editor shows the plan and the combined message; nothing
                 // is rewritten until it is started (with its own confirm).
@@ -599,34 +596,38 @@ impl App {
         plan: Result<Vec<gf_git::TodoItem>, String>,
         squash: Option<Vec<Oid>>,
     ) -> Task<Message> {
+        let active = self.active_tab().is_some_and(|tab| tab.repo.id() == id);
         let Some(tab) = self.tab_mut(id) else {
             return Task::none();
         };
-        match plan {
-            Ok(items) if items.is_empty() => {
-                self.flash(
-                    NoteKind::Info,
-                    "no commits after this one on the current branch",
-                );
-                Task::none()
+        let for_squash = squash.is_some();
+        if !for_squash && plan.as_ref().is_ok_and(Vec::is_empty) {
+            self.flash(
+                NoteKind::Info,
+                "no commits after this one on the current branch",
+            );
+            return Task::none();
+        }
+        let editor = plan.and_then(|items| {
+            let editor = crate::features::rebase_editor::State::new(base, items);
+            match squash {
+                Some(ids) => editor.squash(&ids),
+                None => Ok(editor),
             }
-            Ok(items) => {
-                let editor = crate::features::rebase_editor::State::new(base, items);
-                match squash {
-                    None => tab.rebase_editor = Some(editor),
-                    Some(ids) => match editor.squash(&ids) {
-                        Ok(e) => tab.rebase_editor = Some(e),
-                        Err(e) => self.flash(NoteKind::Error, e),
-                    },
-                }
-                Task::none()
-            }
+        });
+        match editor {
+            Ok(editor) => tab.rebase_editor = Some(editor),
+            Err(e) if for_squash && active => return self.squash_unavailable(&e),
             Err(e) => {
-                self.log
-                    .note(NoteKind::Error, "interactive rebase", vec![e]);
-                Task::none()
+                let label = if for_squash {
+                    "Cannot squash"
+                } else {
+                    "interactive rebase"
+                };
+                self.log.note(NoteKind::Error, label, vec![e]);
             }
         }
+        Task::none()
     }
 
     pub(super) fn on_rebase_editor(
@@ -687,6 +688,21 @@ impl App {
     }
 
     // --------------------------------------------------------------- squash
+
+    /// Show why the selection cannot be squashed before history is changed.
+    fn squash_unavailable(&mut self, reason: &str) -> Task<Message> {
+        self.log
+            .note(NoteKind::Error, "Cannot squash", vec![reason.to_owned()]);
+        if self.dialog.is_some() || self.rebase_editor().is_some() {
+            self.flash(NoteKind::Error, "Cannot squash — see command log");
+            return Task::none();
+        }
+        self.open_dialog(crate::features::dialog::Dialog::notice(
+            "Cannot squash",
+            crate::git_actions::error_excerpt(reason, 6),
+            Purpose::Failure,
+        ))
+    }
 
     /// The selected commits (list order, newest first) plus any commits
     /// between them on the first-parent line, so a ⌘-click selection with
@@ -755,10 +771,7 @@ impl App {
         }
         let preview = match result {
             Ok(p) => p,
-            Err(e) => {
-                self.flash(NoteKind::Error, format!("cannot squash: {e}"));
-                return Task::none();
-            }
+            Err(e) => return self.squash_unavailable(&e),
         };
         let dirty = self
             .active_tab()

@@ -710,6 +710,58 @@ async fn sweep_history() {
 }
 
 #[tokio::test]
+async fn squash_into_previous_explains_why_the_root_commit_cannot_be_used() {
+    let mut ui = Ui::open().await;
+    let _ = ui.right_click("first").await;
+    let fx = ui.click("squash into previous").await;
+    assert!(!fx.repo_changed);
+    assert!(ui.shows("Cannot squash"));
+    assert!(ui.shows("first commit has no previous commit"));
+    assert!(ui.shows("select it together with the commits after it"));
+}
+
+#[tokio::test]
+async fn squash_on_another_branch_explains_which_branch_to_use() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["reset", "--hard"]);
+        repo.git(&["clean", "-fd"]);
+        repo.git(&["switch", "feature"]);
+        repo.write("feature-only.txt", "branch-only content");
+        repo.commit_all("feature only commit");
+        repo.git(&["switch", "main"]);
+    })
+    .await;
+    let _ = ui.right_click("feature only commit").await;
+    let fx = ui.click("squash into previous").await;
+    assert!(!fx.repo_changed);
+    assert!(ui.shows("Cannot squash"));
+    assert!(ui.shows("not on the current branch"));
+    assert!(ui.shows("check out the branch"));
+}
+
+#[tokio::test]
+async fn squash_in_editor_explains_how_to_include_the_root_commit() {
+    let mut ui = Ui::open().await;
+    let root = ui
+        .fixture
+        .repo
+        .git(&["rev-parse", "HEAD~2"])
+        .trim()
+        .parse()
+        .expect("root id");
+    let _ = ui.click("second").await;
+    let _ = ui
+        .send(Message::History(history::Message::SelectRange(root)))
+        .await;
+    let _ = ui.right_click("second").await;
+    let fx = ui.click("squash in rebase editor").await;
+    assert!(!fx.repo_changed);
+    assert!(ui.shows("Cannot squash"));
+    assert!(ui.shows("needs a commit before the selected range"));
+    assert!(ui.shows("use “squash into one” in the selection menu"));
+}
+
+#[tokio::test]
 #[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
 async fn sweep_working_tree() {
     let silent = sweep("working tree", || async {
