@@ -93,10 +93,15 @@ pub fn load_history(tab: &RepoTab, revision: String) -> Task<Message> {
         {
             let revision = revision.clone();
             async move {
-                // `file: <path>` is a file history (see `open_file_history`).
-                let history = match revision.strip_prefix("file: ") {
-                    Some(path) => History::load_path(&repo, path.into(), limit).await,
-                    None => History::load(&repo, vec![revision], false, limit).await,
+                let history = if let Some(path) = revision.strip_prefix("file: ") {
+                    History::load_path(&repo, path.into(), None, limit).await
+                } else if let Some((start, path)) = revision
+                    .strip_prefix("file ")
+                    .and_then(|key| key.split_once(": "))
+                {
+                    History::load_path(&repo, path.into(), Some(start.to_owned()), limit).await
+                } else {
+                    History::load(&repo, vec![revision], false, limit).await
                 };
                 history.map(Arc::new).map_err(|e| e.to_string())
             }

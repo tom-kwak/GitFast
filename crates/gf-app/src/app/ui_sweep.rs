@@ -948,6 +948,55 @@ async fn view_file_opens_from_changes_and_copies_code_without_editing_the_repo()
 }
 
 #[tokio::test]
+async fn history_files_menu_previews_the_clicked_files_commit_version() {
+    let mut ui = Ui::open().await;
+    let revision = ui.fixture.repo.git(&["rev-parse", "HEAD~2"]);
+    let _ = ui.click("first").await;
+    let clicked = ui.right_click("lib.rs").await;
+    assert!(!clicked.repo_changed);
+    assert!(ui.shows("file history"));
+    assert!(ui.shows("blame"));
+    assert!(ui.shows("reveal in Finder"));
+    let copied = ui.click("copy path").await;
+    assert_eq!(copied.clipboard, 1);
+    assert_eq!(ui.flash(), "copied src/lib.rs");
+
+    let _ = ui.right_click("lib.rs").await;
+    let opened = ui.click("View file").await;
+    assert!(!opened.repo_changed);
+    assert!(ui.app.code_dialog.is_some());
+    assert!(ui.shows("FILE CONTENTS"));
+    assert!(ui.shows("src/lib.rs"));
+    assert!(ui.shows(revision.trim()));
+    assert!(ui.targets().iter().any(|t| t.label == "  1"));
+    assert!(!ui.shows("println!"));
+
+    let _ = ui.click("[ Close Esc ]").await;
+    let _ = ui.right_click("lib.rs").await;
+    let _ = ui.click("file history").await;
+    assert!(ui.shows("first"));
+    assert!(!ui.shows("third"));
+}
+
+#[tokio::test]
+async fn history_files_preview_uses_the_parent_for_a_deleted_file() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.write("gone.txt", "content before deletion\n");
+        repo.commit_all("add gone");
+        repo.git(&["rm", "gone.txt"]);
+        repo.git(&["commit", "-qm", "remove gone"]);
+    })
+    .await;
+    let _ = ui.click("remove gone").await;
+    let _ = ui.right_click("gone.txt").await;
+    let _ = ui.click("View file").await;
+    assert!(ui.app.code_dialog.is_some());
+    assert!(ui.shows("FILE CONTENTS"));
+    let line_number = ui.targets().into_iter().find(|t| t.label == "  1");
+    assert!(line_number.is_some(), "the parent blob was loaded");
+}
+
+#[tokio::test]
 async fn view_file_loads_the_version_for_each_changes_group() {
     let mut ui = working_tree(
         Ui::open_with(|r| {
@@ -1644,8 +1693,10 @@ async fn blame_truncates_a_wide_author_to_the_column_width() {
     })
     .await;
     let _ = ui.click("wide author").await;
-    assert!(ui.shows("[ file history ]"));
-    let _ = ui.click("[ blame ]").await;
+    assert!(!ui.shows("[ file history ]"));
+    assert!(!ui.shows("[ blame ]"));
+    let _ = ui.right_click("b.txt").await;
+    let _ = ui.click("blame").await;
     assert!(ui.targets().iter().any(|t| t.label == "가나다라마…"));
 }
 

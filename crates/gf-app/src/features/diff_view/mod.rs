@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gf_core::model::{DiffLine, FileChange, FileDiff, LineKind, Oid};
-use gf_git::{DiffTarget, patch};
+use gf_git::{DiffTarget, FileVersion, patch};
 use iced::advanced::mouse::{Button, Click, click};
 use iced::widget::text::Wrapping;
 use iced::widget::{Space, button, column, container, row};
@@ -81,8 +81,8 @@ fn bar_line<'a>(t: &Tokens, content: impl Into<Element<'a, Message>>) -> Element
         .into()
 }
 
-/// Local titles show the repository-relative path. Commit titles use a
-/// revision prefix, the file name, and a dimmed folder suffix.
+/// Local titles show the repository-relative path. Historical files show
+/// the name and a dimmed folder suffix, with a label for stashes and ranges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Title {
     lead: String,
@@ -92,9 +92,10 @@ struct Title {
 
 impl Title {
     fn of(source: &DiffSource, path: Option<&std::path::Path>) -> Self {
+        let label = source.label();
         let Some(path) = path.filter(|_| source.role() == Role::Commit) else {
             return Self {
-                lead: source.label(),
+                lead: label,
                 name: String::new(),
                 rest: String::new(),
             };
@@ -109,7 +110,11 @@ impl Title {
             .map(|d| format!("  {}/", d.display()))
             .unwrap_or_default();
         Self {
-            lead: format!("{} · ", source.label()),
+            lead: if label.is_empty() {
+                label
+            } else {
+                format!("{label} · ")
+            },
             name,
             rest: dir,
         }
@@ -155,6 +160,33 @@ impl DiffSource {
         }
     }
 
+    fn end_revision(&self) -> Option<&Oid> {
+        match self {
+            Self::Commit(oid) | Self::Stash { id: oid, .. } | Self::Range { to: oid, .. } => {
+                Some(oid)
+            }
+            _ => None,
+        }
+    }
+
+    /// Revision of the side that contains the file.
+    fn file_revision(&self, file: &FileDiff) -> Option<String> {
+        let deleted = file.new_path.is_none();
+        match self {
+            Self::Commit(oid) | Self::Stash { id: oid, .. } => Some(if deleted {
+                format!("{oid}^1")
+            } else {
+                oid.to_string()
+            }),
+            Self::Range { from, to, .. } => Some(if deleted {
+                from.clone()
+            } else {
+                to.to_string()
+            }),
+            _ => None,
+        }
+    }
+
     fn target(&self) -> (DiffTarget, Vec<PathBuf>) {
         match self {
             Self::WorkTree(p) => (DiffTarget::WorkTree, vec![p.clone()]),
@@ -178,11 +210,11 @@ impl DiffSource {
         }
     }
 
-    /// The local file path or the selected commit/stash label.
+    /// Label for sources that need context in the diff header.
     fn label(&self) -> String {
         match self {
             Self::WorkTree(p) | Self::Staged(p) | Self::Untracked(p) => p.display().to_string(),
-            Self::Commit(oid) => format!("commit {}", oid.short()),
+            Self::Commit(_) => String::new(),
             Self::Stash { index, .. } => format!("stash@{{{index}}}"),
             Self::Range {
                 count, contiguous, ..
@@ -247,6 +279,9 @@ pub struct LoadedDiff {
     /// Widest line of each file in monospace columns (for sideways scroll).
     pub widths: Vec<usize>,
     line_counts: Vec<select::LineCounts>,
+    entry_counts: Vec<widgets::EntryCounts>,
+    file_list_columns: usize,
+    submodules: Vec<bool>,
 }
 
 impl LoadedDiff {
@@ -269,11 +304,36 @@ impl LoadedDiff {
             })
             .collect();
         let line_counts = files.iter().map(select::LineCounts::new).collect();
+        let entry_counts: Vec<_> = files
+            .iter()
+            .map(|f| {
+                Some((!f.is_binary).then(|| {
+                    let (added, removed) = f.line_stats();
+                    gf_git::LineCounts {
+                        added: u32::try_from(added).unwrap_or(u32::MAX),
+                        removed: u32::try_from(removed).unwrap_or(u32::MAX),
+                    }
+                }))
+            })
+            .collect();
+        let file_list_columns = files
+            .iter()
+            .zip(&entry_counts)
+            .filter_map(|(file, &counts)| {
+                file.display_path()
+                    .map(|path| widgets::file_entry_columns(path, counts))
+            })
+            .max()
+            .unwrap_or(0);
+        let submodules = files.iter().map(FileDiff::is_submodule).collect();
         Self {
             files,
             first_spans,
             widths,
             line_counts,
+            entry_counts,
+            file_list_columns,
+            submodules,
         }
     }
 }
@@ -383,27 +443,35 @@ pub enum Message {
     DiscardSubmodule,
     Selected(Action),
     SelectFile(usize),
+    FileMenu(usize),
+    OpenFileMenu,
+    FileAction(FileAction),
     Scrolled(ScrollPos),
     FilesScrolled(ScrollPos),
     ToggleWhitespace,
     Close,
     ViewFile,
-    Blame,
-    FileHistory,
+}
+
+#[derive(Debug, Clone)]
+pub enum FileAction {
+    View(PathBuf, FileVersion),
+    Blame(PathBuf, String),
+    History(PathBuf, Oid),
+    CopyPath(PathBuf),
+    Reveal(PathBuf),
 }
 
 #[derive(Debug, Clone)]
 pub enum Output {
     Menu(Menu<Message>),
+    FileMenu {
+        menu: Menu<Message>,
+        highlight: Option<usize>,
+    },
+    FileAction(FileAction),
     /// Show the full file from the currently displayed local diff source.
     ViewFile(DiffSource),
-    /// Blame the shown file at its commit or stash revision.
-    Blame {
-        path: PathBuf,
-        rev: String,
-    },
-    /// Show the commits that touched the shown file.
-    FileHistory(PathBuf),
     /// Apply these patches in order. Discards must be confirmed first.
     Apply {
         patches: Vec<String>,
@@ -787,6 +855,13 @@ impl State {
 
     /// Keys for the commit's file list: arrows pick the file.
     pub fn files_nav(&self, nav: Nav, t: &Tokens) -> Option<Moved<Message>> {
+        if nav.key == Key::Char('.') {
+            return Some(if self.diff.files.is_empty() {
+                Moved::stay()
+            } else {
+                Moved::message(Message::OpenFileMenu)
+            });
+        }
         let h = Self::files_row_height(t);
         let len = self.diff.files.len();
         let i = nav::step(
@@ -894,6 +969,56 @@ impl State {
         self.dragging = true;
         self.drag_unit = (click.kind() != click::Kind::Single).then_some((click.kind(), range));
         Update::none()
+    }
+
+    fn file_menu(&self, i: usize) -> Option<Menu<Message>> {
+        let file = self.diff.files.get(i)?;
+        let path = file.display_path()?;
+        let source = self.source.as_ref()?;
+        let revision = source.file_revision(file)?;
+        let end = source.end_revision()?;
+        let title = path.display().to_string();
+        let mut entries = Vec::new();
+        if !self.diff.submodules[i] {
+            entries.push(Entry::item(
+                'v',
+                "View file",
+                "show the entire file at this revision",
+                Message::FileAction(FileAction::View(
+                    path.clone(),
+                    FileVersion::Revision(revision.clone()),
+                )),
+            ));
+            if !file.is_binary {
+                entries.push(Entry::item(
+                    'b',
+                    "blame",
+                    "who changed each line at this revision",
+                    Message::FileAction(FileAction::Blame(path.clone(), revision)),
+                ));
+            }
+        }
+        entries.extend([
+            Entry::item(
+                'h',
+                "file history",
+                format!("git log --follow {} -- {title}", end.short()),
+                Message::FileAction(FileAction::History(path.clone(), end.clone())),
+            ),
+            Entry::item(
+                'y',
+                "copy path",
+                title.clone(),
+                Message::FileAction(FileAction::CopyPath(path.clone())),
+            ),
+            Entry::item(
+                'f',
+                "reveal in Finder",
+                "show the path in the working tree",
+                Message::FileAction(FileAction::Reveal(path.clone())),
+            ),
+        ]);
+        Some(Menu { title, entries })
     }
 
     pub fn update(&mut self, message: Message) -> Update<Message, Output> {
@@ -1029,6 +1154,18 @@ impl State {
                     Update::output(Output::Highlight(i))
                 }
             }
+            Message::FileMenu(i) => {
+                let Some(menu) = self.file_menu(i) else {
+                    return Update::none();
+                };
+                let highlight = match self.update(Message::SelectFile(i)).output {
+                    Some(Output::Highlight(i)) => Some(i),
+                    _ => None,
+                };
+                Update::output(Output::FileMenu { menu, highlight })
+            }
+            Message::OpenFileMenu => self.update(Message::FileMenu(self.file)),
+            Message::FileAction(action) => Update::output(Output::FileAction(action)),
             Message::Scrolled(pos) => {
                 self.scroll = pos;
                 Update::none()
@@ -1049,27 +1186,26 @@ impl State {
                 Some(source) if source.role() == Role::Local => {
                     Update::output(Output::ViewFile(source.clone()))
                 }
-                _ => Update::none(),
+                Some(source) => {
+                    let Some(file) = self
+                        .diff
+                        .files
+                        .get(self.file)
+                        .filter(|_| !self.diff.submodules[self.file])
+                    else {
+                        return Update::none();
+                    };
+                    let (Some(path), Some(rev)) = (file.display_path(), source.file_revision(file))
+                    else {
+                        return Update::none();
+                    };
+                    Update::output(Output::FileAction(FileAction::View(
+                        path.clone(),
+                        FileVersion::Revision(rev),
+                    )))
+                }
+                None => Update::none(),
             },
-            Message::Blame | Message::FileHistory => {
-                if self.role == Role::Local {
-                    return Update::none();
-                }
-                let Some(path) = self.current_path() else {
-                    return Update::none();
-                };
-                if matches!(message, Message::FileHistory) {
-                    return Update::output(Output::FileHistory(path));
-                }
-                let rev = match &self.source {
-                    Some(DiffSource::Commit(oid) | DiffSource::Stash { id: oid, .. }) => {
-                        oid.to_string()
-                    }
-                    Some(DiffSource::Range { to, .. }) => to.to_string(),
-                    _ => return Update::none(),
-                };
-                Update::output(Output::Blame { path, rev })
-            }
         }
     }
 
@@ -1095,26 +1231,7 @@ impl State {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default()
             };
-            let counts_of = |f: &FileDiff| -> widgets::EntryCounts {
-                let (added, removed) = f.line_stats();
-                Some((!f.is_binary).then(|| gf_git::LineCounts {
-                    added: u32::try_from(added).unwrap_or(u32::MAX),
-                    removed: u32::try_from(removed).unwrap_or(u32::MAX),
-                }))
-            };
-            let cols = files
-                .iter()
-                .map(|f| {
-                    widgets::file_entry_columns(
-                        f.display_path()
-                            .map(PathBuf::as_path)
-                            .unwrap_or(std::path::Path::new("")),
-                        counts_of(f),
-                    )
-                })
-                .max()
-                .unwrap_or(0);
-            let content_width = t.cols(cols) + 30.0;
+            let content_width = t.cols(self.diff.file_list_columns) + 30.0;
             let current = self.file;
             virtual_list(
                 FILES_ID,
@@ -1136,12 +1253,15 @@ impl State {
                         .display_path()
                         .map(PathBuf::as_path)
                         .unwrap_or(std::path::Path::new(""));
-                    let line = widgets::file_entry(t, code, color, path, counts_of(f));
-                    widgets::tip(
+                    let line = widgets::file_entry(t, code, color, path, self.diff.entry_counts[i]);
+                    let item = iced::widget::mouse_area(widgets::list_row(
                         t,
-                        widgets::list_row(t, line, i == current, Message::SelectFile(i)),
-                        path_of(f),
-                    )
+                        line,
+                        i == current,
+                        Message::SelectFile(i),
+                    ))
+                    .on_right_press(Message::FileMenu(i));
+                    widgets::tip(t, item, path_of(f))
                 },
                 Message::FilesScrolled,
             )
@@ -1207,27 +1327,13 @@ impl State {
                     Message::SelectFile(self.file + 1),
                 ));
         }
-        let binary = self.diff.files.get(self.file).is_some_and(|f| f.is_binary);
-        if shown_path.is_some() {
-            if self.role == Role::Local {
-                header = header.push(widgets::tip(
-                    t,
-                    widgets::text_button(t, "View file", None, Some(Message::ViewFile)),
-                    "show the entire file".into(),
-                ));
-            } else if !binary {
-                header = header
-                    .push(widgets::tip(
-                        t,
-                        widgets::text_button(t, "blame", None, Some(Message::Blame)),
-                        "who last changed each line of this file".into(),
-                    ))
-                    .push(widgets::tip(
-                        t,
-                        widgets::text_button(t, "file history", None, Some(Message::FileHistory)),
-                        "commits that touched this file (follows renames)".into(),
-                    ));
-            }
+        let blob = self.diff.submodules.get(self.file) == Some(&false);
+        if shown_path.is_some() && (self.role == Role::Local || blob) {
+            header = header.push(widgets::tip(
+                t,
+                widgets::text_button(t, "View file", None, Some(Message::ViewFile)),
+                "show the entire file".into(),
+            ));
         }
         let whitespace_color = if self.ignore_whitespace {
             t.accent()
@@ -1666,20 +1772,17 @@ index 1111111..2222222 100644
     }
 
     #[test]
-    fn commit_titles_put_the_file_name_before_its_folder() {
+    fn commit_titles_show_only_the_file_name_and_folder() {
         let oid: gf_core::model::Oid = "a".repeat(40).parse().expect("oid");
         let path = std::path::Path::new("crates/gf-app/src/mod.rs");
         let t = Title::of(&DiffSource::Commit(oid.clone()), Some(path));
-        assert_eq!(t.lead, format!("commit {} · ", oid.short()));
+        assert!(t.lead.is_empty());
         assert_eq!(t.name, "mod.rs");
         assert_eq!(t.rest, "  crates/gf-app/src/");
-        assert_eq!(
-            t.full(),
-            format!("commit {} · mod.rs  crates/gf-app/src/", oid.short())
-        );
+        assert_eq!(t.full(), "mod.rs  crates/gf-app/src/");
 
-        let t = Title::of(&DiffSource::Commit(oid.clone()), None);
-        assert_eq!(t.full(), format!("commit {}", oid.short()));
+        let t = Title::of(&DiffSource::Commit(oid), None);
+        assert!(t.full().is_empty());
     }
 
     #[test]
