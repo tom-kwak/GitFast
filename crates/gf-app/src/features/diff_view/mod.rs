@@ -24,7 +24,7 @@ use gf_core::model::{DiffLine, FileChange, FileDiff, LineKind, Oid};
 use gf_git::{DiffTarget, patch};
 use iced::advanced::mouse::{Button, Click, click};
 use iced::widget::text::Wrapping;
-use iced::widget::{column, container, row};
+use iced::widget::{Space, button, column, container, row};
 use iced::{Color, Element, Length, Padding, Task};
 
 use crate::feature::{Cx, Update};
@@ -71,8 +71,8 @@ impl Role {
     }
 }
 
-/// The line under a diff's header: the hint, or the selection's buttons
-/// once lines are selected. Always the same height, so selecting the first
+/// The line under a diff's header holds the selection buttons when needed.
+/// Always the same height, so selecting the first
 /// line of a drag does not push the code down under the mouse.
 fn bar_line<'a>(t: &Tokens, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content)
@@ -81,10 +81,8 @@ fn bar_line<'a>(t: &Tokens, content: impl Into<Element<'a, Message>>) -> Element
         .into()
 }
 
-/// A diff panel's header title in three parts: `lead` (`commit abc123 · `),
-/// the file `name`, and the dimmed `rest` (its folder, and for the work
-/// tree whether it is staged). Drawn in that order and clipped, so a long
-/// folder is cut before the file name.
+/// Local titles show the repository-relative path. Commit titles use a
+/// revision prefix, the file name, and a dimmed folder suffix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Title {
     lead: String,
@@ -94,7 +92,7 @@ struct Title {
 
 impl Title {
     fn of(source: &DiffSource, path: Option<&std::path::Path>) -> Self {
-        let Some(path) = path else {
+        let Some(path) = path.filter(|_| source.role() == Role::Commit) else {
             return Self {
                 lead: source.label(),
                 name: String::new(),
@@ -110,23 +108,10 @@ impl Title {
             .filter(|d| !d.as_os_str().is_empty())
             .map(|d| format!("  {}/", d.display()))
             .unwrap_or_default();
-        match source {
-            DiffSource::WorkTree(_) => Self::local(name, dir, "unstaged"),
-            DiffSource::Staged(_) => Self::local(name, dir, "staged"),
-            DiffSource::Untracked(_) => Self::local(name, dir, "new file"),
-            _ => Self {
-                lead: format!("{} · ", source.label()),
-                name,
-                rest: dir,
-            },
-        }
-    }
-
-    fn local(name: String, dir: String, state: &str) -> Self {
         Self {
-            lead: String::new(),
+            lead: format!("{} · ", source.label()),
             name,
-            rest: format!("{dir} · {state}"),
+            rest: dir,
         }
     }
 
@@ -193,13 +178,10 @@ impl DiffSource {
         }
     }
 
-    /// What is shown (`commit abc123`, `a.rs · staged`), without the
-    /// file a commit's diff is on.
+    /// The local file path or the selected commit/stash label.
     fn label(&self) -> String {
         match self {
-            Self::WorkTree(p) => format!("{} · unstaged", p.display()),
-            Self::Staged(p) => format!("{} · staged", p.display()),
-            Self::Untracked(p) => format!("{} · new file", p.display()),
+            Self::WorkTree(p) | Self::Staged(p) | Self::Untracked(p) => p.display().to_string(),
             Self::Commit(oid) => format!("commit {}", oid.short()),
             Self::Stash { index, .. } => format!("stash@{{{index}}}"),
             Self::Range {
@@ -405,6 +387,7 @@ pub enum Message {
     FilesScrolled(ScrollPos),
     ToggleWhitespace,
     Close,
+    ViewFile,
     Blame,
     FileHistory,
 }
@@ -412,10 +395,12 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub enum Output {
     Menu(Menu<Message>),
-    /// Blame the shown file at `rev` (`None` = working tree).
+    /// Show the full file from the currently displayed local diff source.
+    ViewFile(DiffSource),
+    /// Blame the shown file at its commit or stash revision.
     Blame {
         path: PathBuf,
-        rev: Option<String>,
+        rev: String,
     },
     /// Show the commits that touched the shown file.
     FileHistory(PathBuf),
@@ -691,11 +676,11 @@ impl State {
                             hunk: hi,
                             action: a,
                         };
-                        let label = format!("{} hunk", a.label());
+                        let label = a.label();
                         bar = bar.push(if a == Action::Discard {
-                            widgets::danger_button(t, &label, Some(msg))
+                            widgets::danger_button(t, label, Some(msg))
                         } else {
-                            widgets::text_button(t, &label, None, Some(msg))
+                            widgets::text_button(t, label, None, Some(msg))
                         });
                     }
                 }
@@ -1060,7 +1045,16 @@ impl State {
                 self.close();
                 Update::none()
             }
+            Message::ViewFile => match &self.source {
+                Some(source) if source.role() == Role::Local => {
+                    Update::output(Output::ViewFile(source.clone()))
+                }
+                _ => Update::none(),
+            },
             Message::Blame | Message::FileHistory => {
+                if self.role == Role::Local {
+                    return Update::none();
+                }
                 let Some(path) = self.current_path() else {
                     return Update::none();
                 };
@@ -1068,10 +1062,11 @@ impl State {
                     return Update::output(Output::FileHistory(path));
                 }
                 let rev = match &self.source {
-                    Some(DiffSource::Commit(oid)) => Some(oid.to_string()),
-                    Some(DiffSource::Stash { id, .. }) => Some(id.to_string()),
-                    Some(DiffSource::Range { to, .. }) => Some(to.to_string()),
-                    _ => None,
+                    Some(DiffSource::Commit(oid) | DiffSource::Stash { id: oid, .. }) => {
+                        oid.to_string()
+                    }
+                    Some(DiffSource::Range { to, .. }) => to.to_string(),
+                    _ => return Update::none(),
                 };
                 Update::output(Output::Blame { path, rev })
             }
@@ -1180,9 +1175,7 @@ impl State {
             _ => files.get(self.file).and_then(|f| f.display_path().cloned()),
         };
         let title = Title::of(source, shown_path.as_deref());
-        // The title gives way to the buttons: clipped to its cell, file
-        // name first so the folder is what gets cut; the whole of it on
-        // hover.
+        // Clip to leave room for the buttons. Hover shows the full title.
         let title_cell = container(
             row![
                 mono(t, title.lead.clone()).wrapping(Wrapping::None),
@@ -1214,36 +1207,45 @@ impl State {
                     Message::SelectFile(self.file + 1),
                 ));
         }
-        // Blame needs text lines: a binary file has none (and its bytes
-        // are not worth drawing).
         let binary = self.diff.files.get(self.file).is_some_and(|f| f.is_binary);
-        if self.current_path().is_some() && !binary {
-            header = header
-                .push(widgets::tip(
+        if shown_path.is_some() {
+            if self.role == Role::Local {
+                header = header.push(widgets::tip(
                     t,
-                    widgets::text_button(t, "blame", None, Some(Message::Blame)),
-                    "who last changed each line of this file".into(),
-                ))
-                .push(widgets::tip(
-                    t,
-                    widgets::text_button(t, "file history", None, Some(Message::FileHistory)),
-                    "commits that touched this file (follows renames)".into(),
+                    widgets::text_button(t, "View file", None, Some(Message::ViewFile)),
+                    "show the entire file".into(),
                 ));
+            } else if !binary {
+                header = header
+                    .push(widgets::tip(
+                        t,
+                        widgets::text_button(t, "blame", None, Some(Message::Blame)),
+                        "who last changed each line of this file".into(),
+                    ))
+                    .push(widgets::tip(
+                        t,
+                        widgets::text_button(t, "file history", None, Some(Message::FileHistory)),
+                        "commits that touched this file (follows renames)".into(),
+                    ));
+            }
         }
+        let whitespace_color = if self.ignore_whitespace {
+            t.accent()
+        } else {
+            t.dim
+        };
         header = header
             .push(widgets::tip(
                 t,
-                widgets::text_button(
-                    t,
-                    if self.ignore_whitespace {
-                        "␣ ignored"
-                    } else {
-                        "␣ shown"
-                    },
-                    None,
-                    Some(Message::ToggleWhitespace),
-                ),
-                "whitespace-only changes: shown / ignored".into(),
+                button(mono(t, "[␣]"))
+                    .padding(Padding::from([1, 2]))
+                    .style(style::text_button(t, whitespace_color))
+                    .on_press(Message::ToggleWhitespace),
+                if self.ignore_whitespace {
+                    "Show whitespace changes".into()
+                } else {
+                    "Ignore whitespace changes".into()
+                },
             ))
             .push(widgets::icon_button(t, "✕", t.dim, "close", Message::Close));
 
@@ -1290,12 +1292,16 @@ impl State {
             ));
             toolbar = toolbar.push(bar_line(t, sel));
         } else if !files.is_empty() {
-            let hint = if source.actions().is_empty() {
-                "drag to select · double-click a word · ⇧ extends · ⌘A all"
-            } else {
-                "drag to select · double-click a word · ⇧ extends · stage selected changes"
-            };
-            toolbar = toolbar.push(bar_line(t, dim(t, hint)));
+            toolbar = toolbar.push(match self.role {
+                Role::Local => bar_line(t, Space::new()),
+                Role::Commit => bar_line(
+                    t,
+                    dim(
+                        t,
+                        "drag to select · double-click a word · ⇧ extends · ⌘A all",
+                    ),
+                ),
+            });
         }
 
         let body: Element<'a, Message> = if let Some(e) = &self.error {
@@ -1660,7 +1666,7 @@ index 1111111..2222222 100644
     }
 
     #[test]
-    fn titles_put_the_file_name_before_its_folder() {
+    fn commit_titles_put_the_file_name_before_its_folder() {
         let oid: gf_core::model::Oid = "a".repeat(40).parse().expect("oid");
         let path = std::path::Path::new("crates/gf-app/src/mod.rs");
         let t = Title::of(&DiffSource::Commit(oid.clone()), Some(path));
@@ -1672,16 +1678,27 @@ index 1111111..2222222 100644
             format!("commit {} · mod.rs  crates/gf-app/src/", oid.short())
         );
 
-        let t = Title::of(&DiffSource::Staged(path.into()), Some(path));
-        assert_eq!(
-            (t.name.as_str(), t.rest.as_str()),
-            ("mod.rs", "  crates/gf-app/src/ · staged")
-        );
-        let top = std::path::Path::new("a.rs");
-        let t = Title::of(&DiffSource::WorkTree(top.into()), Some(top));
-        assert_eq!(t.full(), "a.rs · unstaged");
-        // Nothing to split: the label as before.
         let t = Title::of(&DiffSource::Commit(oid.clone()), None);
         assert_eq!(t.full(), format!("commit {}", oid.short()));
+    }
+
+    #[test]
+    fn local_titles_show_only_the_repository_relative_path() {
+        let path = std::path::Path::new("crates/gf-app/src/mod.rs");
+        for source in [
+            DiffSource::WorkTree(path.into()),
+            DiffSource::Staged(path.into()),
+            DiffSource::Untracked(path.into()),
+        ] {
+            assert_eq!(
+                Title::of(&source, Some(path)).full(),
+                "crates/gf-app/src/mod.rs"
+            );
+        }
+        let top = std::path::Path::new("a.rs");
+        assert_eq!(
+            Title::of(&DiffSource::WorkTree(top.into()), Some(top)).full(),
+            "a.rs"
+        );
     }
 }

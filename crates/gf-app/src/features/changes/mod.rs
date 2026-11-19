@@ -15,7 +15,7 @@ use crate::feature::{Cx, Feature, Update};
 use crate::features::context_menu::{Entry, Menu};
 use crate::features::diff_view::DiffSource;
 use crate::nav::{self, Key, Moved, Nav};
-use crate::repo_tab::LineStats;
+use crate::repo_tab::{LineStats, Snapshot};
 use crate::theme::Tokens;
 use crate::widgets::memo::{self, Memo};
 use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
@@ -345,6 +345,13 @@ fn row_height(t: &Tokens) -> f32 {
 /// Scrollable id of the list.
 const LIST_ID: &str = "gf-working-tree";
 
+/// Open the version associated with a working tree group, including deleted files.
+pub fn view_file(path: PathBuf, group: Group, snap: Option<&Snapshot>) -> Output {
+    let entry = snap.and_then(|s| s.status.entries.iter().find(|e| e.path() == &path));
+    let version = file_version(group, entry);
+    Output::ViewFile(path, version)
+}
+
 fn file_version(group: Group, entry: Option<&StatusEntry>) -> FileVersion {
     match (group, entry) {
         (
@@ -571,11 +578,10 @@ impl State {
     pub fn update_with(
         &mut self,
         message: Message,
-        snap: Option<&crate::repo_tab::Snapshot>,
+        snap: Option<&Snapshot>,
     ) -> Update<Message, Output> {
         if let Message::ViewFile(path, group) = message {
-            let entry = snap.and_then(|s| s.status.entries.iter().find(|e| e.path() == &path));
-            return Update::output(Output::ViewFile(path, file_version(group, entry)));
+            return Update::output(view_file(path, group, snap));
         }
         // Only menus need it (not every scroll).
         if !matches!(message, Message::RightClick(..) | Message::OpenActions) {

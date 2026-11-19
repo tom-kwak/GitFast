@@ -316,7 +316,17 @@ impl App {
             diff_view::Output::DiscardSubmodule(path) => {
                 self.confirm_discard(vec![path], Vec::new())
             }
-            diff_view::Output::Blame { path, rev } => self.open_blame(path, rev),
+            diff_view::Output::ViewFile(source) => {
+                let (path, group) = match source {
+                    DiffSource::WorkTree(path) => (path, changes::Group::Unstaged),
+                    DiffSource::Staged(path) => (path, changes::Group::Staged),
+                    DiffSource::Untracked(path) => (path, changes::Group::Untracked),
+                    _ => return Task::none(),
+                };
+                let snap = self.active_tab().and_then(|tab| tab.snapshot.as_deref());
+                self.on_changes(changes::view_file(path, group, snap))
+            }
+            diff_view::Output::Blame { path, rev } => self.open_blame(path, Some(rev)),
             diff_view::Output::FileHistory(path) => self.open_file_history(path),
             diff_view::Output::Reload => {
                 let Some(tab) = self.active_tab_mut() else {
