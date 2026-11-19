@@ -981,20 +981,29 @@ async fn view_file_loads_the_version_for_each_changes_group() {
         if !cfg!(unix) && path == "1:staged.txt" {
             continue;
         }
-        let opened = ui
-            .send(Message::Changes(changes::Message::ViewFile(
+        let _ = ui
+            .send(Message::Changes(changes::Message::Select(
                 path.into(),
                 group,
             )))
             .await;
+        assert!(!ui.shows("[ blame ]"));
+        assert!(!ui.shows("[ file history ]"));
+        let button = ui
+            .targets()
+            .into_iter()
+            .filter(|t| t.label == "[ View file ]")
+            .max_by(|a, b| a.at.x.total_cmp(&b.at.x))
+            .expect("View file in the diff header");
+        let opened = ui.click_at(&button, mouse::Button::Left).await;
+        assert!(opened.messages.iter().any(|m| m == "LocalDiff(ViewFile)"));
         assert!(!opened.repo_changed);
-        assert!(ui.app.code_dialog.is_some());
         assert!(ui.shows("  1"), "{path} should have a code gutter");
         let viewer = ui.app.code_dialog.as_mut().expect("file dialog");
         let _ = viewer.update(code_view::Message::SelectAll);
-        let copied = viewer.update(code_view::Message::Copy).output;
         assert!(
-            matches!(copied, Some(code_view::Output::Copy(text)) if text.contains(line)),
+            matches!(viewer.update(code_view::Message::Copy).output,
+                Some(code_view::Output::Copy(text)) if text.contains(line)),
             "{path} in {group:?} should contain {line:?}"
         );
         let _ = ui
@@ -1625,26 +1634,18 @@ async fn a_branch_without_commits_stays_visible_after_renaming_head() {
 
 #[tokio::test]
 async fn blame_truncates_a_wide_author_to_the_column_width() {
-    let mut ui = working_tree(
-        Ui::open_with(|r| {
-            r.git(&[
-                "commit",
-                "--author=가나다라마바사아 <wide@example.com>",
-                "-m",
-                "wide author",
-            ]);
-            r.write("b.txt", "new staged\nworking tree change\n");
-        })
-        .await,
-    )
+    let mut ui = Ui::open_with(|r| {
+        r.git(&[
+            "commit",
+            "--author=가나다라마바사아 <wide@example.com>",
+            "-m",
+            "wide author",
+        ]);
+    })
     .await;
-    let _ = ui
-        .send(Message::Changes(changes::Message::Select(
-            "b.txt".into(),
-            changes::Group::Unstaged,
-        )))
-        .await;
-    let _ = ui.send(Message::LocalDiff(diff_view::Message::Blame)).await;
+    let _ = ui.click("wide author").await;
+    assert!(ui.shows("[ file history ]"));
+    let _ = ui.click("[ blame ]").await;
     assert!(ui.targets().iter().any(|t| t.label == "가나다라마…"));
 }
 
