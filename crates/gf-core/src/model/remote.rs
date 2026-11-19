@@ -2,6 +2,7 @@
 pub struct Remote {
     pub name: String,
     pub fetch_url: String,
+    pub fetch_refspecs: Vec<String>,
     /// Separate push URL (`remote.<name>.pushurl`), if configured.
     pub push_url: Option<String>,
 }

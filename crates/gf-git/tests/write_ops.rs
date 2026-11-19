@@ -669,3 +669,30 @@ async fn a_missing_commit_graph_is_written_once() {
         "already there"
     );
 }
+
+#[tokio::test]
+async fn single_remote_branch_delete_keeps_the_same_named_tag() {
+    let remote = TestRepo::new_bare();
+    let repo = TestRepo::new();
+    repo.write("file.txt", "content");
+    repo.commit_all("initial");
+    for name in ["topic", "qualified"] {
+        repo.git(&["branch", name]);
+        repo.git(&["tag", name]);
+    }
+    repo.git(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    repo.git(&["push", "origin", "--all"]);
+    repo.git(&["push", "origin", "--tags"]);
+
+    let r = open(&repo).await;
+    r.delete_remote_branch("origin", "topic").await.unwrap();
+    r.delete_remote_branch("origin", "refs/heads/qualified")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        remote.git(&["for-each-ref", "--format=%(refname)", "refs/heads"]),
+        "refs/heads/main"
+    );
+    assert_eq!(remote.git(&["tag", "--list"]), "qualified\ntopic");
+}

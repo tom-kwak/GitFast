@@ -26,6 +26,9 @@ pub enum GfError {
     #[error("not a git repository: {}", .0.display())]
     NotARepository(PathBuf),
 
+    #[error("file exceeds the preview size limit")]
+    FilePreviewTooLarge,
+
     #[error("operation cancelled")]
     Cancelled,
 

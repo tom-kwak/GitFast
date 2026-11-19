@@ -29,7 +29,7 @@ pub use ops::blame::BlameLine;
 pub use ops::branch::{left_on, left_on_branch, switch_blockers};
 pub use ops::commit::CommitOptions;
 pub use ops::conflict::Side;
-pub use ops::diff::{DiffOptions, DiffTarget, FileVersion};
+pub use ops::diff::{DiffOptions, DiffTarget, FILE_PREVIEW_LIMIT, FileVersion};
 pub use ops::integrate::{Integration, MergeStyle};
 pub use ops::lfs::LfsFile;
 pub use ops::log::{LogOrder, LogQuery};
@@ -37,6 +37,7 @@ pub use ops::rebase_interactive::{
     SquashPreview, TodoAction, TodoItem, melds_into_nothing, squash_plan, squash_range,
 };
 pub use ops::reflog::{ReflogEntry, ResetMode};
+pub use ops::remote::remote_branch;
 pub use ops::stash::StashOptions;
 pub use ops::state::RepoState;
 pub use ops::submodule::{Submodule, SubmoduleStatus};

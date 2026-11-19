@@ -1000,15 +1000,24 @@ impl State {
         Update::none()
     }
 
+    fn historical_preview(&self, i: usize) -> Option<(&PathBuf, String)> {
+        let file = self
+            .diff
+            .files
+            .get(i)
+            .filter(|_| !self.diff.submodules[i])?;
+        let revision = self.source.as_ref()?.file_revision(file)?;
+        Some((file.display_path()?, revision))
+    }
+
     fn file_menu(&self, i: usize) -> Option<Menu<Message>> {
         let file = self.diff.files.get(i)?;
         let path = file.display_path()?;
         let source = self.source.as_ref()?;
         let end = source.end_revision()?;
-        let revision = source.file_revision(file)?;
         let title = path.display().to_string();
         let mut entries = Vec::new();
-        if !self.diff.submodules[i] {
+        if let Some((path, revision)) = self.historical_preview(i) {
             entries.push(Entry::item(
                 'v',
                 "view file",

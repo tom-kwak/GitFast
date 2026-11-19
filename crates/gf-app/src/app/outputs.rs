@@ -576,7 +576,6 @@ impl App {
                 )
                 .field("name", name, "new-name"),
             ),
-            sidebar::Output::DeleteBranch(b) => self.delete_branch_dialog(&b),
             sidebar::Output::DeleteBranches(branches) => self.delete_branches_dialog(&branches),
             sidebar::Output::PushBranch(b) => self.push_branch(&b),
             sidebar::Output::DeleteTag(name) => self.confirm(
@@ -1020,7 +1019,11 @@ impl App {
         };
         let target = checkout.target.clone();
         self.checkouts.remove(git_dir);
-        if self.active_tab().map(|t| t.repo.id()) != Some(repo) || self.dialog.is_some() {
+        if self.active_tab().map(|t| t.repo.id()) != Some(repo)
+            || self.dialog.is_some()
+            || self.code_dialog.is_some()
+            || self.rebase_editor().is_some()
+        {
             return Task::none();
         }
         let switch = if remote {
@@ -1384,14 +1387,15 @@ fn local_checkout_target<'a>(snap: &'a Snapshot, remote: &Branch) -> Option<&'a 
                 .as_ref()
                 .is_some_and(|upstream| upstream.name == remote.name)
     });
-    let usual_name = remote.name.short().split_once('/').map(|(_, name)| name);
+    let usual_name =
+        gf_git::remote_branch(&snap.remotes, remote.name.as_str()).map(|(_, head)| head);
     tracking
         .clone()
         .find(|b| b.is_head)
         .or_else(|| {
             tracking
                 .clone()
-                .find(|b| Some(b.name.short()) == usual_name)
+                .find(|b| Some(b.name.short()) == usual_name.as_deref())
         })
         .or_else(|| {
             let mut candidates = tracking;
@@ -1510,6 +1514,7 @@ mod tests {
 
         snap.remotes = vec![Remote {
             name: "origin".into(),
+            fetch_refspecs: Vec::new(),
             fetch_url: "https://example.com/r.git".into(),
             push_url: None,
         }];
