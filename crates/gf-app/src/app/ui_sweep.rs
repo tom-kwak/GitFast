@@ -1097,6 +1097,275 @@ async fn new_branch_defaults_to_head_and_can_use_the_selected_ref() {
 }
 
 #[tokio::test]
+async fn remote_checkout_selects_the_current_tracking_branch_without_switching() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["branch", "-m", "work/main"]);
+    })
+    .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Toggle(
+            sidebar::Section::Branches,
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Toggle(
+            sidebar::Section::Remotes,
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Filter(
+            "origin/main".into(),
+        )))
+        .await;
+    let _ = ui.click("main").await;
+    let fx = ui
+        .send(Message::Sidebar(sidebar::Message::Act(
+            sidebar::Action::Checkout,
+        )))
+        .await;
+
+    assert!(!fx.repo_changed);
+    assert!(ui.app.dialog.is_none());
+    assert_eq!(
+        ui.app.active_tab().expect("tab").history.revision(),
+        Some("refs/heads/work/main")
+    );
+    assert_eq!(
+        ui.fixture.repo.git(&["branch", "--show-current"]).trim(),
+        "work/main"
+    );
+    assert!(ui.targets().iter().any(|t| t.label == "main"));
+}
+
+#[tokio::test]
+async fn remote_checkout_selects_a_branch_checked_out_in_a_linked_worktree() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let path = folder.path().join("linked");
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&[
+            "worktree",
+            "add",
+            "-q",
+            path.to_str().expect("path"),
+            "feature",
+        ]);
+    })
+    .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/remotes/origin/feature".into()),
+        )))
+        .await;
+    let fx = ui
+        .send(Message::Sidebar(sidebar::Message::Act(
+            sidebar::Action::Checkout,
+        )))
+        .await;
+
+    assert!(!fx.repo_changed);
+    assert!(ui.app.dialog.is_none());
+    assert_eq!(
+        ui.app.active_tab().expect("tab").history.revision(),
+        Some("refs/heads/feature")
+    );
+    assert_eq!(
+        ui.fixture.repo.git(&["branch", "--show-current"]).trim(),
+        "main"
+    );
+}
+
+#[tokio::test]
+async fn remote_checkout_switches_to_an_existing_tracking_branch() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["reset", "--hard"]);
+        repo.git(&["clean", "-fd"]);
+    })
+    .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/remotes/origin/feature".into()),
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Act(
+            sidebar::Action::Checkout,
+        )))
+        .await;
+
+    assert!(ui.app.dialog.is_none());
+    assert_eq!(
+        ui.fixture.repo.git(&["branch", "--show-current"]).trim(),
+        "feature"
+    );
+}
+
+async fn checkout_fixture() -> Ui {
+    Ui::open_with(|repo| {
+        repo.git(&["reset", "--hard"]);
+        repo.git(&["clean", "-fd"]);
+        repo.git(&["branch", "other"]);
+    })
+    .await
+}
+
+fn selected_checkout() -> Message {
+    Message::Sidebar(sidebar::Message::Act(sidebar::Action::Checkout))
+}
+
+#[tokio::test]
+async fn refs_allows_browsing_but_blocks_checkout_until_the_new_snapshot() {
+    let mut ui = checkout_fixture().await;
+    let _ = ui.click("feature").await;
+    let switch = ui.app.update(selected_checkout());
+    assert!(ui.app.checkout_pending());
+    assert!(ui.shows("Switching…"), "target row shows progress");
+    assert_eq!(
+        ui.app.active_tab().expect("tab").head_label().as_deref(),
+        Some("main")
+    );
+
+    let _ = ui.click("other").await;
+    assert_eq!(
+        ui.app.active_tab().expect("tab").history.revision(),
+        Some("refs/heads/other")
+    );
+    let enter = ui
+        .send(Message::KeyInput(focus::KeyInput {
+            shortcut: Some(Shortcut::Enter),
+            menu: None,
+            nav: Some(Nav::plain(Key::Enter)),
+        }))
+        .await;
+    assert!(!enter.repo_changed, "Enter cannot launch a second switch");
+    let select = Message::Sidebar(sidebar::Message::Select(sidebar::Selection::Ref(
+        "refs/heads/other".into(),
+    )));
+    let double = ui.run(vec![select.clone(), select], false).await;
+    assert!(
+        !double.repo_changed,
+        "a double-click cannot launch a second switch"
+    );
+    let _ = ui.right_click("other").await;
+    assert!(ui.app.menu.is_some());
+    assert!(
+        !ui.shows("switch your files to it"),
+        "checkout is unavailable in the menu"
+    );
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    assert!(!ui.send(selected_checkout()).await.repo_changed);
+
+    let mut actions = runtime::task::into_stream(switch).expect("switch task");
+    let done = loop {
+        match actions.next().await.expect("switch completion") {
+            Action::Output(done @ Message::OpDone { .. }) => break done,
+            _ => continue,
+        }
+    };
+    assert_eq!(
+        ui.fixture.repo.git(&["branch", "--show-current"]).trim(),
+        "feature"
+    );
+    let tab = ui.app.active_tab_mut().expect("tab");
+    let id = tab.repo.id();
+    let previous = tab.snapshot.clone().expect("old snapshot");
+    tab.loading = true;
+    let _queued = ui.app.update(done);
+    assert!(
+        ui.app.checkout_pending(),
+        "git finished while the old read was in flight"
+    );
+
+    let refresh = ui.app.update(Message::Loaded(id, Ok(previous)));
+    assert!(
+        ui.app.checkout_pending(),
+        "the old read must not release the guard"
+    );
+    assert!(!ui.send(selected_checkout()).await.repo_changed);
+    let mut actions = runtime::task::into_stream(refresh).expect("post-checkout refresh");
+    let loaded = loop {
+        match actions.next().await.expect("snapshot completion") {
+            Action::Output(loaded @ Message::Loaded(..)) => break loaded,
+            _ => continue,
+        }
+    };
+    let _ = ui.send(loaded).await;
+    assert!(!ui.app.checkout_pending());
+    assert!(!ui.shows("Switching…"));
+    assert_eq!(
+        ui.app.active_tab().expect("tab").head_label().as_deref(),
+        Some("feature")
+    );
+    let _ = ui.send(selected_checkout()).await;
+    assert_eq!(
+        ui.fixture.repo.git(&["branch", "--show-current"]).trim(),
+        "other"
+    );
+}
+
+#[tokio::test]
+async fn closing_and_reopening_the_tab_does_not_drop_a_running_checkout() {
+    let mut ui = checkout_fixture().await;
+    let _ = ui.click("feature").await;
+    let task = ui.app.update(selected_checkout());
+    let original = ui.app.active_tab().expect("tab").repo.id();
+    let _ = ui.send(Message::Tabs(tabs::Message::Close(0))).await;
+    let other = Fixture::new();
+    let other_path = other.repo.path().to_path_buf();
+    ui.others.push(other);
+    let _ = ui.send(Message::Open(other_path)).await;
+    assert!(
+        !ui.app.checkout_pending(),
+        "other worktrees can still switch"
+    );
+    let _ = ui.send(Message::Open(ui.fixture.repo.path().into())).await;
+    assert_ne!(
+        ui.app.active_tab().expect("reopened tab").repo.id(),
+        original
+    );
+    assert!(ui.app.checkout_pending());
+
+    let mut actions = runtime::task::into_stream(task).expect("switch task");
+    let done = loop {
+        match actions.next().await.expect("switch completion") {
+            Action::Output(done @ Message::OpDone { .. }) => break done,
+            _ => continue,
+        }
+    };
+    let _ = ui.send(done).await;
+    assert!(!ui.app.checkout_pending());
+    let tab = ui.app.active_tab().expect("reopened tab");
+    assert_eq!(tab.head_label().as_deref(), Some("feature"));
+    assert!(
+        tab.undo.next(false).is_some(),
+        "the switch is still undoable"
+    );
+}
+
+#[tokio::test]
+async fn failed_checkout_clears_progress_and_allows_retry() {
+    let mut ui = checkout_fixture().await;
+    let _ = ui.click("feature").await;
+    let lock = ui.fixture.repo.path().join(".git/index.lock");
+    std::fs::File::create(&lock).expect("simulate another git process holding the lock");
+    let switch = ui.send(selected_checkout()).await;
+    assert!(!switch.timed_out);
+    assert!(!ui.app.checkout_pending());
+    assert!(!ui.shows("Switching…"));
+    assert!(ui.app.dialog.is_some(), "Git's error is shown");
+    assert_eq!(
+        ui.fixture.repo.git(&["branch", "--show-current"]).trim(),
+        "main"
+    );
+    std::fs::remove_file(lock).expect("release the fixture lock");
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    let _ = ui.send(selected_checkout()).await;
+    assert_eq!(
+        ui.fixture.repo.git(&["branch", "--show-current"]).trim(),
+        "feature"
+    );
+}
+
+#[tokio::test]
 async fn removing_a_worktree_closes_its_open_tab() {
     let mut ui = Ui::open().await;
     let folder = tempfile::tempdir().expect("worktree parent");

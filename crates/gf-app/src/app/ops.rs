@@ -1,6 +1,7 @@
 //! Running git work for the UI: loading data, generic operations with
 //! result reporting, and network operations with progress and cancel.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use iced::Task;
 use iced::futures::SinkExt;
 
 use super::dialogs::{Confirm, Purpose};
-use super::{App, Message, OpKind};
+use super::{App, Checkout, CheckoutPhase, Message, OpKind};
 use crate::features::command_log::NoteKind;
 use crate::features::dialog::Dialog;
 use crate::features::diff_view::DiffSource;
@@ -26,7 +27,13 @@ use gf_git::{Capture, HeadMode, Scope};
 /// from the last snapshot, so a load finishing after a newer one would put
 /// old parts back. Only [`App::load_due`] calls this; everything else
 /// queues parts with [`App::request_parts`].
-fn load_snapshot(tab: &mut RepoTab) -> Task<Message> {
+fn load_snapshot(tab: &mut RepoTab, checkouts: &mut HashMap<PathBuf, Checkout>) -> Task<Message> {
+    // A read already in flight when git finished cannot release the checkout guard.
+    if let Some(checkout) = checkouts.get_mut(&tab.repo.handle().git_dir)
+        && checkout.phase == CheckoutPhase::RefreshQueued
+    {
+        checkout.phase = CheckoutPhase::Refreshing(tab.repo.id());
+    }
     let parts = std::mem::take(&mut tab.queued);
     tab.loading_touched = std::mem::take(&mut tab.touched);
     tab.loading = true;
@@ -151,7 +158,7 @@ impl App {
         if let Some(tab) = self.tabs.get_mut(active)
             && tab.load_due(true)
         {
-            tasks.push(load_snapshot(tab));
+            tasks.push(load_snapshot(tab, &mut self.checkouts));
         }
         busy |= self.tabs.iter().any(|t| t.loading);
         for (i, tab) in self.tabs.iter_mut().enumerate() {
@@ -164,7 +171,7 @@ impl App {
                 }
                 busy = true;
             }
-            tasks.push(load_snapshot(tab));
+            tasks.push(load_snapshot(tab, &mut self.checkouts));
         }
         Task::batch(tasks)
     }
@@ -209,6 +216,14 @@ impl App {
         id: RepoId,
         result: Result<Arc<Snapshot>, String>,
     ) -> Task<Message> {
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.repo.id() == id)
+            && self
+                .checkouts
+                .get(&tab.repo.handle().git_dir)
+                .is_some_and(|c| c.phase == CheckoutPhase::Refreshing(id))
+        {
+            self.checkouts.remove(&tab.repo.handle().git_dir);
+        }
         let Some(tab) = self.tab_mut(id) else {
             return Task::none();
         };
@@ -462,6 +477,44 @@ impl App {
         Task::run(stream, |m| m)
     }
 
+    pub(super) fn checkout_pending(&self) -> bool {
+        self.active_tab()
+            .is_some_and(|tab| self.checkouts.contains_key(&tab.repo.handle().git_dir))
+    }
+
+    /// Reserve the worktree before launching any part of the switch.
+    pub(super) fn begin_checkout(
+        &mut self,
+        target: String,
+        phase: CheckoutPhase,
+    ) -> Option<PathBuf> {
+        let git_dir = self.active_tab()?.repo.handle().git_dir.clone();
+        let std::collections::hash_map::Entry::Vacant(entry) =
+            self.checkouts.entry(git_dir.clone())
+        else {
+            return None;
+        };
+        entry.insert(Checkout { target, phase });
+        Some(git_dir)
+    }
+
+    pub(super) fn checkout_op<F, Fut>(
+        &mut self,
+        target: String,
+        label: impl Into<String>,
+        record: Record,
+        f: F,
+    ) -> Task<Message>
+    where
+        F: FnOnce(Repository) -> Fut,
+        Fut: Future<Output = gf_core::Result<()>> + Send + 'static,
+    {
+        let Some(git_dir) = self.begin_checkout(target, CheckoutPhase::Running) else {
+            return Task::none();
+        };
+        self.op_recorded(label, OpKind::Checkout(git_dir), Some(record), f)
+    }
+
     pub(super) fn on_op_done(
         &mut self,
         id: RepoId,
@@ -472,6 +525,15 @@ impl App {
     ) -> Task<Message> {
         if matches!(kind, OpKind::Fetch | OpKind::Push { .. } | OpKind::Pull) {
             self.sync = None;
+        }
+        if let OpKind::Checkout(git_dir) = &kind {
+            if result.is_ok() && self.tabs.iter().any(|tab| tab.repo.id() == id) {
+                if let Some(checkout) = self.checkouts.get_mut(git_dir) {
+                    checkout.phase = CheckoutPhase::RefreshQueued;
+                }
+            } else {
+                self.checkouts.remove(git_dir);
+            }
         }
         let mut tasks = vec![self.request_refresh(id)];
         if let OpKind::Undo { redo } = kind {

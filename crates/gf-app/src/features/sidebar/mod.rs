@@ -354,6 +354,34 @@ impl State {
         self.selected = None;
     }
 
+    /// Select and reveal the local branch that already has the remote checked out.
+    pub fn select_local_branch(
+        &mut self,
+        branch: &Branch,
+        snap: &Snapshot,
+        t: &Tokens,
+    ) -> iced::Task<Message> {
+        let full = branch.name.as_str();
+        let short = branch.name.short();
+        self.selected = Some(Selection::Ref(full.to_owned()));
+        self.cursor = None;
+        self.last_click = None;
+        self.collapsed.remove(&Section::Branches);
+        if !self.matches(short) {
+            self.filter.clear();
+        }
+        for (slash, _) in short.match_indices('/') {
+            self.folded
+                .remove(&(Section::Branches, short[..slash].to_owned()));
+        }
+        self.rows(snap)
+            .iter()
+            .position(|row| matches!(row, SideRow::Branch(b, _) if b.name.as_str() == full))
+            .map_or_else(iced::Task::none, |row| {
+                nav::reveal(LIST_ID, self.scroll, row, row_height(t))
+            })
+    }
+
     fn matches(&self, name: &str) -> bool {
         self.filter.is_empty() || name.to_lowercase().contains(&self.filter.to_lowercase())
     }
@@ -685,7 +713,13 @@ impl State {
         )
     }
 
-    fn branch_row<'a>(&self, t: &'a Tokens, b: &'a Branch, depth: usize) -> Element<'a, Message> {
+    fn branch_row<'a>(
+        &self,
+        t: &'a Tokens,
+        b: &'a Branch,
+        depth: usize,
+        switching: Option<&'a str>,
+    ) -> Element<'a, Message> {
         let full = b.name.as_str();
         // Inside folders only the last part of the name is shown.
         let short = b.name.short();
@@ -710,6 +744,11 @@ impl State {
             colored(t, leaf, name_color).wrapping(Wrapping::None)
         ]
         .spacing(6);
+        if let Some(frame) = switching {
+            line = line.push(
+                colored(t, format!("{frame} Switching…"), t.warning()).wrapping(Wrapping::None),
+            );
+        }
         if let Some(up) = &b.upstream {
             if up.gone {
                 line = line.push(colored(t, "⚠ gone", t.warning()));
@@ -1215,6 +1254,21 @@ impl Feature for State {
     }
 
     fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
+        self.view_with_checkout(cx, None)
+    }
+}
+
+impl State {
+    pub fn view_with_checkout<'a>(
+        &'a self,
+        cx: Cx<'a>,
+        checkout: Option<(&'a str, &'a str)>,
+    ) -> Element<'a, Message> {
+        let progress = move |branch: &Branch| {
+            checkout
+                .filter(|(target, _)| *target == branch.name.as_str())
+                .map(|(_, frame)| frame)
+        };
         let t = cx.tokens;
         let filter = text_input("filter refs…  ·  right-click for actions", &self.filter)
             .id(REFS_FILTER_ID)
@@ -1236,7 +1290,16 @@ impl Feature for State {
         let name_cols = rows
             .iter()
             .map(|r| match r {
-                SideRow::Branch(b, d) => columns(b.name.short()) + 12 + d * 2,
+                SideRow::Branch(b, d) => {
+                    columns(b.name.short())
+                        + 12
+                        + d * 2
+                        + if progress(b).is_some() {
+                            columns("   Switching…")
+                        } else {
+                            0
+                        }
+                }
                 SideRow::Folder { path, depth, .. } => columns(path) + 12 + depth * 2,
                 SideRow::Tag(tg) => columns(tg.name.short()),
                 SideRow::Stash(s) => columns(&s.message),
@@ -1267,7 +1330,7 @@ impl Feature for State {
                         depth,
                         count,
                     } => self.folder_row(t, section, path, depth, count),
-                    SideRow::Branch(b, depth) => self.branch_row(t, b, depth),
+                    SideRow::Branch(b, depth) => self.branch_row(t, b, depth, progress(b)),
                     SideRow::Tag(tg) => self.tag_row(t, tg),
                     SideRow::Stash(s) => self.stash_row(t, s),
                     SideRow::Worktree(w) => self.worktree_row(t, w),
