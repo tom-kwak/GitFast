@@ -96,6 +96,10 @@ pub enum Shortcut {
     Enter,
     /// ⌘[ / ⌘]: HISTORY / WORKING TREE mode of the main area.
     CodeView(diff_view::Role),
+    FindInFile,
+    FindMatch {
+        back: bool,
+    },
     /// ⌘C outside text fields: the selected diff lines.
     Copy,
     /// ⌘A outside text fields: every line of the diff in focus.
@@ -1476,7 +1480,7 @@ impl App {
                 }
                 Task::none()
             }
-            Shortcut::Enter => Task::none(),
+            Shortcut::Enter | Shortcut::FindInFile | Shortcut::FindMatch { .. } => Task::none(),
             Shortcut::CodeView(role) => self.update(Message::CodeView(role)),
             Shortcut::Copy => self.copy_diff_selection(),
             Shortcut::SelectAll => {
@@ -2021,6 +2025,10 @@ fn shortcut(
             // Only when no text widget used them for its own text.
             'c' if !edit => Shortcut::Copy,
             'a' if !edit => Shortcut::SelectAll,
+            'f' if !modifiers.shift() && !modifiers.alt() => Shortcut::FindInFile,
+            'g' | 'G' if !modifiers.alt() => Shortcut::FindMatch {
+                back: modifiers.shift(),
+            },
             'o' => Shortcut::Open,
             'z' | 'Z' if modifiers.shift() => Shortcut::Redo,
             'z' => Shortcut::Undo,
