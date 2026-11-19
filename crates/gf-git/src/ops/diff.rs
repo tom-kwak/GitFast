@@ -1,10 +1,19 @@
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use gf_core::Result;
 use gf_core::model::{FileDiff, Oid};
 
 use crate::backend::{CliBackend, DiffOps};
 use crate::cli::parse::diff::{DIFF_FORMAT_ARGS, parse_diff};
+
+/// Which version supplies the contents of a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileVersion {
+    WorkTree,
+    Index,
+    Revision(String),
+}
 
 /// Which two states to compare.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +41,46 @@ pub struct DiffOptions {
 }
 
 impl DiffOps for CliBackend {
+    async fn file_bytes(&self, path: &Path, version: &FileVersion) -> Result<Vec<u8>> {
+        if matches!(version, FileVersion::WorkTree) {
+            if path.as_os_str().is_empty()
+                || !path
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err(gf_core::GfError::Other(
+                    "expected a repository-relative file path".into(),
+                ));
+            }
+            let full = self.cwd().join(path);
+            let kind = tokio::fs::symlink_metadata(&full).await?.file_type();
+            if kind.is_symlink() {
+                return Ok(tokio::fs::read_link(full)
+                    .await?
+                    .into_os_string()
+                    .into_encoded_bytes());
+            }
+            if !kind.is_file() {
+                return Err(gf_core::GfError::Unsupported(
+                    "preview requires a regular file",
+                ));
+            }
+            return Ok(tokio::fs::read(full).await?);
+        }
+        let mut object = if let FileVersion::Revision(rev) = version {
+            let mut object = OsString::from(rev);
+            object.push(":");
+            object
+        } else {
+            // An explicit stage keeps a path starting with `1:` from
+            // being interpreted as an index stage selector.
+            OsString::from(":0:")
+        };
+        object.push(path);
+        self.read(self.command(["cat-file", "blob", "--"]).arg(object))
+            .await
+    }
+
     async fn diff(&self, target: &DiffTarget, opts: &DiffOptions) -> Result<Vec<FileDiff>> {
         if let DiffTarget::Untracked(path) = target {
             return self.diff_untracked(path).await;

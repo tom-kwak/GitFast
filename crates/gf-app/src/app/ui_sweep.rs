@@ -480,6 +480,7 @@ fn reselect(messages: &[String]) -> bool {
         "CommitDiff(SelectFile(",
         "LocalDiff(SelectFile(",
         "Blame(Select(",
+        "CodeDialog(Pressed(",
     ];
     messages.len() == 1 && picks.iter().any(|p| messages[0].starts_with(p))
 }
@@ -653,6 +654,8 @@ fn modal(app: &App) -> Option<&'static str> {
         Some("dialog")
     } else if app.menu.is_some() {
         Some("menu")
+    } else if app.code_dialog.is_some() {
+        Some("code dialog")
     } else if app.settings_open {
         Some("settings")
     } else if app.picker.is_some() {
@@ -837,6 +840,115 @@ async fn a_txt_shown() -> Ui {
         )))
         .await;
     ui
+}
+
+#[tokio::test]
+async fn view_file_opens_from_changes_and_copies_code_without_editing_the_repo() {
+    let mut ui = a_txt_shown().await;
+    let opened = ui.click("[ View file ]").await;
+    assert!(!opened.repo_changed);
+    assert!(ui.app.code_dialog.is_some());
+    assert!(ui.shows("FILE CONTENTS"));
+    let mut first_line = ui
+        .targets()
+        .into_iter()
+        .find(|t| t.label == "  1")
+        .expect("first line");
+    first_line.at.x += ui.app.tokens.cols(5);
+    let _ = ui.click_at(&first_line, mouse::Button::Left).await;
+    assert!(
+        ui.app.code_dialog.is_some(),
+        "clicks stay inside the dialog"
+    );
+    let selected = ui
+        .send(Message::KeyInput(focus::KeyInput {
+            shortcut: Some(Shortcut::SelectAll),
+            menu: None,
+            nav: None,
+        }))
+        .await;
+    assert!(selected.state_changed);
+    let copied = ui.click("[ Copy ⌘C ]").await;
+    assert_eq!(copied.clipboard, 1);
+    assert!(!copied.repo_changed);
+    let _ = ui
+        .send(Message::KeyInput(focus::KeyInput {
+            shortcut: Some(Shortcut::Escape),
+            menu: None,
+            nav: None,
+        }))
+        .await;
+    assert!(ui.app.code_dialog.is_none());
+
+    let _ = ui.right_click("a.txt").await;
+    assert!(ui.app.menu.is_some());
+    let _ = ui
+        .send(Message::KeyInput(focus::KeyInput {
+            shortcut: None,
+            menu: Some(context_menu::Key::Char('v')),
+            nav: None,
+        }))
+        .await;
+    assert!(ui.app.menu.is_none());
+    assert!(ui.app.code_dialog.is_some());
+    let _ = ui.click("[ Close Esc ]").await;
+    assert!(ui.app.code_dialog.is_none());
+}
+
+#[tokio::test]
+async fn view_file_loads_the_version_for_each_changes_group() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            r.write("a.txt", "staged version\n");
+            r.git(&["add", "--", "a.txt"]);
+            if cfg!(unix) {
+                r.write("1:staged.txt", "literal index path\n");
+                r.git(&["add", "--", "1:staged.txt"]);
+            }
+            r.write("a.txt", "worktree version\n");
+            r.write("worktree-deleted.txt", "indexed before deletion\n");
+            r.git(&["add", "--", "worktree-deleted.txt"]);
+            std::fs::remove_file(r.path().join("worktree-deleted.txt")).expect("remove file");
+            r.git(&["rm", "--", "src/lib.rs"]);
+        })
+        .await,
+    )
+    .await;
+    for (path, group, line) in [
+        ("a.txt", changes::Group::Staged, "staged version"),
+        ("1:staged.txt", changes::Group::Staged, "literal index path"),
+        ("a.txt", changes::Group::Unstaged, "worktree version"),
+        ("c.txt", changes::Group::Untracked, "untracked"),
+        (
+            "worktree-deleted.txt",
+            changes::Group::Unstaged,
+            "indexed before deletion",
+        ),
+        ("src/lib.rs", changes::Group::Staged, "println!"),
+    ] {
+        if !cfg!(unix) && path == "1:staged.txt" {
+            continue;
+        }
+        let opened = ui
+            .send(Message::Changes(changes::Message::ViewFile(
+                path.into(),
+                group,
+            )))
+            .await;
+        assert!(!opened.repo_changed);
+        assert!(ui.app.code_dialog.is_some());
+        assert!(ui.shows("  1"), "{path} should have a code gutter");
+        let viewer = ui.app.code_dialog.as_mut().expect("file dialog");
+        let _ = viewer.update(code_view::Message::SelectAll);
+        let copied = viewer.update(code_view::Message::Copy).output;
+        assert!(
+            matches!(copied, Some(code_view::Output::Copy(text)) if text.contains(line)),
+            "{path} in {group:?} should contain {line:?}"
+        );
+        let _ = ui
+            .send(Message::CodeDialog(code_view::Message::Close))
+            .await;
+    }
 }
 
 #[tokio::test]

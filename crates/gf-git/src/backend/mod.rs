@@ -32,7 +32,7 @@ use crate::ops::bisect::{BisectProgress, Verdict};
 use crate::ops::blame::BlameLine;
 use crate::ops::commit::CommitOptions;
 use crate::ops::conflict::Side;
-use crate::ops::diff::{DiffOptions, DiffTarget};
+use crate::ops::diff::{DiffOptions, DiffTarget, FileVersion};
 use crate::ops::integrate::{Integration, MergeStyle};
 use crate::ops::lfs::LfsFile;
 use crate::ops::log::LogQuery;
@@ -147,6 +147,13 @@ pub trait ConflictOps {
 
 /// Diffs and per-file line counts.
 pub trait DiffOps {
+    /// Reads the full file from the requested version.
+    fn file_bytes(
+        &self,
+        path: &Path,
+        version: &FileVersion,
+    ) -> impl Future<Output = Result<Vec<u8>>> + Send;
+
     fn diff(
         &self,
         target: &DiffTarget,

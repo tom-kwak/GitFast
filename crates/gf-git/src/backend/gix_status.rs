@@ -9,7 +9,7 @@
 //! a hot path.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gf_core::Result;
 use gf_core::model::{
@@ -30,7 +30,7 @@ use super::gix_backend::{err, head_id, oid, text, unsupported, upstream};
 use super::{DiffOps, GixBackend, StatusOps};
 use crate::cli::parse::bytes_to_path;
 use crate::cli::parse::numstat::LineCounts;
-use crate::ops::diff::{DiffOptions, DiffTarget};
+use crate::ops::diff::{DiffOptions, DiffTarget, FileVersion};
 
 fn path(p: &BStr) -> PathBuf {
     bytes_to_path(p.as_bytes())
@@ -478,6 +478,10 @@ impl StatusOps for GixBackend {
 }
 
 impl DiffOps for GixBackend {
+    async fn file_bytes(&self, _path: &Path, _version: &FileVersion) -> Result<Vec<u8>> {
+        unsupported("full file contents")
+    }
+
     async fn diff(&self, _target: &DiffTarget, _opts: &DiffOptions) -> Result<Vec<FileDiff>> {
         unsupported("diff hunks")
     }

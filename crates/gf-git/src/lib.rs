@@ -29,7 +29,7 @@ pub use ops::blame::BlameLine;
 pub use ops::branch::{left_on, left_on_branch, switch_blockers};
 pub use ops::commit::CommitOptions;
 pub use ops::conflict::Side;
-pub use ops::diff::{DiffOptions, DiffTarget};
+pub use ops::diff::{DiffOptions, DiffTarget, FileVersion};
 pub use ops::integrate::{Integration, MergeStyle};
 pub use ops::lfs::LfsFile;
 pub use ops::log::{LogOrder, LogQuery};

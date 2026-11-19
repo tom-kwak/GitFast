@@ -21,7 +21,7 @@ use crate::ops::bisect::{BisectProgress, Verdict};
 use crate::ops::blame::BlameLine;
 use crate::ops::commit::CommitOptions;
 use crate::ops::conflict::Side;
-use crate::ops::diff::{DiffOptions, DiffTarget};
+use crate::ops::diff::{DiffOptions, DiffTarget, FileVersion};
 use crate::ops::integrate::{Integration, MergeStyle};
 use crate::ops::lfs::LfsFile;
 use crate::ops::log::LogQuery;
@@ -231,6 +231,11 @@ impl Repository {
     }
 
     // ---- DiffOps
+    /// Reads the full file from the requested version.
+    pub async fn file_bytes(&self, path: &Path, version: &FileVersion) -> Result<Vec<u8>> {
+        DiffOps::file_bytes(&self.cli, path, version).await
+    }
+
     pub async fn diff(&self, target: &DiffTarget, opts: &DiffOptions) -> Result<Vec<FileDiff>> {
         DiffOps::diff(&self.cli, target, opts).await
     }

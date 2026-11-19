@@ -44,6 +44,7 @@ use iced::{
 
 use self::dialogs::Purpose;
 use crate::feature::{Cx, Feature, Update};
+use crate::features::code_view;
 use crate::features::command_log::NoteKind;
 use crate::features::context_menu;
 use crate::features::dialog::{self, Dialog};
@@ -144,6 +145,7 @@ pub enum Message {
     CodeView(diff_view::Role),
     Commit(commit_box::Message),
     Dialog(dialog::Message),
+    CodeDialog(code_view::Message),
     Picker(repo_picker::Message),
     Switcher(tab_switcher::Message),
     TabList(tab_list::Message),
@@ -286,6 +288,8 @@ pub struct App {
     prompt: prompt::State,
     log: command_log::State,
     dialog: Option<Dialog<Purpose>>,
+    code_dialog: Option<code_view::State>,
+    code_dialog_request: u64,
     settings_open: bool,
     /// Open-repository window (modal, under a confirmation it asks for).
     picker: Option<repo_picker::State>,
@@ -381,6 +385,8 @@ impl App {
             prompt: prompt::State::default(),
             log: command_log::State::default(),
             dialog: None,
+            code_dialog: None,
+            code_dialog_request: 0,
             settings_open: false,
             picker: None,
             mru: tab_switcher::Mru::default(),
@@ -512,12 +518,17 @@ impl App {
             }
             Message::TabList(m) => self.on_tab_list(m),
             Message::Settings(m) => self.on_settings(m),
+            Message::CodeDialog(m) => self.on_code_view(m),
             Message::Switcher(tab_switcher::Message::Pick(i)) => {
                 self.switcher = None;
                 self.select_tab(i)
             }
             // Keys belong to the open menu or settings.
-            Message::Prompt(_) if self.menu.is_some() || self.settings_open => Task::none(),
+            Message::Prompt(_)
+                if self.menu.is_some() || self.settings_open || self.code_dialog.is_some() =>
+            {
+                Task::none()
+            }
             // ⌘O must open a folder, not type "o" into the prompt.
             Message::Prompt(prompt::Message::Input(_)) if self.modifiers.command() => Task::none(),
             Message::Prompt(m) => {
@@ -1251,8 +1262,9 @@ impl App {
             context_menu::Outcome::None => Task::none(),
             context_menu::Outcome::Close => self.close_menu(),
             context_menu::Outcome::Run(m) => {
-                let refocus = self.close_menu();
-                Task::batch([refocus, self.update(m)])
+                self.menu = None;
+                let action = self.update(m);
+                Task::batch([self.restore_focus(), action])
             }
         }
     }
@@ -1497,6 +1509,10 @@ impl App {
         let modal: Option<Element<'_, Message>> =
             match (&self.dialog, &self.picker, self.rebase_editor()) {
                 (Some(d), _, _) => Some(d.view(t).map(Message::Dialog)),
+                _ if self.code_dialog.is_some() => self
+                    .code_dialog
+                    .as_ref()
+                    .map(|code| code.view(cx).map(Message::CodeDialog)),
                 _ if self.settings_open => Some(settings_view::view(t).map(Message::Settings)),
                 (None, Some(p), _) => Some(p.view(cx).map(Message::Picker)),
                 _ if self.switcher.is_some() => Some(
@@ -1512,7 +1528,8 @@ impl App {
                 (None, None, None) => None,
             };
         // Clicking the shade around the open window closes it.
-        let close_on_shade = self.dialog.is_none() && self.picker.is_some();
+        let close_on_shade =
+            self.dialog.is_none() && self.code_dialog.is_none() && self.picker.is_some();
         // The layer structure never changes: switching the root between
         // `base` and `stack![base, …]` would rebuild the widget tree and
         // reset every scroll position (lists jumped to the top whenever a

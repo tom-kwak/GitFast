@@ -4,6 +4,7 @@
 
 pub mod blame_view;
 pub mod changes;
+pub mod code_view;
 pub mod command_log;
 pub mod commit_box;
 pub mod conflict_view;
