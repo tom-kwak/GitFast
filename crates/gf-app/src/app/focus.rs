@@ -133,13 +133,31 @@ impl App {
         {
             use crate::features::code_view::Message as Code;
             let action = match k.shortcut {
+                Some(Shortcut::FindInFile) => Some(Code::FindOpen),
+                Some(Shortcut::Escape) if viewer.find_is_open() => Some(Code::FindClose),
                 Some(Shortcut::Escape) => Some(Code::Close),
+                Some(Shortcut::FindMatch { back }) if viewer.find_is_open() => {
+                    Some(Code::FindMove { back })
+                }
                 Some(Shortcut::Copy) => Some(Code::Copy),
                 Some(Shortcut::SelectAll) => Some(Code::SelectAll),
                 _ => None,
             };
             if let Some(action) = action {
                 return self.on_code_view(action);
+            }
+            if let Some(nav) = k.nav
+                && nav.key == Key::Enter
+                && viewer.find_is_open()
+            {
+                return self.on_code_view(Code::FindMove { back: nav.shift });
+            }
+            if self
+                .pointer
+                .field_at_key()
+                .is(crate::features::code_view::find::FIELD_ID)
+            {
+                return Task::none();
             }
             return k.nav.map_or_else(Task::none, |nav| {
                 viewer

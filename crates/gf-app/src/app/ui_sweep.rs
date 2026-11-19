@@ -1222,6 +1222,74 @@ async fn local_view_shows_removed_lines_but_copies_the_current_file() {
 }
 
 #[tokio::test]
+async fn file_find_searches_removed_text_and_both_comparison_panes() {
+    let mut ui = a_txt_shown().await;
+    let _ = ui.click("[ View ]").await;
+    let press = |key: keyboard::Key, code, modifiers| {
+        global_event(
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: keyboard::key::Physical::Code(code),
+                modifiers,
+                text: None,
+                location: keyboard::Location::Standard,
+                repeat: false,
+            }),
+            event::Status::Ignored,
+            window::Id::unique(),
+        )
+        .expect("file search key")
+    };
+    use keyboard::Modifiers as Mods;
+    use keyboard::key::{Code, Key, Named};
+    let open = || press(Key::Character("ㄹ".into()), Code::KeyF, Mods::COMMAND);
+    let escape = || press(Key::Named(Named::Escape), Code::Escape, Mods::empty());
+    let next = || press(Key::Named(Named::Enter), Code::Enter, Mods::empty());
+    let previous = || press(Key::Named(Named::Enter), Code::Enter, Mods::SHIFT);
+    let command_next = || press(Key::Character("ㅎ".into()), Code::KeyG, Mods::COMMAND);
+    let opened = ui.send(open()).await;
+    assert!(
+        ui.app
+            .code_dialog
+            .as_ref()
+            .is_some_and(code_view::State::find_is_open)
+    );
+    assert_eq!(opened.widget_ops, 2);
+    let find = |query: &str| Message::CodeDialog(code_view::Message::FindQuery(query.into()));
+    let removed = ui.send(find("THREE")).await;
+    assert!(ui.shows("1 of 1"));
+    assert_eq!(removed.widget_ops, 1);
+    let _ = ui.send(find("ONE")).await;
+    assert!(ui.shows("1 of 1"));
+
+    let split = ui.click("[ Side by side ]").await;
+    assert!(!split.repo_changed);
+    assert!(ui.shows("1 of 2"));
+    let _ = ui.send(previous()).await;
+    assert!(ui.shows("2 of 2"));
+    let _ = ui.send(next()).await;
+    assert!(ui.shows("1 of 2"));
+    let _ = ui.send(command_next()).await;
+    assert!(ui.shows("2 of 2"));
+    let _ = ui.send(find("changed")).await;
+    assert!(ui.shows("1 of 1"));
+    let _ = ui.send(find("THREE")).await;
+    assert!(ui.shows("1 of 1"));
+    let _ = ui.send(find("absent")).await;
+    assert!(ui.shows("0 of 0"));
+
+    let _ = ui.send(escape()).await;
+    assert!(ui.app.code_dialog.is_some());
+    assert!(!ui.shows("0 of 0"));
+    let _ = ui.send(open()).await;
+    assert!(ui.shows("0 of 0"), "a reopened search keeps its query");
+    let _ = ui.send(escape()).await;
+    let _ = ui.send(escape()).await;
+    assert!(ui.app.code_dialog.is_none());
+}
+
+#[tokio::test]
 async fn side_by_side_aligns_replacements_and_copies_the_selected_side() {
     let mut ui = working_tree(
         Ui::open_with(|r| {
