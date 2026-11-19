@@ -1,8 +1,9 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use gf_core::Result;
 use gf_core::model::{FileDiff, Oid};
+use gf_core::{GfError, Result};
+use tokio::io::AsyncReadExt;
 
 use crate::backend::{CliBackend, DiffOps};
 use crate::cli::parse::diff::{DIFF_FORMAT_ARGS, parse_diff};
@@ -13,6 +14,16 @@ pub enum FileVersion {
     WorkTree,
     Index,
     Revision(String),
+}
+
+/// Maximum size of a complete file preview across all file versions.
+pub const FILE_PREVIEW_LIMIT: usize = 2 * 1024 * 1024;
+
+fn checked_preview(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    if bytes.len() > FILE_PREVIEW_LIMIT {
+        return Err(GfError::FilePreviewTooLarge);
+    }
+    Ok(bytes)
 }
 
 /// Which two states to compare.
@@ -55,17 +66,28 @@ impl DiffOps for CliBackend {
             let full = self.cwd().join(path);
             let kind = tokio::fs::symlink_metadata(&full).await?.file_type();
             if kind.is_symlink() {
-                return Ok(tokio::fs::read_link(full)
-                    .await?
-                    .into_os_string()
-                    .into_encoded_bytes());
+                return checked_preview(
+                    tokio::fs::read_link(full)
+                        .await?
+                        .into_os_string()
+                        .into_encoded_bytes(),
+                );
             }
             if !kind.is_file() {
                 return Err(gf_core::GfError::Unsupported(
                     "preview requires a regular file",
                 ));
             }
-            return Ok(tokio::fs::read(full).await?);
+            let file = tokio::fs::File::open(full).await?;
+            if file.metadata().await?.len() > FILE_PREVIEW_LIMIT as u64 {
+                return Err(GfError::FilePreviewTooLarge);
+            }
+            // The file may grow after the metadata check.
+            let mut bytes = Vec::new();
+            file.take(FILE_PREVIEW_LIMIT as u64 + 1)
+                .read_to_end(&mut bytes)
+                .await?;
+            return checked_preview(bytes);
         }
         let mut object = if let FileVersion::Revision(rev) = version {
             let mut object = OsString::from(rev);
@@ -77,8 +99,42 @@ impl DiffOps for CliBackend {
             OsString::from(":0:")
         };
         object.push(path);
-        self.read(self.command(["cat-file", "blob", "--"]).arg(object))
-            .await
+        // Resolve the mutable revision or index entry once. Both subsequent
+        // commands address the same immutable object, even during a checkout.
+        let output = self
+            .read(
+                self.command(["rev-parse", "--verify", "--end-of-options"])
+                    .arg(object),
+            )
+            .await?;
+        let oid: Oid = String::from_utf8_lossy(&output).trim().parse()?;
+        // Inspect and read the stored blob without replace refs, which can
+        // change the object behind this ID between the two commands.
+        let metadata = self
+            .read(
+                self.command([
+                    "--no-replace-objects",
+                    "cat-file",
+                    "--batch-check=%(objecttype) %(objectsize)",
+                ])
+                .stdin(format!("{oid}\n").into_bytes()),
+            )
+            .await?;
+        let metadata = String::from_utf8_lossy(&metadata);
+        let Some(size) = metadata.trim().strip_prefix("blob ") else {
+            return Err(GfError::Unsupported("preview requires a Git blob"));
+        };
+        let size: u64 = size
+            .parse()
+            .map_err(|_| GfError::parse("cat-file object size", size))?;
+        if size > FILE_PREVIEW_LIMIT as u64 {
+            return Err(GfError::FilePreviewTooLarge);
+        }
+        self.read(
+            self.command(["--no-replace-objects", "cat-file", "blob", "--"])
+                .arg(oid.as_str()),
+        )
+        .await
     }
 
     async fn diff(&self, target: &DiffTarget, opts: &DiffOptions) -> Result<Vec<FileDiff>> {

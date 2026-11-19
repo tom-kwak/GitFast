@@ -1414,6 +1414,8 @@ dependencies = [
  "gf-core",
  "gf-test-support",
  "gix",
+ "gix-hash",
+ "gix-refspec",
  "serde",
  "tempfile",
  "tokio",

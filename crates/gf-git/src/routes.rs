@@ -189,7 +189,11 @@ impl Repository {
     }
     /// Deletes several local branches with normal Git merge and worktree checks.
     pub async fn delete_branches(&self, names: &[String], force: bool) -> Result<()> {
-        BranchOps::delete_branches(&self.cli, names, force).await
+        if let [name] = names {
+            self.delete_branch(name, force).await
+        } else {
+            BranchOps::delete_branches(&self.cli, names, force).await
+        }
     }
 
     pub async fn rename_branch(&self, old: &str, new: &str) -> Result<()> {
@@ -241,7 +245,7 @@ impl Repository {
     }
 
     // ---- DiffOps
-    /// Reads the full file from the requested version.
+    /// Reads the full file from the requested version, up to the preview size limit.
     pub async fn file_bytes(&self, path: &Path, version: &FileVersion) -> Result<Vec<u8>> {
         DiffOps::file_bytes(&self.cli, path, version).await
     }

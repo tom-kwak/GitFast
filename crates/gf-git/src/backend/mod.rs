@@ -161,7 +161,7 @@ pub trait ConflictOps {
 
 /// Diffs and per-file line counts.
 pub trait DiffOps {
-    /// Reads the full file from the requested version.
+    /// Reads the full file from the requested version, up to the preview size limit.
     fn file_bytes(
         &self,
         path: &Path,

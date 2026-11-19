@@ -9,8 +9,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use gf_core::GfError;
 use gf_core::model::{FileChange, FileDiff, LineKind};
-use gf_git::{FileVersion, Repository};
+use gf_git::{FILE_PREVIEW_LIMIT, FileVersion, Repository};
 use iced::advanced::mouse::{Click, click};
 use iced::mouse::Button;
 use iced::widget::{button, column, container, row};
@@ -31,6 +32,7 @@ const BEFORE_LIST: &str = "gf-code-before";
 const AFTER_LIST: &str = "gf-code-after";
 const COMPARE_GUTTER: &str = "gf-code-compare-gutter";
 const COMPARE_LISTS: [&str; 3] = [BEFORE_LIST, COMPARE_GUTTER, AFTER_LIST];
+const MAX_LINE_BYTES: usize = 16 * 1024;
 const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
 const MAX_HIGHLIGHT_LINES: usize = 20_000;
 
@@ -38,6 +40,8 @@ const MAX_HIGHLIGHT_LINES: usize = 20_000;
 pub enum Document {
     Text(Code),
     Binary,
+    TooLarge,
+    LongLine,
 }
 
 #[derive(Debug)]
@@ -95,6 +99,9 @@ impl Document {
         let Ok(text) = String::from_utf8(bytes) else {
             return Self::Binary;
         };
+        if text.split('\n').any(|line| line.len() > MAX_LINE_BYTES) {
+            return Self::LongLine;
+        }
         let mut offset = 0;
         let mut widest = 0;
         let lines: Vec<_> = text
@@ -300,7 +307,7 @@ impl State {
     fn code(&self) -> Option<&Code> {
         match self.loaded.as_ref()?.as_ref().ok()?.as_ref() {
             Document::Text(code) => Some(code),
-            Document::Binary => None,
+            Document::Binary | Document::TooLarge | Document::LongLine => None,
         }
     }
 
@@ -439,18 +446,28 @@ async fn load(
         .and_then(|request| request.before.clone());
     let (bytes, before) = tokio::join!(repo.file_bytes(&path, &version), async {
         let (path, version) = before?;
-        let bytes = repo.file_bytes(&path, &version).await.ok()?;
+        let bytes = repo.file_bytes(&path, &version).await;
         Some((path, bytes))
     });
-    let bytes = bytes.map_err(|e| e.to_string())?;
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(GfError::FilePreviewTooLarge) => return Ok(Arc::new(Document::TooLarge)),
+        Err(error) => return Err(error.to_string()),
+    };
+    if matches!(before, Some((_, Err(GfError::FilePreviewTooLarge)))) {
+        return Ok(Arc::new(Document::TooLarge));
+    }
     tokio::task::spawn_blocking(move || {
         let mut document = Document::from_bytes(&path, bytes);
         if let Some(request) = comparison {
-            let before =
-                before.and_then(|(path, bytes)| match Document::from_bytes(&path, bytes) {
+            let before = match before {
+                Some((path, Ok(bytes))) => match Document::from_bytes(&path, bytes) {
                     Document::Text(code) => Some(code),
-                    Document::Binary => None,
-                });
+                    Document::LongLine => return Arc::new(Document::LongLine),
+                    Document::Binary | Document::TooLarge => None,
+                },
+                _ => None,
+            };
             (request.prepare)(&mut document, before);
         }
         Arc::new(document)
@@ -624,6 +641,20 @@ impl Feature for State {
                 Document::Binary => {
                     widgets::empty_hint(t, "Preview is available for UTF-8 text files")
                 }
+                Document::TooLarge => widgets::empty_hint(
+                    t,
+                    format!(
+                        "File exceeds the {} MiB preview limit",
+                        FILE_PREVIEW_LIMIT / (1024 * 1024)
+                    ),
+                ),
+                Document::LongLine => widgets::empty_hint(
+                    t,
+                    format!(
+                        "A line exceeds the {} KiB preview limit",
+                        MAX_LINE_BYTES / 1024
+                    ),
+                ),
                 Document::Text(code)
                     if self.split
                         && let Some(comparison) = &code.comparison
@@ -691,6 +722,22 @@ mod tests {
             split: false,
             active_pane: Pane::After,
         }
+    }
+
+    #[test]
+    fn avoids_shaping_oversized_lines() {
+        let path = Path::new("notes.txt");
+        let line = vec![b'x'; MAX_LINE_BYTES];
+        assert!(matches!(
+            Document::from_bytes(path, line.clone()),
+            Document::Text(_)
+        ));
+        let mut long_line = line;
+        long_line.push(b'x');
+        assert!(matches!(
+            Document::from_bytes(path, long_line),
+            Document::LongLine
+        ));
     }
 
     #[test]

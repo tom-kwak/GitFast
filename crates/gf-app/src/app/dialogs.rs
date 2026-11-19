@@ -20,7 +20,6 @@
 
 use std::path::PathBuf;
 
-use gf_core::model::{Branch, RefKind};
 use gf_git::{PullMode, PushOptions};
 use iced::Task;
 use iced::widget::operation;
@@ -56,13 +55,6 @@ pub enum Purpose {
         old: String,
     },
     DeleteBranches(super::branch_delete::BranchDeletion),
-    DeleteBranch {
-        name: String,
-    },
-    DeleteRemoteBranch {
-        remote: String,
-        branch: String,
-    },
     NewTag {
         at: Option<String>,
     },
@@ -430,41 +422,6 @@ impl App {
         )
     }
 
-    pub(super) fn delete_branch_dialog(&mut self, b: &Branch) -> Task<Message> {
-        let short = b.name.short().to_owned();
-        if b.name.kind() == RefKind::RemoteBranch {
-            let Some((remote, branch)) = short.split_once('/') else {
-                return Task::none();
-            };
-            return self.confirm(Confirm::delete(
-                "Delete remote branch",
-                vec![
-                    format!("Delete `{branch}` on remote `{remote}`?"),
-                    "This affects everyone using that remote.".into(),
-                ],
-                "Delete on remote",
-                Purpose::DeleteRemoteBranch {
-                    remote: remote.to_owned(),
-                    branch: branch.to_owned(),
-                },
-            ));
-        }
-        self.confirm(
-            Confirm::delete(
-                "Delete branch",
-                vec![
-                    format!("Delete local branch `{short}`?"),
-                    "git refuses if it has commits not merged anywhere —".into(),
-                    "tick force to delete anyway.".into(),
-                ],
-                "Delete",
-                Purpose::DeleteBranch { name: short },
-            )
-            .check("force (also delete unmerged commits)", false)
-            .undoable(),
-        )
-    }
-
     pub(super) fn on_dialog_outcome(&mut self, outcome: Outcome<Purpose>) -> Task<Message> {
         let (purpose, values, checks, dont_ask_again) = match outcome {
             Outcome::Submitted {
@@ -617,20 +574,6 @@ impl App {
                 )
             }
             Purpose::DeleteBranches(selection) => self.run_delete_branches(selection, check(0)),
-            Purpose::DeleteBranch { name } => {
-                let force = check(0);
-                self.op_recorded(
-                    format!("delete branch {name}"),
-                    OpKind::Generic,
-                    Some(Record::new(undo::branches(&[&name], false)).required()),
-                    move |r| async move { r.delete_branch(&name, force).await },
-                )
-            }
-            Purpose::DeleteRemoteBranch { remote, branch } => self.op(
-                format!("delete {remote}/{branch}"),
-                OpKind::Generic,
-                move |r| async move { r.delete_remote_branch(&remote, &branch).await },
-            ),
             Purpose::NewTag { at } => {
                 let name = value(0);
                 let message = value(1);

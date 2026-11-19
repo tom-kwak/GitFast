@@ -85,28 +85,26 @@ fn write_commit_graph(repo: Repository) -> Task<Message> {
     .discard()
 }
 
-pub fn load_history(tab: &RepoTab, revision: String) -> Task<Message> {
+pub fn load_history(tab: &mut RepoTab, revision: String) -> Task<Message> {
     let repo = tab.repo.clone();
     let id = repo.id();
     let limit = tab.history.revision_limit();
+    tab.history_request = tab.history_request.wrapping_add(1);
+    let request = tab.history_request;
+    let file_revision = tab.history.file_revision.clone();
     Task::perform(
         {
             let revision = revision.clone();
             async move {
-                let history = if let Some(path) = revision.strip_prefix("file: ") {
-                    History::load_path(&repo, path.into(), None, limit).await
-                } else if let Some((start, path)) = revision
-                    .strip_prefix("file ")
-                    .and_then(|key| key.split_once(": "))
-                {
-                    History::load_path(&repo, path.into(), Some(start.to_owned()), limit).await
+                let history = if let Some((path, start)) = file_revision {
+                    History::load_path(&repo, path, start.map(|oid| oid.to_string()), limit).await
                 } else {
                     History::load(&repo, vec![revision], false, limit).await
                 };
                 history.map(Arc::new).map_err(|e| e.to_string())
             }
         },
-        move |result| Message::HistoryLoaded(id, revision.clone(), result),
+        move |result| Message::HistoryLoaded(id, request, revision.clone(), result),
     )
 }
 
@@ -540,13 +538,28 @@ impl App {
                 self.checkouts.remove(git_dir);
             }
         }
-        let mut tasks = vec![self.request_refresh(id)];
+        let refresh = if let OpKind::DeleteBranches(git_dir) = &kind {
+            self.deleting_branches.remove(git_dir);
+            self.request_touched(
+                id,
+                Parts {
+                    refs: true,
+                    config: true,
+                    ..Parts::default()
+                },
+                Touched::default(),
+            )
+        } else {
+            self.request_refresh(id)
+        };
+        let active = self.active_tab().is_some_and(|tab| tab.repo.id() == id);
+        let mut tasks = vec![refresh];
         if let OpKind::Undo { redo } = kind {
             tasks.push(self.on_undo_done(id, redo, result.is_ok()));
         }
         match result {
             Ok(()) => {
-                if !matches!(kind, OpKind::Undo { .. }) {
+                if active && !matches!(kind, OpKind::Undo { .. }) {
                     let hint = if recorded { " · ⌘Z undo" } else { "" };
                     self.flash(NoteKind::Info, format!("✓ {}{hint}", truncate(&label, 60)));
                 }
@@ -576,17 +589,26 @@ impl App {
                 {
                     tab.commit.commit_failed();
                 }
+                if !active {
+                    self.log
+                        .note(NoteKind::Error, format!("{label} failed"), vec![e]);
+                    return Task::batch(tasks);
+                }
                 if e.contains("operation cancelled") {
                     self.flash(NoteKind::Info, format!("{label} cancelled"));
                     return Task::batch(tasks);
                 }
                 // Offer the next step for common push/pull failures;
                 // anything else gets the failure report.
+                let can_ask = self.dialog.is_none()
+                    && self.code_dialog.is_none()
+                    && self.rebase_editor().is_none();
                 let asked = match &kind {
                     OpKind::Push { branch, to }
-                        if e.contains("non-fast-forward")
-                            || e.contains("fetch first")
-                            || e.contains("[rejected]") =>
+                        if can_ask
+                            && (e.contains("non-fast-forward")
+                                || e.contains("fetch first")
+                                || e.contains("[rejected]")) =>
                     {
                         // Overwrites commits on the remote: a deletion.
                         let ask = self.confirm(Confirm::delete(
@@ -606,7 +628,9 @@ impl App {
                         tasks.push(ask);
                         true
                     }
-                    OpKind::Pull if e.contains("divergent") || e.contains("reconcile") => {
+                    OpKind::Pull
+                        if can_ask && (e.contains("divergent") || e.contains("reconcile")) =>
+                    {
                         let ask = self.confirm(
                             Confirm::change(
                                 "pull-strategy",
@@ -646,7 +670,9 @@ impl App {
                 }
             }
         }
-        tasks.push(self.restore_focus());
+        if active {
+            tasks.push(self.restore_focus());
+        }
         Task::batch(tasks)
     }
 
@@ -655,7 +681,7 @@ impl App {
     /// Left out while another dialog or the rebase editor is open, so it
     /// never replaces a question; the command log still has the details.
     pub(super) fn show_failure(&mut self, label: &str, error: &str) -> Task<Message> {
-        if self.dialog.is_some() || self.rebase_editor().is_some() {
+        if self.dialog.is_some() || self.code_dialog.is_some() || self.rebase_editor().is_some() {
             return Task::none();
         }
         let d = git_actions::diagnose(error);

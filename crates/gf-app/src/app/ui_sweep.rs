@@ -1059,6 +1059,71 @@ async fn history_files_preview_uses_the_parent_for_a_deleted_file() {
 }
 
 #[tokio::test]
+async fn oversized_file_shows_preview_limit_and_cannot_be_copied() {
+    let mut ui = working_tree(
+        Ui::open_with(|repo| {
+            std::fs::File::create(repo.path().join("large.txt"))
+                .expect("create an oversized file")
+                .set_len(gf_git::FILE_PREVIEW_LIMIT as u64 + 1)
+                .expect("set file size");
+        })
+        .await,
+    )
+    .await;
+    let _ = ui
+        .send(Message::Changes(changes::Message::Select(
+            "large.txt".into(),
+            changes::Group::Untracked,
+        )))
+        .await;
+    let _ = ui.click("[ View ]").await;
+    assert!(ui.shows("File exceeds the 2 MiB preview limit"));
+    for shortcut in [Shortcut::SelectAll, Shortcut::Copy] {
+        let effects = ui
+            .send(Message::KeyInput(focus::KeyInput {
+                shortcut: Some(shortcut),
+                menu: None,
+                nav: None,
+            }))
+            .await;
+        assert_eq!(effects.clipboard, 0);
+    }
+    let _ = ui
+        .send(Message::KeyInput(focus::KeyInput {
+            shortcut: Some(Shortcut::Escape),
+            menu: None,
+            nav: None,
+        }))
+        .await;
+    assert!(ui.app.code_dialog.is_none());
+}
+
+#[tokio::test]
+async fn comparison_checks_the_size_of_the_previous_version() {
+    let mut ui = working_tree(
+        Ui::open_with(|repo| {
+            let path = repo.path().join("large.txt");
+            std::fs::File::create(&path)
+                .expect("create an oversized file")
+                .set_len(gf_git::FILE_PREVIEW_LIMIT as u64 + 1)
+                .expect("set file size");
+            repo.git(&["add", "--", "large.txt"]);
+            std::fs::write(path, "small working tree file").expect("replace file");
+        })
+        .await,
+    )
+    .await;
+    let _ = ui
+        .send(Message::Changes(changes::Message::Select(
+            "large.txt".into(),
+            changes::Group::Unstaged,
+        )))
+        .await;
+    let _ = ui.click("[ View ]").await;
+    assert!(ui.shows("File exceeds the 2 MiB preview limit"));
+}
+
+#[tokio::test]
 async fn view_file_loads_the_version_for_each_changes_group() {
     let mut ui = working_tree(
         Ui::open_with(|r| {
@@ -2233,4 +2298,137 @@ async fn delayed_rebase_plan_belongs_to_its_original_tab() {
         ui.app.rebase_editor().is_none(),
         "closed tab's result is discarded"
     );
+}
+
+#[tokio::test]
+async fn opening_another_repository_dismisses_the_previous_delete_review() {
+    let mut ui = Ui::open().await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::ToggleBranch(
+            "refs/heads/feature".into(),
+        )))
+        .await;
+    let _ = ui.click("[ Delete 1… ]").await;
+    assert!(ui.app.dialog.is_some());
+    let other = Fixture::new();
+    let _ = ui.send(Message::Open(other.repo.path().into())).await;
+    assert!(
+        ui.app.dialog.is_none(),
+        "the confirmation targeted the previous repository"
+    );
+    for repo in [&ui.fixture.repo, &other.repo] {
+        assert_eq!(repo.git(&["branch", "--list", "feature"]).trim(), "feature");
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_remapped_remote_branch_preserves_its_local_alias_on_the_remote() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["branch", "alias"]);
+        repo.git(&["push", "origin", "alias"]);
+        repo.git(&[
+            "config",
+            "--replace-all",
+            "remote.origin.fetch",
+            "+refs/heads/feature:refs/remotes/origin/alias",
+        ]);
+        repo.git(&["fetch", "origin"]);
+    })
+    .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::RightClick(
+            sidebar::Selection::Ref("refs/remotes/origin/alias".into()),
+        )))
+        .await;
+    let _ = ui
+        .send(Message::KeyInput(focus::KeyInput {
+            shortcut: None,
+            menu: Some(context_menu::Key::Char('d')),
+            nav: None,
+        }))
+        .await;
+    assert!(ui.shows("On remote origin: feature"));
+    let _ = ui.click("[ Delete 1 ]").await;
+    let refs = ui.fixture.repo.git(&["ls-remote", "--heads", "origin"]);
+    assert!(!refs.contains("refs/heads/feature"));
+    assert!(refs.contains("refs/heads/alias"));
+}
+
+#[tokio::test]
+async fn late_history_and_blame_results_do_not_replace_newer_requests() {
+    let mut ui = Ui::open().await;
+    ui.app.settings.appearance.show_history = false;
+    let _older = ui.app.open_file_history("a.txt".into(), None);
+    let tab = ui.app.active_tab().expect("tab");
+    let id = tab.repo.id();
+    let old = tab.history_request;
+    let label = tab.history.revision().expect("review fixture").to_owned();
+    let _newer = ui.app.open_file_history("a.txt".into(), None);
+    assert!(ui.app.settings.appearance.show_history);
+    let _ = ui.app.update(Message::HistoryLoaded(
+        id,
+        old,
+        label.clone(),
+        Err("old".into()),
+    ));
+    assert_eq!(
+        ui.app
+            .active_tab()
+            .expect("review fixture")
+            .history
+            .revision(),
+        Some(label.as_str())
+    );
+
+    let _older = ui.app.open_blame("a.txt".into(), None);
+    let old = ui.app.active_tab().expect("review fixture").blame_request;
+    let _newer = ui.app.open_blame("a.txt".into(), Some("HEAD".into()));
+    let _ = ui.app.update(Message::BlameLoaded(
+        id,
+        old,
+        "a.txt".into(),
+        Ok(Vec::new()),
+    ));
+    assert!(
+        ui.app
+            .active_tab()
+            .expect("review fixture")
+            .blame
+            .as_ref()
+            .expect("review fixture")
+            .lines()
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn file_history_preserves_native_names_and_treats_pathspec_magic_literally() {
+    use std::os::unix::ffi::OsStrExt;
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(b":(glob)*\xff"));
+    let mut ui = Ui::open_with(|repo| {
+        // macOS filesystems reject some native byte names that Git trees can contain.
+        repo.write("fixture-blob", "unique file history fixture");
+        let blob = repo.git(&["hash-object", "-w", "fixture-blob"]);
+        let added = repo
+            .command()
+            .args(["update-index", "--add", "--cacheinfo", "100644", &blob])
+            .arg(&path)
+            .output()
+            .expect("write fixture index");
+        assert!(added.status.success(), "{added:?}");
+        repo.git(&["commit", "-qm", "literal filename"]);
+    })
+    .await;
+    let task = ui.app.open_file_history(path, None);
+    let mut stream = runtime::task::into_stream(task).expect("file history request");
+    while let Some(action) = stream.next().await {
+        if let Action::Output(Message::HistoryLoaded(_, _, _, result)) = action {
+            let history = result.expect("read native path");
+            assert_eq!(history.commits.len(), 1);
+            assert_eq!(history.commits[0].summary, "literal filename");
+            return;
+        }
+    }
+    panic!("missing history result");
 }

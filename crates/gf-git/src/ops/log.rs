@@ -157,6 +157,12 @@ impl LogOps for CliBackend {
             .paths(&query.paths)
             .read_only()
             .allow_failure();
+        // Follow the selected file literally, even if its name contains Git pathspec magic.
+        let cmd = if query.follow && query.paths.len() == 1 {
+            cmd.env("GIT_LITERAL_PATHSPECS", "1")
+        } else {
+            cmd
+        };
         let out = self.runner().run(&cmd).await?;
         if !out.success() {
             // An unborn branch (no commits yet) is an empty history, not an
