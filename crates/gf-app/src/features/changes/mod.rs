@@ -72,7 +72,6 @@ pub enum Message {
     RightClick(PathBuf, Group),
     /// `.`: the selected row's actions.
     OpenActions,
-    ViewFile(PathBuf, Group),
     /// A menu action (a request to the app).
     Act(Output),
 }
@@ -80,7 +79,6 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub enum Output {
     ShowDiff(DiffSource),
-    ViewFile(PathBuf, FileVersion),
     /// A conflicted file was picked: open the conflict resolver.
     ResolveConflict(PathBuf),
     Stage(Vec<PathBuf>),
@@ -219,12 +217,6 @@ fn file_menu(path: &Path, group: Group, in_head: bool) -> Menu<Message> {
         ],
     };
     entries.push(Entry::Separator);
-    entries.push(Entry::item(
-        'v',
-        "View file",
-        "show the entire file",
-        Message::ViewFile(pb.clone(), group),
-    ));
     // A new file has no history or blame yet.
     if in_head && matches!(group, Group::Staged | Group::Unstaged) {
         entries.push(Entry::item(
@@ -345,11 +337,10 @@ fn row_height(t: &Tokens) -> f32 {
 /// Scrollable id of the list.
 const LIST_ID: &str = "gf-working-tree";
 
-/// Open the version associated with a working tree group, including deleted files.
-pub fn view_file(path: PathBuf, group: Group, snap: Option<&Snapshot>) -> Output {
-    let entry = snap.and_then(|s| s.status.entries.iter().find(|e| e.path() == &path));
-    let version = file_version(group, entry);
-    Output::ViewFile(path, version)
+/// Identify which file to read for the selected group, including deleted files.
+pub fn preview_version(path: &Path, group: Group, snap: Option<&Snapshot>) -> FileVersion {
+    let entry = snap.and_then(|s| s.status.entries.iter().find(|e| e.path() == path));
+    file_version(group, entry)
 }
 
 fn file_version(group: Group, entry: Option<&StatusEntry>) -> FileVersion {
@@ -580,9 +571,6 @@ impl State {
         message: Message,
         snap: Option<&Snapshot>,
     ) -> Update<Message, Output> {
-        if let Message::ViewFile(path, group) = message {
-            return Update::output(view_file(path, group, snap));
-        }
         // Only menus need it (not every scroll).
         if !matches!(message, Message::RightClick(..) | Message::OpenActions) {
             return self.update(message);
@@ -658,9 +646,6 @@ impl Feature for State {
                 }),
                 None => Update::none(),
             },
-            Message::ViewFile(path, group) => {
-                Update::output(Output::ViewFile(path, file_version(group, None)))
-            }
             Message::Act(output) => Update::output(output),
         }
     }
@@ -772,15 +757,7 @@ impl Feature for State {
             },
             Message::Scrolled,
         );
-        let action = widgets::text_button(
-            t,
-            "View file",
-            None,
-            self.selected
-                .clone()
-                .map(|(path, group)| Message::ViewFile(path, group)),
-        );
-        widgets::panel_with_action(t, format!("WORKING TREE ({total})"), action, list)
+        widgets::panel(t, format!("WORKING TREE ({total})"), list)
     }
 }
 
@@ -821,7 +798,7 @@ mod tests {
             Some(DiffSource::WorkTree("src/a.rs".into())),
             "diff follows"
         );
-        assert_eq!(keys(&menu), "szdvhbyf");
+        assert_eq!(keys(&menu), "szdhbyf");
         // Again on the same row: nothing new to show.
         let out = s
             .update(Message::RightClick("src/a.rs".into(), Group::Unstaged))
@@ -835,20 +812,20 @@ mod tests {
 
         assert_eq!(
             keys(&file_menu("a.rs".as_ref(), Group::Staged, true)),
-            "uzvhbyf"
+            "uzhbyf"
         );
         assert_eq!(
             keys(&file_menu("a.rs".as_ref(), Group::Conflicts, true)),
-            "rotsvyf"
+            "rotsyf"
         );
         assert_eq!(
             keys(&file_menu("logs/x.log".as_ref(), Group::Untracked, true)),
-            "siegdvyf"
+            "siegdyf"
         );
         // A file new in the index has no history or blame to show yet.
         assert_eq!(
             keys(&file_menu("a.rs".as_ref(), Group::Staged, false)),
-            "uzvyf"
+            "uzyf"
         );
     }
 

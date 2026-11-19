@@ -471,7 +471,11 @@ pub enum Output {
     },
     FileAction(FileAction),
     /// Show the full file from the currently displayed local diff source.
-    ViewFile(DiffSource),
+    ViewFile {
+        source: DiffSource,
+        diff: Arc<LoadedDiff>,
+        file: usize,
+    },
     /// Apply these patches in order. Discards must be confirmed first.
     Apply {
         patches: Vec<String>,
@@ -1183,9 +1187,11 @@ impl State {
                 Update::none()
             }
             Message::ViewFile => match &self.source {
-                Some(source) if source.role() == Role::Local => {
-                    Update::output(Output::ViewFile(source.clone()))
-                }
+                Some(source) if source.role() == Role::Local => Update::output(Output::ViewFile {
+                    source: source.clone(),
+                    diff: self.diff.clone(),
+                    file: self.file,
+                }),
                 Some(source) => {
                     let Some(file) = self
                         .diff
@@ -1328,12 +1334,25 @@ impl State {
                 ));
         }
         let blob = self.diff.submodules.get(self.file) == Some(&false);
-        if shown_path.is_some() && (self.role == Role::Local || blob) {
-            header = header.push(widgets::tip(
-                t,
-                widgets::text_button(t, "View file", None, Some(Message::ViewFile)),
-                "show the entire file".into(),
-            ));
+        if shown_path.is_some() {
+            if self.role == Role::Local {
+                header = header.push(widgets::tip(
+                    t,
+                    widgets::text_button(
+                        t,
+                        "View",
+                        None,
+                        (!self.loading).then_some(Message::ViewFile),
+                    ),
+                    "show the entire file with changes".into(),
+                ));
+            } else if blob {
+                header = header.push(widgets::tip(
+                    t,
+                    widgets::text_button(t, "View file", None, Some(Message::ViewFile)),
+                    "show the entire file".into(),
+                ));
+            }
         }
         let whitespace_color = if self.ignore_whitespace {
             t.accent()
