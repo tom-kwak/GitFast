@@ -583,8 +583,13 @@ impl Feature for State {
             FileVersion::Index => "Staged",
             FileVersion::Revision(rev) => rev,
         };
+        let title = if self.comparison_labels.is_some() {
+            "FILE CHANGES"
+        } else {
+            "FILE CONTENTS"
+        };
         let mut header = row![
-            colored(t, "FILE CONTENTS", t.accent()),
+            colored(t, title, t.accent()),
             dim(t, version).width(Length::Fill),
         ];
         if self.code().is_some_and(|code| code.comparison.is_some()) {
