@@ -31,7 +31,7 @@ pub struct UndoBar<M> {
 pub fn view<'a, M: Clone + 'a>(
     t: &'a Tokens,
     tab: Option<&'a RepoTab>,
-    busy: Option<&'static str>,
+    busy: Option<(&'static str, Option<&str>)>,
     flash: Option<&'a Flash>,
     undo: Option<UndoBar<M>>,
 ) -> Element<'a, M> {
@@ -103,8 +103,18 @@ pub fn view<'a, M: Clone + 'a>(
     }
 
     let mut right = Row::new().spacing(10).align_y(iced::Alignment::Center);
-    if let Some(frame) = busy {
-        right = right.push(colored(t, format!("{frame} working"), t.warning()));
+    if let Some((frame, target)) = busy {
+        let text = target.map_or_else(
+            || format!("{frame} working"),
+            |target| {
+                format!(
+                    "{frame} Switching to {}…",
+                    widgets::format::truncate(target, 32)
+                )
+            },
+        );
+        right =
+            right.push(colored(t, text, t.warning()).wrapping(iced::widget::text::Wrapping::None));
     }
     if let Some(f) = flash {
         let color = match f.kind {

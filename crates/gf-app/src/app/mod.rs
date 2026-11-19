@@ -27,6 +27,7 @@ mod settings;
 mod ui_sweep;
 mod undoing;
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,6 +106,7 @@ pub enum Shortcut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpKind {
     Generic,
+    Checkout(PathBuf),
     RemoveWorktree(PathBuf),
     Commit,
     Fetch,
@@ -119,6 +121,21 @@ pub enum OpKind {
     Undo {
         redo: bool,
     },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CheckoutPhase {
+    Measuring(RepoId),
+    Running,
+    RefreshQueued,
+    Refreshing(RepoId),
+}
+
+#[derive(Debug)]
+struct Checkout {
+    /// Full ref of the row the user activated, or a revision for a detached checkout.
+    target: String,
+    phase: CheckoutPhase,
 }
 
 /// Where to push a branch that is not the current one.
@@ -308,6 +325,8 @@ pub struct App {
     /// Interactive rebase plan being edited (modal).
     /// Running fetch/pull/push and its cancel handle.
     sync: Option<(toolbar::Sync, CancellationToken)>,
+    /// Keyed by worktree git directory so a running switch survives closing its tab.
+    checkouts: HashMap<PathBuf, Checkout>,
     flash: Option<Flash>,
     tick: usize,
     drop_hover: bool,
@@ -396,6 +415,7 @@ impl App {
             menu: None,
             pointer: crate::widgets::pointer::Pointer::default(),
             sync: None,
+            checkouts: HashMap::new(),
             flash: None,
             tick: 0,
             drop_hover: false,
@@ -446,6 +466,7 @@ impl App {
     fn busy(&self) -> bool {
         self.opening > 0
             || self.sync.is_some()
+            || !self.checkouts.is_empty()
             || self.tabs.iter().any(|t| t.loading)
             || self.log.has_running()
     }
@@ -843,6 +864,14 @@ impl App {
                 result,
                 step,
             } => {
+                let repo = match &kind {
+                    OpKind::Checkout(git_dir) => self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.repo.handle().git_dir == *git_dir)
+                        .map_or(repo, |tab| tab.repo.id()),
+                    _ => repo,
+                };
                 let recorded = step.is_some();
                 if let Some(step) = step {
                     self.record_step(repo, *step);
@@ -1228,6 +1257,14 @@ impl App {
             return Task::none();
         }
         let closed = self.tabs.remove(i);
+        let git_dir = &closed.repo.handle().git_dir;
+        if self
+            .checkouts
+            .get(git_dir)
+            .is_some_and(|c| c.phase != CheckoutPhase::Running)
+        {
+            self.checkouts.remove(git_dir);
+        }
         if self.active > i || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
@@ -1395,6 +1432,8 @@ impl App {
             all_branches: tab.is_some_and(|t| t.all_branches),
         };
         let spinner = widgets::spinner_frame(self.tick);
+        let checkout = tab.and_then(|tab| self.checkouts.get(&tab.repo.handle().git_dir));
+        let checkout_indicator = checkout.map(|c| (c.target.as_str(), spinner));
 
         let body: Element<'_, Message> = match tab {
             None => {
@@ -1408,7 +1447,9 @@ impl App {
                         t,
                         Pane::Sidebar,
                         active,
-                        tab.sidebar.view(cx).map(Message::Sidebar),
+                        tab.sidebar
+                            .view_with_checkout(cx, checkout_indicator)
+                            .map(Message::Sidebar),
                     ))
                     .width(Length::Fixed(t.font_size * 22.0))
                     .into()
@@ -1488,7 +1529,16 @@ impl App {
             .push(status_line::view(
                 t,
                 tab,
-                self.busy().then_some(spinner),
+                self.busy().then_some((
+                    spinner,
+                    checkout.map(|c| {
+                        let target = &c.target;
+                        target
+                            .strip_prefix("refs/heads/")
+                            .or_else(|| target.strip_prefix("refs/remotes/"))
+                            .unwrap_or(target)
+                    }),
+                )),
                 self.flash.as_ref(),
                 tab.map(|tab| status_line::UndoBar {
                     undo: tab.undo.next(false).map(|s| s.label.clone()),

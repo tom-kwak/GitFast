@@ -9,7 +9,7 @@ use iced::widget::operation;
 use super::dialogs::{Confirm, Purpose};
 use super::ops::Record;
 use super::ops::{load_diff, load_history};
-use super::{App, Message, OpKind, Shortcut};
+use super::{App, CheckoutPhase, Message, OpKind, Shortcut};
 use crate::feature::Feature;
 use crate::features::command_log::NoteKind;
 use crate::features::diff_view::{self, Action, DiffSource};
@@ -452,6 +452,7 @@ impl App {
                 self.new_branch_dialog(Some(oid.to_string()), true)
             }
             history::Output::NewTagAt(oid) => self.new_tag_dialog(Some(oid.to_string())),
+            history::Output::CheckoutDetached(_) if self.checkout_pending() => Task::none(),
             history::Output::CheckoutDetached(oid) => self.confirm(Confirm::change(
                 "checkout",
                 "Check out commit",
@@ -499,7 +500,18 @@ impl App {
                 index: s.index,
                 id: s.id,
             }),
-            sidebar::Output::Menu { show, menu } => {
+            sidebar::Output::Menu { show, mut menu } => {
+                if self.checkout_pending() {
+                    menu.entries.retain(|entry| {
+                        !matches!(
+                            entry,
+                            crate::features::context_menu::Entry::Item {
+                                on: sidebar::Message::Act(sidebar::Action::Checkout),
+                                ..
+                            }
+                        )
+                    });
+                }
                 // A right-clicked item gets its history/diff like a click.
                 let shown = match show {
                     Some(sidebar::Selection::Ref(r)) => {
@@ -828,8 +840,40 @@ impl App {
     }
 
     fn checkout(&mut self, b: Branch) -> Task<Message> {
-        let remote = b.name.kind() == RefKind::RemoteBranch;
-        let name = b.name.short().to_owned();
+        if self.checkout_pending() {
+            return Task::none();
+        }
+        let target = b.name.as_str().to_owned();
+        let tokens = &self.tokens;
+        if b.name.kind() == RefKind::RemoteBranch
+            && let Some(tab) = self.tabs.get_mut(self.active)
+            && let Some(snap) = tab.snapshot.clone()
+            && let Some(local) = local_checkout_target(&snap, &b)
+        {
+            if local.is_head
+                || snap
+                    .worktrees
+                    .iter()
+                    .any(|w| w.branch.as_deref() == Some(local.name.short()))
+            {
+                let select = tab.sidebar.select_local_branch(local, &snap, tokens);
+                return Task::batch([
+                    select.map(Message::Sidebar),
+                    self.on_sidebar(sidebar::Output::ShowRevision(Some(
+                        local.name.as_str().to_owned(),
+                    ))),
+                ]);
+            }
+            return self.checkout_branch(target, local.name.short().to_owned(), false);
+        }
+        self.checkout_branch(
+            target,
+            b.name.short().to_owned(),
+            b.name.kind() == RefKind::RemoteBranch,
+        )
+    }
+
+    fn checkout_branch(&mut self, target: String, name: String, remote: bool) -> Task<Message> {
         // Changes, a branch to leave them on and nothing in progress: ask
         // whether to leave them there (stash) or carry them over, after
         // checking which files would keep them from coming along.
@@ -843,7 +887,7 @@ impl App {
                 (!changed.is_empty()).then_some((from, changed))
             });
         if let Some((from, changed)) = leave {
-            return self.measure_switch(name, remote, from, changed);
+            return self.measure_switch(target, name, remote, from, changed);
         }
         let body = if remote {
             vec![
@@ -871,6 +915,7 @@ impl App {
                 body,
                 "Switch",
                 Purpose::Checkout {
+                    target,
                     name,
                     remote,
                     leave_from: None,
@@ -884,6 +929,7 @@ impl App {
 
     fn measure_switch(
         &mut self,
+        target: String,
         name: String,
         remote: bool,
         from: String,
@@ -893,11 +939,17 @@ impl App {
             return Task::none();
         };
         let (repo, r) = (tab.repo.id(), tab.repo.clone());
-        let target = name.clone();
+        if self
+            .begin_checkout(target, CheckoutPhase::Measuring(repo))
+            .is_none()
+        {
+            return Task::none();
+        }
+        let switch_name = name.clone();
         let count = changed.len();
         Task::perform(
             async move {
-                r.switch_blockers(&target, &changed)
+                r.switch_blockers(&switch_name, &changed)
                     .await
                     .map_err(|e| e.to_string())
             },
@@ -924,7 +976,20 @@ impl App {
         blocked: Result<Vec<std::path::PathBuf>, String>,
     ) -> Task<Message> {
         use crate::features::dialog::{Dialog, Opt, Severity, Tone};
-        if self.active_tab().map(|t| t.repo.id()) != Some(repo) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.repo.id() == repo) else {
+            return Task::none();
+        };
+        let git_dir = &tab.repo.handle().git_dir;
+        let Some(checkout) = self
+            .checkouts
+            .get(git_dir)
+            .filter(|c| c.phase == CheckoutPhase::Measuring(repo))
+        else {
+            return Task::none();
+        };
+        let target = checkout.target.clone();
+        self.checkouts.remove(git_dir);
+        if self.active_tab().map(|t| t.repo.id()) != Some(repo) || self.dialog.is_some() {
             return Task::none();
         }
         let switch = if remote {
@@ -996,12 +1061,14 @@ impl App {
             format!("{changed} changed file(s) on `{from}`"),
             "⌘Z undoes it afterwards (stash and switch together)".into(),
         ];
+        self.menu = None;
         self.open_dialog(
             Dialog::confirm(
                 format!("switch {from} → {to}"),
                 body,
                 "Switch",
                 Purpose::Checkout {
+                    target,
                     name,
                     remote,
                     leave_from: Some(from),
@@ -1253,6 +1320,31 @@ impl App {
             PromptCommand::Quit => iced::exit(),
         }
     }
+}
+
+/// Prefer the checked-out branch (even if renamed), then the usual local
+/// name, then an unambiguous tracking branch.
+fn local_checkout_target<'a>(snap: &'a Snapshot, remote: &Branch) -> Option<&'a Branch> {
+    let tracking = snap.branches.iter().filter(|b| {
+        b.name.kind() == RefKind::LocalBranch
+            && b.upstream
+                .as_ref()
+                .is_some_and(|upstream| upstream.name == remote.name)
+    });
+    let usual_name = remote.name.short().split_once('/').map(|(_, name)| name);
+    tracking
+        .clone()
+        .find(|b| b.is_head)
+        .or_else(|| {
+            tracking
+                .clone()
+                .find(|b| Some(b.name.short()) == usual_name)
+        })
+        .or_else(|| {
+            let mut candidates = tracking;
+            let first = candidates.next()?;
+            candidates.next().is_none().then_some(first)
+        })
 }
 
 fn is_number(args: &[String]) -> bool {

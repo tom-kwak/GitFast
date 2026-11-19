@@ -80,6 +80,7 @@ pub enum Purpose {
     PullStrategy,
     CheckoutDetached(String),
     Checkout {
+        target: String,
         name: String,
         remote: bool,
         /// Stash the changes first, as left on this branch ("stash, then
@@ -476,11 +477,13 @@ impl App {
                     },
                     // Option 0 leaves the changes behind, 1 carries them.
                     Purpose::Checkout {
+                        target,
                         name,
                         remote,
                         leave_from,
                         blocked,
                     } => Purpose::Checkout {
+                        target,
                         name,
                         remote,
                         leave_from: leave_from.filter(|_| choice != Some(1)),
@@ -582,12 +585,16 @@ impl App {
                 } else {
                     format!("create branch {name}")
                 };
-                self.op_recorded(
-                    label,
-                    OpKind::Generic,
-                    Some(Record::new(undo::branches(&[&name], checkout))),
-                    move |r| async move { r.create_branch(&name, from.as_deref(), checkout).await },
-                )
+                let target = format!("refs/heads/{name}");
+                let record = Record::new(undo::branches(&[&name], checkout));
+                let create = move |r: gf_git::Repository| async move {
+                    r.create_branch(&name, from.as_deref(), checkout).await
+                };
+                if checkout {
+                    self.checkout_op(target, label, record, create)
+                } else {
+                    self.op_recorded(label, OpKind::Generic, Some(record), create)
+                }
             }
             Purpose::RenameBranch { old } => {
                 let new = value(0);
@@ -695,14 +702,17 @@ impl App {
             } else {
                 PullMode::Merge
             }),
-            Purpose::CheckoutDetached(rev) => self.op_recorded(
-                // By characters: a revision is not always an ASCII id.
-                format!("check out {}", rev.chars().take(7).collect::<String>()),
-                OpKind::Generic,
-                Some(Record::head(gf_git::HeadMode::Keep)),
-                move |r| async move { r.checkout_detached(&rev).await },
-            ),
+            Purpose::CheckoutDetached(rev) => {
+                let short: String = rev.chars().take(7).collect();
+                self.checkout_op(
+                    short.clone(),
+                    format!("check out {short}"),
+                    Record::head(gf_git::HeadMode::Keep),
+                    move |r| async move { r.checkout_detached(&rev).await },
+                )
+            }
             Purpose::Checkout {
+                target,
                 name,
                 remote,
                 leave_from,
@@ -728,19 +738,18 @@ impl App {
                     // One step: ⌘Z switches back and pops the changes.
                     Some(from) => {
                         scope.stash = true;
-                        self.op_recorded(
+                        self.checkout_op(
+                            target,
                             label,
-                            OpKind::Generic,
-                            Some(Record::new(scope).with_changes(Changes::All)),
+                            Record::new(scope).with_changes(Changes::All),
                             move |r| async move { r.stash_and_switch(&from, &name, remote).await },
                         )
                     }
-                    None => self.op_recorded(
-                        label,
-                        OpKind::Generic,
-                        Some(Record::new(scope)),
-                        move |r| async move { r.switch_branch(&name, remote).await },
-                    ),
+                    None => {
+                        self.checkout_op(target, label, Record::new(scope), move |r| async move {
+                            r.switch_branch(&name, remote).await
+                        })
+                    }
                 }
             }
             Purpose::StashApply(i) => self.op_recorded(
