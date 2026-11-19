@@ -910,13 +910,13 @@ fn code_close_target(ui: &Ui) -> Target {
 }
 
 #[tokio::test]
-async fn local_view_replaces_working_tree_view_file_and_keeps_keyboard_copy() {
+async fn local_view_keeps_keyboard_copy_and_working_tree_menu_opens_plain_file() {
     let mut ui = a_txt_shown().await;
     assert!(!ui.shows("[ View file ]"));
     let opened = ui.click("[ View ]").await;
     assert!(!opened.repo_changed);
     assert!(ui.app.code_dialog.is_some());
-    assert!(ui.shows("FILE CONTENTS"));
+    assert!(ui.shows("FILE CHANGES"));
     let mut first_line = ui
         .targets()
         .into_iter()
@@ -957,7 +957,17 @@ async fn local_view_replaces_working_tree_view_file_and_keeps_keyboard_copy() {
 
     let _ = ui.right_click("a.txt").await;
     assert!(ui.app.menu.is_some());
-    assert!(!ui.shows("View file"));
+    let opened = ui.click("view file").await;
+    assert!(!opened.repo_changed);
+    assert!(ui.shows("FILE CONTENTS"));
+    assert!(!ui.shows("[ Side by side ]"));
+    assert!(!ui.shows("FILE CHANGES"));
+    let viewer = ui.app.code_dialog.as_mut().expect("file dialog");
+    let _ = viewer.update(code_view::Message::SelectAll);
+    assert!(matches!(
+        viewer.update(code_view::Message::Copy).output,
+        Some(code_view::Output::Copy(text)) if text == "one\ntwo\nchanged\nfour\n"
+    ));
 }
 
 #[tokio::test]
@@ -975,7 +985,7 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     assert_eq!(ui.flash(), "copied src/lib.rs");
 
     let _ = ui.right_click("lib.rs").await;
-    let opened = ui.click("View file").await;
+    let opened = ui.click("view file").await;
     assert!(!opened.repo_changed);
     assert!(ui.app.code_dialog.is_some());
     assert!(ui.shows("FILE CONTENTS"));
@@ -983,6 +993,7 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     assert!(ui.shows(revision.trim()));
     assert!(ui.targets().iter().any(|t| t.label == "  1"));
     assert!(!ui.shows("println!"));
+    assert!(!ui.shows("[ Side by side ]"));
 
     let close = code_close_target(&ui);
     let _ = ui.click_at(&close, mouse::Button::Left).await;
@@ -991,6 +1002,36 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     let _ = ui.click("file history").await;
     assert!(ui.shows("first"));
     assert!(!ui.shows("third"));
+}
+
+#[tokio::test]
+async fn commit_view_compares_the_selected_commit_with_its_parent() {
+    let mut ui = Ui::open().await;
+    let _ = ui.click("second").await;
+    let opened = ui.click("[ View ]").await;
+    assert!(!opened.repo_changed);
+    assert!(ui.shows("FILE CHANGES"));
+    let targets = ui.targets();
+    let added = targets
+        .iter()
+        .find(|t| t.label == "  4")
+        .expect("the added line number");
+    assert!(
+        targets.iter().any(|t| {
+            t.label == "+" && t.at.x > added.at.x && (t.at.y - added.at.y).abs() < 1.0
+        })
+    );
+    let split = ui.click("[ Side by side ]").await;
+    assert!(split.screen_changed);
+    assert!(ui.shows("Parent"));
+    assert!(ui.shows("Commit"));
+
+    let viewer = ui.app.code_dialog.as_mut().expect("file dialog");
+    let _ = viewer.update(code_view::Message::SelectAll);
+    assert!(matches!(
+        viewer.update(code_view::Message::Copy).output,
+        Some(code_view::Output::Copy(text)) if text == "one\ntwo\nthree\nfour\n"
+    ));
 }
 
 #[tokio::test]
@@ -1004,11 +1045,17 @@ async fn history_files_preview_uses_the_parent_for_a_deleted_file() {
     .await;
     let _ = ui.click("remove gone").await;
     let _ = ui.right_click("gone.txt").await;
-    let _ = ui.click("View file").await;
+    let _ = ui.click("view file").await;
     assert!(ui.app.code_dialog.is_some());
     assert!(ui.shows("FILE CONTENTS"));
     let line_number = ui.targets().into_iter().find(|t| t.label == "  1");
     assert!(line_number.is_some(), "the parent blob was loaded");
+    let close = code_close_target(&ui);
+    let _ = ui.click_at(&close, mouse::Button::Left).await;
+    let _ = ui.click("[ View ]").await;
+    assert!(ui.shows("FILE CHANGES"));
+    assert!(ui.shows("−"));
+    assert!(ui.shows("[ Side by side ]"));
 }
 
 #[tokio::test]
@@ -1054,7 +1101,12 @@ async fn view_file_loads_the_version_for_each_changes_group() {
         assert!(!ui.shows("[ blame ]"));
         assert!(!ui.shows("[ file history ]"));
         let opened = ui.click("[ View ]").await;
-        assert!(opened.messages.iter().any(|m| m == "LocalDiff(ViewFile)"));
+        assert!(
+            opened
+                .messages
+                .iter()
+                .any(|m| m == "LocalDiff(ViewChanges)")
+        );
         assert!(!opened.repo_changed);
         assert!(ui.shows("  1"), "{path} should have a code gutter");
         let viewer = ui.app.code_dialog.as_mut().expect("file dialog");

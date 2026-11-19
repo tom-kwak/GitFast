@@ -127,6 +127,11 @@ impl App {
                 let open = self.open_menu(menu.map(Message::Changes));
                 Task::batch([shown, open])
             }
+            changes::Output::ViewFile(path, group) => {
+                let snap = self.active_tab().and_then(|tab| tab.snapshot.as_deref());
+                let version = changes::preview_version(&path, group, snap);
+                self.open_code_view(path, version, None)
+            }
             changes::Output::FileHistory(path) => self.open_file_history(path, None),
             changes::Output::Blame(path) => self.open_blame(path, None),
             changes::Output::CopyPath(path) => self.copy_path(&path),
@@ -306,29 +311,19 @@ impl App {
             diff_view::Output::DiscardSubmodule(path) => {
                 self.confirm_discard(vec![path], Vec::new())
             }
-            diff_view::Output::ViewFile { source, diff, file } => {
-                let (path, group) = match source {
-                    DiffSource::WorkTree(path) => (path, changes::Group::Unstaged),
-                    DiffSource::Staged(path) => (path, changes::Group::Staged),
-                    DiffSource::Untracked(path) => (path, changes::Group::Untracked),
-                    _ => return Task::none(),
+            diff_view::Output::ViewChanges {
+                source,
+                path,
+                diff,
+                file,
+            } => {
+                let (base, target, labels) = source.comparison_versions();
+                let (version, before) = match diff.files.get(file) {
+                    Some(entry) if entry.new_path.is_none() => (base, None),
+                    Some(entry) => (target, entry.old_path.clone().map(|path| (path, base))),
+                    None => (target, None),
                 };
-                let snap = self.active_tab().and_then(|tab| tab.snapshot.as_deref());
-                let version = changes::preview_version(&path, group, snap);
-                let (base, labels) = match group {
-                    changes::Group::Staged => {
-                        (FileVersion::Revision("HEAD".into()), ["HEAD", "Index"])
-                    }
-                    _ => (FileVersion::Index, ["Index", "Working tree"]),
-                };
-                let before = diff.files.get(file).map(|entry| {
-                    entry
-                        .new_path
-                        .as_ref()
-                        .and(entry.old_path.clone())
-                        .map(|path| (path, base))
-                });
-                let comparison = before.map(|before| code_view::ComparisonRequest {
+                let comparison = code_view::ComparisonRequest {
                     before,
                     labels,
                     prepare: Box::new(move |document, before| {
@@ -336,8 +331,8 @@ impl App {
                             document.show_changes(entry, before);
                         }
                     }),
-                });
-                self.open_code_view(path, version, comparison)
+                };
+                self.open_code_view(path, version, Some(comparison))
             }
             diff_view::Output::FileMenu { menu, highlight } => {
                 let open = self.open_menu(menu.map(Message::CommitDiff));

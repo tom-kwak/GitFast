@@ -95,6 +95,7 @@ pub enum Output {
         show: Option<DiffSource>,
         menu: Menu<Message>,
     },
+    ViewFile(PathBuf, Group),
     FileHistory(PathBuf),
     Blame(PathBuf),
     CopyPath(PathBuf),
@@ -217,6 +218,12 @@ fn file_menu(path: &Path, group: Group, in_head: bool) -> Menu<Message> {
         ],
     };
     entries.push(Entry::Separator);
+    entries.push(Entry::item(
+        'v',
+        "view file",
+        "show the entire file",
+        act(Output::ViewFile(pb.clone(), group)),
+    ));
     // A new file has no history or blame yet.
     if in_head && matches!(group, Group::Staged | Group::Unstaged) {
         entries.push(Entry::item(
@@ -798,7 +805,7 @@ mod tests {
             Some(DiffSource::WorkTree("src/a.rs".into())),
             "diff follows"
         );
-        assert_eq!(keys(&menu), "szdhbyf");
+        assert_eq!(keys(&menu), "szdvhbyf");
         // Again on the same row: nothing new to show.
         let out = s
             .update(Message::RightClick("src/a.rs".into(), Group::Unstaged))
@@ -812,20 +819,20 @@ mod tests {
 
         assert_eq!(
             keys(&file_menu("a.rs".as_ref(), Group::Staged, true)),
-            "uzhbyf"
+            "uzvhbyf"
         );
         assert_eq!(
             keys(&file_menu("a.rs".as_ref(), Group::Conflicts, true)),
-            "rotsyf"
+            "rotsvyf"
         );
         assert_eq!(
             keys(&file_menu("logs/x.log".as_ref(), Group::Untracked, true)),
-            "siegdyf"
+            "siegdvyf"
         );
         // A file new in the index has no history or blame to show yet.
         assert_eq!(
             keys(&file_menu("a.rs".as_ref(), Group::Staged, false)),
-            "uzyf"
+            "uzvyf"
         );
     }
 

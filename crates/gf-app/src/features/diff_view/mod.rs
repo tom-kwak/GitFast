@@ -171,19 +171,39 @@ impl DiffSource {
 
     /// Revision of the side that contains the file.
     fn file_revision(&self, file: &FileDiff) -> Option<String> {
-        let deleted = file.new_path.is_none();
-        match self {
-            Self::Commit(oid) | Self::Stash { id: oid, .. } => Some(if deleted {
-                format!("{oid}^1")
-            } else {
-                oid.to_string()
-            }),
-            Self::Range { from, to, .. } => Some(if deleted {
-                from.clone()
-            } else {
-                to.to_string()
-            }),
+        let (base, target, _) = self.comparison_versions();
+        let version = if file.new_path.is_some() {
+            target
+        } else {
+            base
+        };
+        match version {
+            FileVersion::Revision(rev) => Some(rev),
             _ => None,
+        }
+    }
+
+    /// Versions and pane labels matching the diff's Git target.
+    pub fn comparison_versions(&self) -> (FileVersion, FileVersion, [&'static str; 2]) {
+        use FileVersion::{Index, Revision, WorkTree};
+        match self {
+            Self::WorkTree(_) | Self::Untracked(_) => (Index, WorkTree, ["Index", "Working tree"]),
+            Self::Staged(_) => (Revision("HEAD".into()), Index, ["HEAD", "Index"]),
+            Self::Commit(oid) => (
+                Revision(format!("{oid}^1")),
+                Revision(oid.to_string()),
+                ["Parent", "Commit"],
+            ),
+            Self::Stash { id, .. } => (
+                Revision(format!("{id}^1")),
+                Revision(id.to_string()),
+                ["Base", "Stash"],
+            ),
+            Self::Range { from, to, .. } => (
+                Revision(from.clone()),
+                Revision(to.to_string()),
+                ["From", "To"],
+            ),
         }
     }
 
@@ -450,7 +470,7 @@ pub enum Message {
     FilesScrolled(ScrollPos),
     ToggleWhitespace,
     Close,
-    ViewFile,
+    ViewChanges,
 }
 
 #[derive(Debug, Clone)]
@@ -470,9 +490,10 @@ pub enum Output {
         highlight: Option<usize>,
     },
     FileAction(FileAction),
-    /// Show the full file from the currently displayed local diff source.
-    ViewFile {
+    /// Show the selected file with the currently displayed changes.
+    ViewChanges {
         source: DiffSource,
+        path: PathBuf,
         diff: Arc<LoadedDiff>,
         file: usize,
     },
@@ -547,6 +568,10 @@ impl State {
                 .get(self.file)
                 .and_then(|f| f.display_path().cloned()),
         }
+    }
+
+    fn can_view_changes(&self) -> bool {
+        !self.loading && self.error.is_none() && self.diff.submodules.get(self.file) != Some(&true)
     }
 
     fn patches(
@@ -979,14 +1004,14 @@ impl State {
         let file = self.diff.files.get(i)?;
         let path = file.display_path()?;
         let source = self.source.as_ref()?;
-        let revision = source.file_revision(file)?;
         let end = source.end_revision()?;
+        let revision = source.file_revision(file)?;
         let title = path.display().to_string();
         let mut entries = Vec::new();
         if !self.diff.submodules[i] {
             entries.push(Entry::item(
                 'v',
-                "View file",
+                "view file",
                 "show the entire file at this revision",
                 Message::FileAction(FileAction::View(
                     path.clone(),
@@ -1186,32 +1211,20 @@ impl State {
                 self.close();
                 Update::none()
             }
-            Message::ViewFile => match &self.source {
-                Some(source) if source.role() == Role::Local => Update::output(Output::ViewFile {
+            Message::ViewChanges => {
+                let (Some(source), Some(path)) = (&self.source, self.current_path()) else {
+                    return Update::none();
+                };
+                if !self.can_view_changes() {
+                    return Update::none();
+                }
+                Update::output(Output::ViewChanges {
                     source: source.clone(),
+                    path,
                     diff: self.diff.clone(),
                     file: self.file,
-                }),
-                Some(source) => {
-                    let Some(file) = self
-                        .diff
-                        .files
-                        .get(self.file)
-                        .filter(|_| !self.diff.submodules[self.file])
-                    else {
-                        return Update::none();
-                    };
-                    let (Some(path), Some(rev)) = (file.display_path(), source.file_revision(file))
-                    else {
-                        return Update::none();
-                    };
-                    Update::output(Output::FileAction(FileAction::View(
-                        path.clone(),
-                        FileVersion::Revision(rev),
-                    )))
-                }
-                None => Update::none(),
-            },
+                })
+            }
         }
     }
 
@@ -1333,26 +1346,17 @@ impl State {
                     Message::SelectFile(self.file + 1),
                 ));
         }
-        let blob = self.diff.submodules.get(self.file) == Some(&false);
-        if shown_path.is_some() {
-            if self.role == Role::Local {
-                header = header.push(widgets::tip(
+        if shown_path.is_some() && self.diff.submodules.get(self.file) != Some(&true) {
+            header = header.push(widgets::tip(
+                t,
+                widgets::text_button(
                     t,
-                    widgets::text_button(
-                        t,
-                        "View",
-                        None,
-                        (!self.loading).then_some(Message::ViewFile),
-                    ),
-                    "show the entire file with changes".into(),
-                ));
-            } else if blob {
-                header = header.push(widgets::tip(
-                    t,
-                    widgets::text_button(t, "View file", None, Some(Message::ViewFile)),
-                    "show the entire file".into(),
-                ));
-            }
+                    "View",
+                    None,
+                    self.can_view_changes().then_some(Message::ViewChanges),
+                ),
+                "show the entire file with changes".into(),
+            ));
         }
         let whitespace_color = if self.ignore_whitespace {
             t.accent()
