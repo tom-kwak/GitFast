@@ -467,3 +467,52 @@ async fn log_position_is_none_outside_the_history() {
     let unknown: gf_core::model::Oid = "1".repeat(40).parse().unwrap();
     assert_eq!(r.log_position(&all, &unknown).await.unwrap(), None);
 }
+
+#[tokio::test]
+async fn file_preview_limits_each_version_before_reading_its_contents() {
+    use gf_git::{FILE_PREVIEW_LIMIT, FileVersion};
+
+    let repo = TestRepo::new();
+    let path = Path::new("preview.txt");
+    let limit = "a".repeat(FILE_PREVIEW_LIMIT);
+    repo.write("preview.txt", &limit);
+    repo.commit_all("exact limit");
+
+    let r = open(&repo).await;
+    let versions = [
+        FileVersion::WorkTree,
+        FileVersion::Index,
+        FileVersion::Revision("HEAD".into()),
+    ];
+    for version in &versions {
+        assert_eq!(r.file_bytes(path, version).await.unwrap(), limit.as_bytes());
+    }
+
+    // Worktree and staged changes are independent of the committed file.
+    repo.write("preview.txt", &format!("{limit}b"));
+    assert!(matches!(
+        r.file_bytes(path, &FileVersion::WorkTree).await,
+        Err(GfError::FilePreviewTooLarge)
+    ));
+    assert_eq!(
+        r.file_bytes(path, &FileVersion::Index).await.unwrap().len(),
+        FILE_PREVIEW_LIMIT
+    );
+    repo.git(&["add", "--", "preview.txt"]);
+    assert!(matches!(
+        r.file_bytes(path, &FileVersion::Index).await,
+        Err(GfError::FilePreviewTooLarge)
+    ));
+    repo.commit_all("over limit");
+    assert!(matches!(
+        r.file_bytes(path, &FileVersion::Revision("HEAD".into()))
+            .await,
+        Err(GfError::FilePreviewTooLarge)
+    ));
+    assert_eq!(
+        r.file_bytes(path, &FileVersion::Revision("HEAD^".into()))
+            .await
+            .unwrap(),
+        limit.as_bytes()
+    );
+}

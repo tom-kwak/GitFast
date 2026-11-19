@@ -513,6 +513,12 @@ impl RemoteOps for GixBackend {
                 };
                 remotes.push(Remote {
                     name: text(name),
+                    fetch_refspecs: file
+                        .strings_by("remote", Some(name), "fetch")
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|spec| text(spec.as_ref()))
+                        .collect(),
                     fetch_url: text(url.as_ref()),
                     push_url,
                 });

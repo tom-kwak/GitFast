@@ -733,6 +733,8 @@ pub struct RepoTab {
     pub code_view: diff_view::Role,
     pub commit: commit_box::State,
     /// Blame shown instead of the commit changes while open.
+    pub blame_request: u64,
+    pub history_request: u64,
     pub blame: Option<crate::features::blame_view::State>,
     /// Conflict resolver shown instead of the local diff while open.
     pub conflict: Option<crate::features::conflict_view::State>,
@@ -777,6 +779,8 @@ impl RepoTab {
             local_diff: diff_view::State::new(diff_view::Role::Local),
             commit_diff: diff_view::State::new(diff_view::Role::Commit),
             code_view: diff_view::Role::Commit,
+            blame_request: 0,
+            history_request: 0,
             blame: None,
             conflict: None,
             undo,
@@ -1091,6 +1095,7 @@ mod tests {
     fn push_goes_to_the_upstream_remote_else_origin() {
         let r = |n: &str| Remote {
             name: n.into(),
+            fetch_refspecs: Vec::new(),
             fetch_url: String::new(),
             push_url: None,
         };

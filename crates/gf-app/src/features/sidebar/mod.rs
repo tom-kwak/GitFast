@@ -3,6 +3,7 @@
 //! history (or diff, for stashes) and an action bar for it; section headers
 //! have `+` buttons to create new items.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gf_core::model::{Branch, RefKind, StashEntry, Tag};
@@ -42,6 +43,7 @@ pub enum Selection {
 
 #[derive(Debug)]
 pub struct State {
+    layout: OnceCell<(Vec<SideRow>, usize)>,
     collapsed: HashSet<Section>,
     filter: String,
     selected: Option<Selection>,
@@ -62,6 +64,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            layout: OnceCell::new(),
             // Only branches are open at first; the other sections are a
             // click (or →) away and keep the list short.
             collapsed: HashSet::from([
@@ -105,7 +108,7 @@ enum Item {
 }
 
 impl Item {
-    fn of(row: &SideRow<'_>) -> Option<Self> {
+    fn of(row: &SideRow) -> Option<Self> {
         Some(match row {
             SideRow::Header(sec, ..) => Self::Fold(Fold::Section(*sec)),
             SideRow::Folder { section, path, .. } => {
@@ -131,7 +134,7 @@ impl Item {
 
 /// Nesting level of a row: sections are 0, their rows 1, and each branch
 /// folder adds one.
-fn depth(row: &SideRow<'_>) -> usize {
+fn depth(row: &SideRow) -> usize {
     match row {
         SideRow::Header(..) => 0,
         SideRow::Folder { depth, .. } | SideRow::Branch(_, depth) => depth + 1,
@@ -148,7 +151,7 @@ fn branch_tree<'a>(
     branches: &[&'a Branch],
     folded: impl Fn(&str) -> bool,
     filtering: bool,
-) -> Vec<SideRow<'a>> {
+) -> Vec<SideRow> {
     let mut sorted: Vec<&'a Branch> = branches.to_vec();
     sorted.sort_by(|a, b| a.name.short().cmp(b.name.short()));
     // Folder prefixes of a name: `a/b/c` → [`a`, `a/b`].
@@ -176,7 +179,7 @@ fn branch_tree<'a>(
                 open.push(dir);
                 rows.push(SideRow::Folder {
                     section,
-                    path: dir,
+                    path: (*dir).to_owned(),
                     depth: d,
                     count: counts.get(dir).copied().unwrap_or(0),
                 });
@@ -189,7 +192,7 @@ fn branch_tree<'a>(
         }
         if !hidden {
             open.truncate(dirs.len());
-            rows.push(SideRow::Branch(b, dirs.len()));
+            rows.push(SideRow::Branch(b.clone(), dirs.len()));
         }
     }
     rows
@@ -213,25 +216,25 @@ fn row_height(t: &Tokens) -> f32 {
 }
 
 /// One row of the flattened tree.
-#[derive(Debug, Clone, Copy)]
-enum SideRow<'a> {
+#[derive(Debug)]
+enum SideRow {
     Header(Section, &'static str, usize, Option<(Action, &'static str)>),
     /// A `/` folder of branches: its path, nesting and branch count.
     Folder {
         section: Section,
-        path: &'a str,
+        path: String,
         depth: usize,
         count: usize,
     },
     /// A branch and how many folders it is nested in.
-    Branch(&'a Branch, usize),
-    Tag(&'a Tag),
-    Stash(&'a StashEntry),
-    Worktree(&'a gf_git::Worktree),
-    Submodule(&'a gf_git::Submodule),
-    Lfs(&'a String),
+    Branch(Branch, usize),
+    Tag(Tag),
+    Stash(StashEntry),
+    Worktree(gf_git::Worktree),
+    Submodule(gf_git::Submodule),
+    Lfs(String),
     Hint(&'static str),
-    UnbornBranch(&'a str),
+    UnbornBranch(String),
 }
 
 #[derive(Debug, Clone)]
@@ -307,7 +310,6 @@ pub enum Output {
     NewStash,
     Checkout(Branch),
     RenameBranch(String),
-    DeleteBranch(Branch),
     DeleteBranches(Vec<Branch>),
     PushBranch(Branch),
     /// Merge this branch (short name) into the current branch.
@@ -341,6 +343,7 @@ impl State {
     /// Forgets a selection that no longer exists (deleted branch, dropped
     /// stash). Returns false when it was forgotten.
     pub fn retain_existing(&mut self, snapshot: &Snapshot) -> bool {
+        self.layout.take();
         if !self.marked_branches.is_empty() {
             let existing: HashSet<_> = snapshot.branches.iter().map(|b| b.name.as_str()).collect();
             self.marked_branches
@@ -394,6 +397,7 @@ impl State {
         t: &Tokens,
     ) -> iced::Task<Message> {
         self.clear_branch_marks();
+        self.layout.take();
         let full = branch.name.as_str();
         let short = branch.name.short();
         self.selected = Some(Selection::Ref(full.to_owned()));
@@ -407,7 +411,8 @@ impl State {
             self.folded
                 .remove(&(Section::Branches, short[..slash].to_owned()));
         }
-        self.rows(snap)
+        self.layout(snap)
+            .0
             .iter()
             .position(|row| matches!(row, SideRow::Branch(b, _) if b.name.as_str() == full))
             .map_or_else(iced::Task::none, |row| {
@@ -447,7 +452,7 @@ impl State {
         };
         let anchor = self.mark_anchor.as_deref().or(selected).unwrap_or(&name);
         if range {
-            let rows = self.rows(snap);
+            let rows = &self.layout(snap).0;
             let branches: Vec<_> = rows
                 .iter()
                 .filter_map(|row| match row {
@@ -482,7 +487,7 @@ impl State {
         self.last_click = None;
     }
 
-    fn tree<'a>(&self, section: Section, branches: &[&'a Branch]) -> Vec<SideRow<'a>> {
+    fn tree(&self, section: Section, branches: &[&Branch]) -> Vec<SideRow> {
         branch_tree(
             section,
             branches,
@@ -499,6 +504,7 @@ impl State {
     }
 
     fn set_folded(&mut self, fold: &Fold, folded: bool) {
+        self.layout.take();
         match (fold, folded) {
             (Fold::Section(sec), true) => {
                 self.collapsed.insert(*sec);
@@ -522,8 +528,31 @@ impl State {
         }
     }
 
+    fn layout(&self, snap: &Snapshot) -> &(Vec<SideRow>, usize) {
+        self.layout.get_or_init(|| {
+            let rows = self.rows(snap);
+            let name_cols = rows
+                .iter()
+                .map(|r| match r {
+                    SideRow::Branch(b, d) => columns(b.name.short()) + 12 + d * 2,
+                    SideRow::Folder { path, depth, .. } => columns(path) + 12 + depth * 2,
+                    SideRow::Tag(tg) => columns(tg.name.short()),
+                    SideRow::Stash(s) => columns(&s.message),
+                    SideRow::Worktree(w) => columns(&w.path.display().to_string()) + 20,
+                    SideRow::Submodule(m) => columns(&m.path.display().to_string()) + 24,
+                    SideRow::Lfs(p) => columns(p),
+                    SideRow::Hint(h) => columns(h),
+                    SideRow::UnbornBranch(name) => columns(name) + columns("●  (no commits yet)"),
+                    SideRow::Header(..) => 18,
+                })
+                .max()
+                .unwrap_or(0);
+            (rows, name_cols)
+        })
+    }
+
     /// The flattened tree as shown.
-    fn rows<'a>(&self, snap: &'a Snapshot) -> Vec<SideRow<'a>> {
+    fn rows(&self, snap: &Snapshot) -> Vec<SideRow> {
         let locals: Vec<_> = snap
             .branches
             .iter()
@@ -544,7 +573,7 @@ impl State {
             .iter()
             .filter(|s| self.matches(&s.message))
             .collect();
-        let mut rows: Vec<SideRow<'a>> = Vec::new();
+        let mut rows: Vec<SideRow> = Vec::new();
         let open = |sec: Section| !self.collapsed.contains(&sec);
 
         let head = &snap.status.head;
@@ -560,7 +589,7 @@ impl State {
         ));
         if open(Section::Branches) {
             if let Some(name) = unborn {
-                rows.push(SideRow::UnbornBranch(name));
+                rows.push(SideRow::UnbornBranch(name.to_owned()));
             } else if locals.is_empty() {
                 rows.push(SideRow::Hint(if self.filter.is_empty() {
                     "none yet — make a first commit"
@@ -596,7 +625,7 @@ impl State {
             if tags.is_empty() {
                 rows.push(SideRow::Hint("none — + creates one"));
             }
-            rows.extend(tags.iter().map(|tg| SideRow::Tag(tg)));
+            rows.extend(tags.into_iter().cloned().map(SideRow::Tag));
         }
         rows.push(SideRow::Header(
             Section::Stashes,
@@ -608,7 +637,7 @@ impl State {
             if stashes.is_empty() {
                 rows.push(SideRow::Hint("none — + puts changes aside"));
             }
-            rows.extend(stashes.iter().map(|s| SideRow::Stash(s)));
+            rows.extend(stashes.into_iter().cloned().map(SideRow::Stash));
         }
 
         // Optional sections: only shown when the repository has them.
@@ -625,7 +654,7 @@ impl State {
                 Some((Action::NewWorktree, "add a working tree…")),
             ));
             if open(Section::Worktrees) {
-                rows.extend(wts.into_iter().map(SideRow::Worktree));
+                rows.extend(wts.into_iter().cloned().map(SideRow::Worktree));
             }
         } else {
             rows.push(SideRow::Header(
@@ -653,7 +682,7 @@ impl State {
                 None,
             ));
             if open(Section::Submodules) {
-                rows.extend(subs.into_iter().map(SideRow::Submodule));
+                rows.extend(subs.into_iter().cloned().map(SideRow::Submodule));
             }
         }
         if let Some(patterns) = &snap.lfs {
@@ -665,7 +694,7 @@ impl State {
                 Some((Action::TrackLfs, "track a file pattern with LFS…")),
             ));
             if open(Section::Lfs) {
-                rows.extend(pats.into_iter().map(SideRow::Lfs));
+                rows.extend(pats.into_iter().cloned().map(SideRow::Lfs));
             }
         }
         rows
@@ -677,7 +706,8 @@ impl State {
     pub fn nav(&mut self, nav: Nav, snap: Option<&Snapshot>, t: &Tokens) -> Option<Moved<Message>> {
         let snap = snap?;
         let items: Vec<(usize, Item, usize)> = self
-            .rows(snap)
+            .layout(snap)
+            .0
             .iter()
             .enumerate()
             .filter_map(|(i, r)| Item::of(r).map(|it| (i, it, depth(r))))
@@ -1275,7 +1305,7 @@ impl State {
                     match action {
                         Action::Checkout => Some(Output::Checkout(b.clone())),
                         Action::Rename => Some(Output::RenameBranch(b.name.short().to_owned())),
-                        Action::Delete => Some(Output::DeleteBranch(b.clone())),
+                        Action::Delete => Some(Output::DeleteBranches(vec![b.clone()])),
                         Action::Push => Some(Output::PushBranch(b.clone())),
                         Action::Merge => Some(Output::Merge(b.name.short().to_owned())),
                         Action::RebaseOnto => Some(Output::RebaseOnto(b.name.short().to_owned())),
@@ -1309,6 +1339,7 @@ impl State {
                 Update::none()
             }
             Message::Toggle(section) => {
+                self.layout.take();
                 self.cursor = Some(Fold::Section(section));
                 if !self.collapsed.remove(&section) {
                     self.collapsed.insert(section);
@@ -1316,6 +1347,7 @@ impl State {
                 Update::none()
             }
             Message::Filter(f) => {
+                self.layout.take();
                 self.filter = f;
                 Update::none()
             }
@@ -1407,6 +1439,7 @@ impl State {
                 // Creating something (`+`, "branch from here…") opens the
                 // section it will appear in, so the new item shows there.
                 if let Some(section) = action.creates_in() {
+                    self.layout.take();
                     self.collapsed.remove(&section);
                 }
                 self.output_for(action, snap)
@@ -1461,33 +1494,9 @@ impl State {
             );
         };
 
-        let rows = self.rows(snap);
-        let name_cols = rows
-            .iter()
-            .map(|r| match r {
-                SideRow::Branch(b, d) => {
-                    columns(b.name.short())
-                        + 12
-                        + d * 2
-                        + if progress(b).is_some() {
-                            columns("   Switching…")
-                        } else {
-                            0
-                        }
-                }
-                SideRow::Folder { path, depth, .. } => columns(path) + 12 + depth * 2,
-                SideRow::Tag(tg) => columns(tg.name.short()),
-                SideRow::Stash(s) => columns(&s.message),
-                SideRow::Worktree(w) => columns(&w.path.display().to_string()) + 20,
-                SideRow::Submodule(m) => columns(&m.path.display().to_string()) + 24,
-                SideRow::Lfs(p) => columns(p),
-                SideRow::Hint(h) => columns(h),
-                SideRow::UnbornBranch(name) => columns(name) + columns("●  (no commits yet)"),
-                SideRow::Header(..) => 18,
-            })
-            .max()
-            .unwrap_or(0);
-        let content_width = t.cols(4 + name_cols) + 16.0;
+        let (rows, name_cols) = self.layout(snap);
+        let indicator_cols = checkout.map_or(0, |_| columns("   Switching…"));
+        let content_width = t.cols(4 + name_cols + indicator_cols) + 16.0;
         let list = virtual_list(
             LIST_ID,
             rows.len(),
@@ -1495,23 +1504,23 @@ impl State {
             content_width,
             self.scroll,
             move |i| {
-                let el: Element<'a, Message> = match rows[i] {
+                let el: Element<'a, Message> = match &rows[i] {
                     SideRow::Header(sec, label, count, add) => {
-                        self.header(t, sec, label, count, add)
+                        self.header(t, *sec, label, *count, *add)
                     }
                     SideRow::Folder {
                         section,
                         path,
                         depth,
                         count,
-                    } => self.folder_row(t, section, path, depth, count),
-                    SideRow::Branch(b, depth) => self.branch_row(t, b, depth, progress(b)),
+                    } => self.folder_row(t, *section, path, *depth, *count),
+                    SideRow::Branch(b, depth) => self.branch_row(t, b, *depth, progress(b)),
                     SideRow::Tag(tg) => self.tag_row(t, tg),
                     SideRow::Stash(s) => self.stash_row(t, s),
                     SideRow::Worktree(w) => self.worktree_row(t, w),
                     SideRow::Submodule(m) => self.submodule_row(t, m),
                     SideRow::Lfs(p) => self.lfs_row(t, p),
-                    SideRow::Hint(h) => widgets::empty_hint(t, h),
+                    SideRow::Hint(h) => widgets::empty_hint(t, *h),
                     SideRow::UnbornBranch(name) => {
                         colored(t, format!("  ● {name} (no commits yet)"), t.head()).into()
                     }
@@ -1596,7 +1605,9 @@ mod tests {
         let out = s
             .update_with(Message::Act(Action::Delete), Some(&snap))
             .output;
-        assert!(matches!(out, Some(Output::DeleteBranch(b)) if b.name.short() == "dev"));
+        assert!(
+            matches!(out, Some(Output::DeleteBranches(bs)) if bs.len() == 1 && bs[0].name.short() == "dev")
+        );
         let out = s
             .update_with(Message::Act(Action::NewBranch), Some(&snap))
             .output;
@@ -1767,7 +1778,7 @@ mod tests {
     }
 
     /// `(depth, label)` per row: `folder/` or a branch's short name.
-    fn shape(rows: &[SideRow<'_>]) -> Vec<(usize, String)> {
+    fn shape(rows: &[SideRow]) -> Vec<(usize, String)> {
         rows.iter()
             .map(|r| match r {
                 SideRow::Folder { path, depth, .. } => (*depth, format!("{path}/")),

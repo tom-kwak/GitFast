@@ -94,7 +94,7 @@ impl App {
     /// After a dialog, menu or command: back to the prompt only if the user
     /// was typing there (or there is nothing else to focus).
     pub(super) fn restore_focus(&self) -> Task<Message> {
-        if self.settings_open || self.code_dialog.is_some() {
+        if self.settings_open || self.code_dialog.is_some() || self.dialog.is_some() {
             return Task::none();
         }
         if self.picker.is_some() {

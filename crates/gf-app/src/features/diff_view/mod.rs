@@ -971,15 +971,24 @@ impl State {
         Update::none()
     }
 
+    fn historical_preview(&self, i: usize) -> Option<(&PathBuf, String)> {
+        let file = self
+            .diff
+            .files
+            .get(i)
+            .filter(|_| !self.diff.submodules[i])?;
+        let revision = self.source.as_ref()?.file_revision(file)?;
+        Some((file.display_path()?, revision))
+    }
+
     fn file_menu(&self, i: usize) -> Option<Menu<Message>> {
         let file = self.diff.files.get(i)?;
         let path = file.display_path()?;
         let source = self.source.as_ref()?;
-        let revision = source.file_revision(file)?;
         let end = source.end_revision()?;
         let title = path.display().to_string();
         let mut entries = Vec::new();
-        if !self.diff.submodules[i] {
+        if let Some((path, revision)) = self.historical_preview(i) {
             entries.push(Entry::item(
                 'v',
                 "View file",
@@ -1186,25 +1195,14 @@ impl State {
                 Some(source) if source.role() == Role::Local => {
                     Update::output(Output::ViewFile(source.clone()))
                 }
-                Some(source) => {
-                    let Some(file) = self
-                        .diff
-                        .files
-                        .get(self.file)
-                        .filter(|_| !self.diff.submodules[self.file])
-                    else {
-                        return Update::none();
-                    };
-                    let (Some(path), Some(rev)) = (file.display_path(), source.file_revision(file))
-                    else {
-                        return Update::none();
-                    };
-                    Update::output(Output::FileAction(FileAction::View(
-                        path.clone(),
-                        FileVersion::Revision(rev),
-                    )))
-                }
-                None => Update::none(),
+                _ => self
+                    .historical_preview(self.file)
+                    .map_or_else(Update::none, |(path, rev)| {
+                        Update::output(Output::FileAction(FileAction::View(
+                            path.clone(),
+                            FileVersion::Revision(rev),
+                        )))
+                    }),
             },
         }
     }

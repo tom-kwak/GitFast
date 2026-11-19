@@ -50,24 +50,16 @@ impl App {
                     deletion.local.push(name.to_owned());
                 }
                 RefKind::RemoteBranch => {
-                    let remote = snap
-                        .remotes
-                        .iter()
-                        .filter_map(|remote| {
-                            let branch =
-                                name.strip_prefix(remote.name.as_str())?.strip_prefix('/')?;
-                            Some((remote.name.as_str(), branch))
-                        })
-                        .max_by_key(|(remote, _)| remote.len());
+                    let remote = gf_git::remote_branch(&snap.remotes, b.name.as_str());
                     if let Some((remote, branch)) = remote {
                         review.push(format!("  On remote {remote}: {branch}"));
                         deletion
                             .remote
                             .entry(remote.to_owned())
                             .or_default()
-                            .push(branch.to_owned());
+                            .push(branch);
                     } else {
-                        review.push(format!("  Keep {name} (remote unavailable)"));
+                        review.push(format!("  Keep {name} (no unique remote branch mapping)"));
                         skipped += 1;
                     }
                 }
@@ -86,7 +78,7 @@ impl App {
                 .review(review),
             );
         }
-        let mut body = vec![format!("Delete these {n} branch(es)?")];
+        let mut body = vec![format!("Branches to delete: {n}")];
         if skipped > 0 {
             body.push(format!("{skipped} selected branch(es) will be kept."));
         }
@@ -120,12 +112,22 @@ impl App {
         deletion: BranchDeletion,
         force: bool,
     ) -> Task<Message> {
+        let Some(git_dir) = self.active_tab().map(|t| t.repo.handle().git_dir.clone()) else {
+            return Task::none();
+        };
+        if !self.deleting_branches.insert(git_dir.clone()) {
+            self.flash(
+                crate::features::command_log::NoteKind::Info,
+                "Branch deletion already in progress",
+            );
+            return Task::none();
+        }
         let label = format!("delete {} branches", deletion.len());
         let record = (!deletion.local.is_empty()).then(|| {
             let names: Vec<_> = deletion.local.iter().map(String::as_str).collect();
             Record::new(undo::branches(&names, false)).required()
         });
-        self.op_recorded(label, OpKind::Generic, record, move |repo| async move {
+        self.op_recorded(label, OpKind::DeleteBranches(git_dir), record, move |repo| async move {
             let mut failures = Vec::new();
             if let Err(e) = repo.delete_branches(&deletion.local, force).await {
                 failures.push(format!("Local branches:\n{}", error_excerpt(&e.to_string(), 4).join("\n")));
