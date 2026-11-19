@@ -41,6 +41,7 @@ const NEAR_END_PX: f32 = 200.0;
 pub struct State {
     /// Revision being shown; `None` = the snapshot's history.
     revision: Option<String>,
+    pub file_revision: Option<(std::path::PathBuf, Option<Oid>)>,
     /// History for `revision`, loaded by the app.
     data: Option<Arc<History>>,
     /// The commit checked out, as of the last update (menus).
@@ -155,10 +156,22 @@ impl State {
     pub fn set_revision(&mut self, revision: Option<String>) {
         self.loading = revision.is_some();
         self.revision = revision;
+        self.file_revision = None;
         self.data = None;
         self.scroll = ScrollPos::default();
         self.revision_limit = 0;
         self.loading_more = false;
+    }
+
+    /// Keep the native path for Git, including names that cannot be displayed losslessly.
+    pub fn set_file_revision(&mut self, path: std::path::PathBuf, start: Option<Oid>) -> String {
+        let label = match &start {
+            Some(oid) => format!("file {oid}: {}", path.display()),
+            None => format!("file: {}", path.display()),
+        };
+        self.set_revision(Some(label.clone()));
+        self.file_revision = Some((path, start));
+        label
     }
 
     /// How many commits to load for the snapshot's history.
@@ -448,6 +461,7 @@ impl State {
         }
         self.loading = false;
         self.revision = None;
+        self.file_revision = None;
     }
 
     fn history<'a>(&'a self, snap: &'a Snapshot) -> Option<&'a History> {

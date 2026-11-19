@@ -22,6 +22,7 @@ pub fn parse_remotes(out: &[u8]) -> Result<Vec<Remote>> {
             None => {
                 remotes.push(Remote {
                     name: name.to_owned(),
+                    fetch_refspecs: Vec::new(),
                     fetch_url: String::new(),
                     push_url: None,
                 });

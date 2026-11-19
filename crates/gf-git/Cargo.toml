@@ -22,6 +22,8 @@ gix-fetch = [
 ]
 
 [dependencies]
+gix-refspec = "0.47"
+gix-hash = { version = "0.28", features = ["sha1"] }
 gf-core.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "rt", "sync", "macros", "time", "fs"] }
 tokio-util.workspace = true

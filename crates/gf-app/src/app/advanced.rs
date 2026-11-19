@@ -130,27 +130,37 @@ impl App {
             }
             None => {}
         }
+        let active = self.active_tab().is_some_and(|tab| tab.repo.id() == id);
         match result {
             Ok(Integration::Done) => {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.pending = None;
                 }
                 let hint = if recorded { " · ⌘Z undo" } else { "" };
-                self.flash(NoteKind::Info, format!("✓ {}{hint}", truncate(&label, 60)));
+                if active {
+                    self.flash(NoteKind::Info, format!("✓ {}{hint}", truncate(&label, 60)));
+                }
             }
             Ok(Integration::Conflicts(n)) => {
                 // Resolving happens in the working tree view.
                 if let Some(tab) = self.tab_mut(id) {
                     tab.code_view = Role::Local;
                 }
-                self.flash(
-                    NoteKind::Error,
-                    format!("{label}: {n} conflict(s) — resolve them, then continue (or abort)"),
-                );
+                if active {
+                    self.flash(
+                        NoteKind::Error,
+                        format!(
+                            "{label}: {n} conflict(s) — resolve them, then continue (or abort)"
+                        ),
+                    );
+                }
             }
             Err(e) => {
                 self.log
                     .note(NoteKind::Error, format!("{label} failed"), vec![e.clone()]);
+                if !active {
+                    return refresh;
+                }
                 self.flash(
                     NoteKind::Error,
                     format!("✗ {} — see log", truncate(&label, 40)),
@@ -766,7 +776,11 @@ impl App {
         selected: usize,
         result: Result<gf_git::SquashPreview, String>,
     ) -> Task<Message> {
-        if self.active_tab().map(|t| t.repo.id()) != Some(repo) {
+        if self.active_tab().map(|t| t.repo.id()) != Some(repo)
+            || self.dialog.is_some()
+            || self.code_dialog.is_some()
+            || self.rebase_editor().is_some()
+        {
             return Task::none();
         }
         let preview = match result {
@@ -949,6 +963,8 @@ impl App {
             return Task::none();
         };
         tab.code_view = Role::Commit;
+        tab.blame_request = tab.blame_request.wrapping_add(1);
+        let request = tab.blame_request;
         tab.blame = Some(crate::features::blame_view::State::loading(
             path.clone(),
             rev.clone(),
@@ -964,7 +980,7 @@ impl App {
                         .map_err(|e| e.to_string())
                 }
             },
-            move |result| Message::BlameLoaded(id, path.clone(), result),
+            move |result| Message::BlameLoaded(id, request, path.clone(), result),
         )
     }
 
@@ -997,16 +1013,13 @@ impl App {
         path: std::path::PathBuf,
         revision: Option<Oid>,
     ) -> Task<Message> {
+        self.expand_history();
         let Some(tab) = self.active_tab_mut() else {
             return Task::none();
         };
         tab.code_view = Role::Commit;
         tab.sidebar.clear_selection();
-        let key = match revision {
-            Some(oid) => format!("file {oid}: {}", path.display()),
-            None => format!("file: {}", path.display()),
-        };
-        tab.history.set_revision(Some(key.clone()));
+        let key = tab.history.set_file_revision(path, revision);
         super::ops::load_history(tab, key)
     }
 }

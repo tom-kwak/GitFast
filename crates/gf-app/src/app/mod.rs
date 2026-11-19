@@ -28,7 +28,7 @@ mod settings;
 mod ui_sweep;
 mod undoing;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -108,6 +108,7 @@ pub enum Shortcut {
 pub enum OpKind {
     Generic,
     Checkout(PathBuf),
+    DeleteBranches(PathBuf),
     RemoveWorktree(PathBuf),
     Commit,
     Fetch,
@@ -195,7 +196,7 @@ pub enum Message {
     PickFolder,
     Picked(Option<PathBuf>),
     Loaded(RepoId, Result<Arc<Snapshot>, String>),
-    HistoryLoaded(RepoId, String, Result<Arc<History>, String>),
+    HistoryLoaded(RepoId, u64, String, Result<Arc<History>, String>),
     DiffFinished(RepoId, diff_view::Role, diff_view::Completion),
     AmendTextLoaded(RepoId, Option<String>),
     SyncProgress(Progress),
@@ -222,8 +223,13 @@ pub enum Message {
     Banner(crate::features::op_banner::Message),
     Conflict(crate::features::conflict_view::Message),
     Blame(crate::features::blame_view::Message),
-    BlameLoaded(RepoId, PathBuf, Result<Vec<gf_git::BlameLine>, String>),
-    BlameHighlighted(RepoId, PathBuf, Option<Arc<Vec<crate::highlight::Spans>>>),
+    BlameLoaded(RepoId, u64, PathBuf, Result<Vec<gf_git::BlameLine>, String>),
+    BlameHighlighted(
+        RepoId,
+        u64,
+        PathBuf,
+        Option<Arc<Vec<crate::highlight::Spans>>>,
+    ),
     ConflictLoaded(
         RepoId,
         PathBuf,
@@ -329,6 +335,7 @@ pub struct App {
     sync: Option<(toolbar::Sync, CancellationToken)>,
     /// Keyed by worktree git directory so a running switch survives closing its tab.
     checkouts: HashMap<PathBuf, Checkout>,
+    deleting_branches: HashSet<PathBuf>,
     flash: Option<Flash>,
     tick: usize,
     drop_hover: bool,
@@ -418,6 +425,7 @@ impl App {
             pointer: crate::widgets::pointer::Pointer::default(),
             sync: None,
             checkouts: HashMap::new(),
+            deleting_branches: HashSet::new(),
             flash: None,
             tick: 0,
             drop_hover: false,
@@ -469,6 +477,7 @@ impl App {
         self.opening > 0
             || self.sync.is_some()
             || !self.checkouts.is_empty()
+            || !self.deleting_branches.is_empty()
             || self.tabs.iter().any(|t| t.loading)
             || self.log.has_running()
     }
@@ -554,7 +563,10 @@ impl App {
             }
             // Keys belong to the open menu or settings.
             Message::Prompt(_)
-                if self.menu.is_some() || self.settings_open || self.code_dialog.is_some() =>
+                if self.menu.is_some()
+                    || self.settings_open
+                    || self.code_dialog.is_some()
+                    || self.dialog.is_some() =>
             {
                 Task::none()
             }
@@ -616,6 +628,7 @@ impl App {
                 if matches!(
                     m,
                     sidebar::Message::Select(_)
+                        | sidebar::Message::RightClick(_)
                         | sidebar::Message::Toggle(_)
                         | sidebar::Message::ToggleBranch(_)
                         | sidebar::Message::SelectBranchRange(_)
@@ -634,7 +647,10 @@ impl App {
                 }
             }
             Message::Changes(m) => {
-                if matches!(m, changes::Message::Select(..)) {
+                if matches!(
+                    m,
+                    changes::Message::Select(..) | changes::Message::RightClick(..)
+                ) {
                     self.focus_pane(Pane::Changes);
                 }
                 let Some(tab) = self.active_tab_mut() else {
@@ -853,8 +869,11 @@ impl App {
             Message::Picked(Some(path)) => self.update(Message::Open(path)),
             Message::Picked(None) => self.restore_focus(),
             Message::Loaded(id, result) => self.on_loaded(id, result),
-            Message::HistoryLoaded(id, rev, result) => {
-                let Some(tab) = self.tab_mut(id) else {
+            Message::HistoryLoaded(id, request, rev, result) => {
+                let Some(tab) = self
+                    .tab_mut(id)
+                    .filter(|t| t.history_request == request && t.history.revision() == Some(&rev))
+                else {
                     return Task::none();
                 };
                 match result {
@@ -896,7 +915,7 @@ impl App {
                 step,
             } => {
                 let repo = match &kind {
-                    OpKind::Checkout(git_dir) => self
+                    OpKind::Checkout(git_dir) | OpKind::DeleteBranches(git_dir) => self
                         .tabs
                         .iter()
                         .find(|tab| tab.repo.handle().git_dir == *git_dir)
@@ -936,8 +955,12 @@ impl App {
             Message::Banner(m) => self.on_banner(m),
             Message::Conflict(m) => self.on_conflict_message(m),
             Message::Blame(m) => self.on_blame_message(m),
-            Message::BlameLoaded(id, path, result) => {
-                let Some(b) = self.tab_mut(id).and_then(|t| t.blame.as_mut()) else {
+            Message::BlameLoaded(id, request, path, result) => {
+                let Some(b) = self
+                    .tab_mut(id)
+                    .filter(|tab| tab.blame_request == request)
+                    .and_then(|t| t.blame.as_mut())
+                else {
                     return Task::none();
                 };
                 b.loaded(&path, result);
@@ -948,13 +971,16 @@ impl App {
                 let text: Vec<String> = lines.iter().map(|l| l.content.clone()).collect();
                 Task::perform(
                     crate::features::blame_view::highlight(path.clone(), text),
-                    move |spans| Message::BlameHighlighted(id, path.clone(), spans),
+                    move |spans| Message::BlameHighlighted(id, request, path.clone(), spans),
                 )
             }
-            Message::BlameHighlighted(id, path, spans) => {
-                if let (Some(b), Some(spans)) =
-                    (self.tab_mut(id).and_then(|t| t.blame.as_mut()), spans)
-                {
+            Message::BlameHighlighted(id, request, path, spans) => {
+                if let (Some(b), Some(spans)) = (
+                    self.tab_mut(id)
+                        .filter(|tab| tab.blame_request == request)
+                        .and_then(|t| t.blame.as_mut()),
+                    spans,
+                ) {
                     b.highlighted(&path, spans);
                 }
                 Task::none()
@@ -1077,6 +1103,7 @@ impl App {
         let repo = repo.with_gix_fetch(self.settings.git.gix_fetch);
         // A new tab queues its first load; `load_due` starts it once it is
         // the tab's turn (after every message).
+        self.dismiss_repo_overlays();
         self.tabs.push(RepoTab::new(repo, watcher));
         self.active = self.tabs.len() - 1;
         self.note_active();
@@ -1090,8 +1117,16 @@ impl App {
         Task::none()
     }
 
+    /// A pending repository open can switch tabs even while a modal is visible.
+    fn dismiss_repo_overlays(&mut self) {
+        self.menu = None;
+        self.code_dialog = None;
+        let _ = self.handle(Message::Dialog(dialog::Message::Cancel));
+    }
+
     fn select_tab(&mut self, i: usize) -> Task<Message> {
         if i < self.tabs.len() && i != self.active {
+            self.dismiss_repo_overlays();
             self.active = i;
             self.note_active();
             self.save_settings();
@@ -1288,6 +1323,9 @@ impl App {
     fn close_tab(&mut self, i: usize) -> Task<Message> {
         if i >= self.tabs.len() {
             return Task::none();
+        }
+        if i == self.active {
+            self.dismiss_repo_overlays();
         }
         let closed = self.tabs.remove(i);
         let git_dir = &closed.repo.handle().git_dir;
