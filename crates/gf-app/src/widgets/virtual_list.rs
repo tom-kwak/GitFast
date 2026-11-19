@@ -80,24 +80,7 @@ pub fn virtual_list<'a, M: 'a>(
 ) -> Element<'a, M> {
     responsive(move |size| {
         let width = content_width.max(size.width - SCROLLBAR);
-        let range = pos.visible(total, row_height);
-        let mut col = Column::new().width(Length::Fixed(width));
-        #[allow(clippy::cast_precision_loss)]
-        let px = |rows: usize| rows as f32 * row_height;
-        if range.start > 0 {
-            col = col.push(space().height(Length::Fixed(px(range.start))));
-        }
-        for i in range.clone() {
-            col = col.push(
-                container(render(i))
-                    .height(Length::Fixed(row_height))
-                    .width(Length::Fixed(width))
-                    .clip(true),
-            );
-        }
-        if range.end < total {
-            col = col.push(space().height(Length::Fixed(px(total - range.end))));
-        }
+        let col = virtual_rows(total, row_height, width, pos, &render);
         let on_scroll = on_scroll.clone();
         scrollable(col)
             .id(id)
@@ -111,6 +94,56 @@ pub fn virtual_list<'a, M: 'a>(
             .into()
     })
     .into()
+}
+
+/// A fixed-width gutter that scrolls vertically with its adjacent lists.
+#[allow(clippy::too_many_arguments)]
+pub fn virtual_gutter<'a, M: 'a>(
+    id: &'static str,
+    total: usize,
+    row_height: f32,
+    width: f32,
+    pos: ScrollPos,
+    render: impl Fn(usize) -> Element<'a, M>,
+    on_scroll: impl Fn(ScrollPos) -> M + 'a,
+) -> Element<'a, M> {
+    scrollable(virtual_rows(total, row_height, width, pos, render))
+        .id(id)
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::hidden(),
+        ))
+        .on_scroll(move |v| on_scroll(ScrollPos::from_viewport(v)))
+        .width(Length::Fixed(width))
+        .height(Length::Fill)
+        .into()
+}
+
+fn virtual_rows<'a, M: 'a>(
+    total: usize,
+    row_height: f32,
+    width: f32,
+    pos: ScrollPos,
+    render: impl Fn(usize) -> Element<'a, M>,
+) -> Column<'a, M> {
+    let range = pos.visible(total, row_height);
+    let mut col = Column::new().width(Length::Fixed(width));
+    #[allow(clippy::cast_precision_loss)]
+    let px = |rows: usize| rows as f32 * row_height;
+    if range.start > 0 {
+        col = col.push(space().height(Length::Fixed(px(range.start))));
+    }
+    for i in range.clone() {
+        col = col.push(
+            container(render(i))
+                .height(Length::Fixed(row_height))
+                .width(Length::Fixed(width))
+                .clip(true),
+        );
+    }
+    if range.end < total {
+        col = col.push(space().height(Length::Fixed(px(total - range.end))));
+    }
+    col
 }
 
 /// Display width of `s` in monospace columns: East Asian wide characters

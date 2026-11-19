@@ -39,12 +39,14 @@ impl App {
         &mut self,
         path: std::path::PathBuf,
         version: FileVersion,
+        comparison: Option<code_view::ComparisonRequest>,
     ) -> Task<Message> {
         let Some(repo) = self.active_tab().map(|tab| tab.repo.clone()) else {
             return Task::none();
         };
         self.code_dialog_request = self.code_dialog_request.wrapping_add(1);
-        let (viewer, load) = code_view::State::open(self.code_dialog_request, repo, path, version);
+        let (viewer, load) =
+            code_view::State::open(self.code_dialog_request, repo, path, version, comparison);
         self.code_dialog = Some(viewer);
         Task::batch([
             load.map(Message::CodeDialog),
@@ -57,10 +59,10 @@ impl App {
             return Task::none();
         };
         let m = match m {
-            code_view::Message::Pressed(line, pointer)
+            code_view::Message::Pressed(pane, line, pointer)
                 if self.modifiers.shift() && pointer.button == iced::mouse::Button::Left =>
             {
-                code_view::Message::Extend(line, pointer)
+                code_view::Message::Extend(pane, line, pointer)
             }
             other => other,
         };
@@ -84,7 +86,6 @@ impl App {
                 }
                 self.show_diff(source)
             }
-            changes::Output::ViewFile(path, version) => self.open_code_view(path, version),
             changes::Output::ResolveConflict(path) => self.open_conflict(path),
             changes::Output::Stage(paths) => {
                 let label = format!("stage {}", names(&paths));
@@ -305,7 +306,7 @@ impl App {
             diff_view::Output::DiscardSubmodule(path) => {
                 self.confirm_discard(vec![path], Vec::new())
             }
-            diff_view::Output::ViewFile(source) => {
+            diff_view::Output::ViewFile { source, diff, file } => {
                 let (path, group) = match source {
                     DiffSource::WorkTree(path) => (path, changes::Group::Unstaged),
                     DiffSource::Staged(path) => (path, changes::Group::Staged),
@@ -313,7 +314,30 @@ impl App {
                     _ => return Task::none(),
                 };
                 let snap = self.active_tab().and_then(|tab| tab.snapshot.as_deref());
-                self.on_changes(changes::view_file(path, group, snap))
+                let version = changes::preview_version(&path, group, snap);
+                let (base, labels) = match group {
+                    changes::Group::Staged => {
+                        (FileVersion::Revision("HEAD".into()), ["HEAD", "Index"])
+                    }
+                    _ => (FileVersion::Index, ["Index", "Working tree"]),
+                };
+                let before = diff.files.get(file).map(|entry| {
+                    entry
+                        .new_path
+                        .as_ref()
+                        .and(entry.old_path.clone())
+                        .map(|path| (path, base))
+                });
+                let comparison = before.map(|before| code_view::ComparisonRequest {
+                    before,
+                    labels,
+                    prepare: Box::new(move |document, before| {
+                        if let Some(entry) = diff.files.get(file) {
+                            document.show_changes(entry, before);
+                        }
+                    }),
+                });
+                self.open_code_view(path, version, comparison)
             }
             diff_view::Output::FileMenu { menu, highlight } => {
                 let open = self.open_menu(menu.map(Message::CommitDiff));
@@ -323,7 +347,7 @@ impl App {
                 Task::batch([open, load])
             }
             diff_view::Output::FileAction(action) => match action {
-                FileAction::View(path, version) => self.open_code_view(path, version),
+                FileAction::View(path, version) => self.open_code_view(path, version, None),
                 FileAction::Blame(path, rev) => self.open_blame(path, Some(rev)),
                 FileAction::History(path, rev) => self.open_file_history(path, Some(rev)),
                 FileAction::CopyPath(path) => self.copy_path(&path),

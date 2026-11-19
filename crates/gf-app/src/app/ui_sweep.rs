@@ -894,10 +894,26 @@ async fn a_txt_shown() -> Ui {
     ui
 }
 
+fn code_close_target(ui: &Ui) -> Target {
+    ui.targets()
+        .into_iter()
+        .find(|target| {
+            target.label == "✕"
+                && ui
+                    .press(target.at, mouse::Button::Left)
+                    .iter()
+                    .any(|message| {
+                        matches!(message, Message::CodeDialog(code_view::Message::Close))
+                    })
+        })
+        .expect("code dialog close icon")
+}
+
 #[tokio::test]
-async fn view_file_opens_from_changes_and_copies_code_without_editing_the_repo() {
+async fn local_view_replaces_working_tree_view_file_and_keeps_keyboard_copy() {
     let mut ui = a_txt_shown().await;
-    let opened = ui.click("[ View file ]").await;
+    assert!(!ui.shows("[ View file ]"));
+    let opened = ui.click("[ View ]").await;
     assert!(!opened.repo_changed);
     assert!(ui.app.code_dialog.is_some());
     assert!(ui.shows("FILE CONTENTS"));
@@ -920,7 +936,14 @@ async fn view_file_opens_from_changes_and_copies_code_without_editing_the_repo()
         }))
         .await;
     assert!(selected.state_changed);
-    let copied = ui.click("[ Copy ⌘C ]").await;
+    assert!(!ui.shows("[ Copy ⌘C ]"));
+    let copied = ui
+        .send(Message::KeyInput(focus::KeyInput {
+            shortcut: Some(Shortcut::Copy),
+            menu: None,
+            nav: None,
+        }))
+        .await;
     assert_eq!(copied.clipboard, 1);
     assert!(!copied.repo_changed);
     let _ = ui
@@ -934,17 +957,7 @@ async fn view_file_opens_from_changes_and_copies_code_without_editing_the_repo()
 
     let _ = ui.right_click("a.txt").await;
     assert!(ui.app.menu.is_some());
-    let _ = ui
-        .send(Message::KeyInput(focus::KeyInput {
-            shortcut: None,
-            menu: Some(context_menu::Key::Char('v')),
-            nav: None,
-        }))
-        .await;
-    assert!(ui.app.menu.is_none());
-    assert!(ui.app.code_dialog.is_some());
-    let _ = ui.click("[ Close Esc ]").await;
-    assert!(ui.app.code_dialog.is_none());
+    assert!(!ui.shows("View file"));
 }
 
 #[tokio::test]
@@ -971,7 +984,9 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     assert!(ui.targets().iter().any(|t| t.label == "  1"));
     assert!(!ui.shows("println!"));
 
-    let _ = ui.click("[ Close Esc ]").await;
+    let close = code_close_target(&ui);
+    let _ = ui.click_at(&close, mouse::Button::Left).await;
+    assert!(ui.app.code_dialog.is_none());
     let _ = ui.right_click("lib.rs").await;
     let _ = ui.click("file history").await;
     assert!(ui.shows("first"));
@@ -1038,13 +1053,7 @@ async fn view_file_loads_the_version_for_each_changes_group() {
             .await;
         assert!(!ui.shows("[ blame ]"));
         assert!(!ui.shows("[ file history ]"));
-        let button = ui
-            .targets()
-            .into_iter()
-            .filter(|t| t.label == "[ View file ]")
-            .max_by(|a, b| a.at.x.total_cmp(&b.at.x))
-            .expect("View file in the diff header");
-        let opened = ui.click_at(&button, mouse::Button::Left).await;
+        let opened = ui.click("[ View ]").await;
         assert!(opened.messages.iter().any(|m| m == "LocalDiff(ViewFile)"));
         assert!(!opened.repo_changed);
         assert!(ui.shows("  1"), "{path} should have a code gutter");
@@ -1055,10 +1064,94 @@ async fn view_file_loads_the_version_for_each_changes_group() {
                 Some(code_view::Output::Copy(text)) if text.contains(line)),
             "{path} in {group:?} should contain {line:?}"
         );
+        let split = ui.click("[ Side by side ]").await;
+        assert!(
+            split.screen_changed,
+            "comparison should open for {path} in {group:?}"
+        );
+        assert!(!split.repo_changed);
         let _ = ui
             .send(Message::CodeDialog(code_view::Message::Close))
             .await;
     }
+}
+
+#[tokio::test]
+async fn local_view_shows_removed_lines_but_copies_the_current_file() {
+    let mut ui = a_txt_shown().await;
+    let opened = ui.click("[ View ]").await;
+    assert!(!opened.repo_changed);
+    let labels = ui.targets();
+    let removed = labels
+        .iter()
+        .find(|t| t.label == "three")
+        .expect("removed text");
+    let marker = labels
+        .iter()
+        .find(|t| t.label == "−" && t.at.x < removed.at.x && (t.at.y - removed.at.y).abs() < 1.0)
+        .expect("removed line marker");
+    assert!(
+        labels.iter().any(|t| {
+            t.label == "+" && (t.at.x - marker.at.x).abs() < 1.0 && t.at.y > marker.at.y
+        })
+    );
+    assert!(ui.shows("  4"), "unchanged lines are included");
+    let viewer = ui.app.code_dialog.as_mut().expect("file dialog");
+    let _ = viewer.update(code_view::Message::SelectAll);
+    assert!(matches!(
+        viewer.update(code_view::Message::Copy).output,
+        Some(code_view::Output::Copy(text)) if text == "one\ntwo\nchanged\nfour\n"
+    ));
+}
+
+#[tokio::test]
+async fn side_by_side_aligns_replacements_and_copies_the_selected_side() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            r.write("a.txt", "one\ntwo\nreplacement\ninserted\nfour\n");
+        })
+        .await,
+    )
+    .await;
+    let _ = ui
+        .send(Message::Changes(changes::Message::Select(
+            "a.txt".into(),
+            changes::Group::Unstaged,
+        )))
+        .await;
+    let _ = ui.click("[ View ]").await;
+    let initial_close = code_close_target(&ui).at.x;
+    let _ = ui.click("[ Side by side ]").await;
+    assert!((code_close_target(&ui).at.x - initial_close).abs() < 1.0);
+    assert!(!ui.shows("[ Inline ]"));
+
+    let find_line = |label, pane| {
+        ui.targets().into_iter().find(|t| {
+            t.label == label && ui.press(t.at, mouse::Button::Left).iter().any(|m| {
+                matches!(m, Message::CodeDialog(code_view::Message::Pressed(side, ..)) if *side == pane)
+            })
+        }).expect("numbered line in comparison pane")
+    };
+    let before = find_line("  4", code_view::Pane::Before);
+    let after = find_line("  5", code_view::Pane::After);
+    assert!((before.at.y - after.at.y).abs() < 1.0);
+    let center = WINDOW.width / 2.0;
+    let gutter = ui.app.tokens.cols(6);
+    assert!((center - gutter..center).contains(&before.at.x));
+    assert!((center..center + gutter).contains(&after.at.x));
+    for (target, expected) in [
+        (before, "one\ntwo\nthree\nfour\n"),
+        (after, "one\ntwo\nreplacement\ninserted\nfour\n"),
+    ] {
+        let clicked = ui.click_at(&target, mouse::Button::Left).await;
+        assert!(!clicked.repo_changed);
+        let viewer = ui.app.code_dialog.as_mut().expect("file dialog");
+        let _ = viewer.update(code_view::Message::SelectAll);
+        assert!(matches!(viewer.update(code_view::Message::Copy).output,
+            Some(code_view::Output::Copy(text)) if text == expected));
+    }
+    assert!(ui.click("[ Side by side ]").await.screen_changed);
+    assert!((code_close_target(&ui).at.x - initial_close).abs() < 1.0);
 }
 
 #[tokio::test]
