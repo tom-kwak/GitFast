@@ -572,7 +572,6 @@ impl App {
                     NoteKind::Error,
                     format!("✗ {} — see log", truncate(&label, 40)),
                 );
-                self.settings.appearance.show_command_log = true;
                 if !asked {
                     tasks.push(self.show_failure(&label, &e));
                 }
@@ -689,7 +688,6 @@ impl App {
                     NoteKind::Error,
                     format!("✗ {} — see log", truncate(&title, 40)),
                 );
-                self.settings.appearance.show_command_log = true;
                 tasks.push(self.show_failure(&title, &e));
             }
         }

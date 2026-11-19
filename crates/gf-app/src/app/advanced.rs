@@ -155,7 +155,6 @@ impl App {
                     NoteKind::Error,
                     format!("✗ {} — see log", truncate(&label, 40)),
                 );
-                self.settings.appearance.show_command_log = true;
                 return Task::batch([refresh, self.show_failure(&label, &e)]);
             }
         }
