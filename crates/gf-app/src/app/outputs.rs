@@ -68,6 +68,9 @@ impl App {
         };
         let update = viewer.update(m);
         match update.output {
+            Some(code_view::Output::RevealMatch) => {
+                viewer.reveal_match(&self.tokens).map(Message::CodeDialog)
+            }
             Some(code_view::Output::Close) => {
                 self.code_dialog = None;
                 self.restore_focus()
@@ -1313,6 +1316,7 @@ impl App {
                 );
                 lines.push("refs: ⌘-click marks branches · ⇧-click or ⇧↑/↓ selects a range · . then d reviews deletion".into());
                 lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());
+                lines.push("file viewer ⌘F find · Enter / ⌘G next · ⇧Enter / ⌘⇧G previous · Esc closes search".into());
                 lines.push(
                     "click a ref for its history · click diff lines to stage just those".into(),
                 );

@@ -87,6 +87,17 @@ impl Tokens {
         self.accent
     }
 
+    /// Background and foreground for regular and current file search matches.
+    pub fn find_match(&self, active: bool) -> (Color, Color) {
+        if active {
+            (self.warning(), self.bg)
+        } else {
+            let mut background = self.warning();
+            background.a = 0.3;
+            (background, self.fg)
+        }
+    }
+
     /// Color for a syntax highlighting tone.
     pub fn tone(&self, tone: crate::highlight::Tone) -> Color {
         use crate::highlight::Tone;
