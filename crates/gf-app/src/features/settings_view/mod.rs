@@ -12,13 +12,15 @@ pub enum Message {
     Close,
 }
 
-/// Shows the current theme and a palette sample for each built-in choice.
+/// Shows the app version, current theme, and built-in theme previews.
 pub fn view(t: &Tokens) -> Element<'_, Message> {
     let header = row![
         colored(t, "Settings", t.accent()),
+        dim(t, concat!("v", env!("CARGO_PKG_VERSION"))),
         space().width(Length::Fill),
         widgets::text_button(t, "Done", Some("Esc"), Some(Message::Close)),
     ]
+    .spacing(8)
     .align_y(Alignment::Center);
     let appearance = column![
         dim(t, "─ APPEARANCE"),

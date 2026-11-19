@@ -1617,6 +1617,7 @@ async fn settings_from_the_welcome_screen_apply_and_remember_the_theme() {
     let mut ui = Ui::welcome().await;
     let _ = ui.click("[ Settings ⌘, ]").await;
     assert!(ui.app.settings_open);
+    assert!(ui.shows(concat!("v", env!("CARGO_PKG_VERSION"))));
     for name in ["gf-light", "cd-dark", "cd-light"] {
         let _ = ui.click(name).await;
         assert_eq!(ui.app.tokens.name, name);
