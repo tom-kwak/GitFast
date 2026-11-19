@@ -187,12 +187,22 @@ impl Repository {
     pub async fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
         gix_then_cli!(self, BranchOps::delete_branch(name, force))
     }
+    /// Deletes several local branches with normal Git merge and worktree checks.
+    pub async fn delete_branches(&self, names: &[String], force: bool) -> Result<()> {
+        BranchOps::delete_branches(&self.cli, names, force).await
+    }
+
     pub async fn rename_branch(&self, old: &str, new: &str) -> Result<()> {
         BranchOps::rename_branch(&self.cli, old, new).await
     }
     /// Deletes a branch on a remote (`git push <remote> --delete <branch>`).
     pub async fn delete_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
         BranchOps::delete_remote_branch(&self.cli, remote, branch).await
+    }
+
+    /// Deletes several heads on one remote.
+    pub async fn delete_remote_branches(&self, remote: &str, branches: &[String]) -> Result<()> {
+        BranchOps::delete_remote_branches(&self.cli, remote, branches).await
     }
 
     // ---- CommitOps

@@ -57,6 +57,16 @@ impl BranchOps for CliBackend {
         Ok(())
     }
 
+    async fn delete_branches(&self, names: &[String], force: bool) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let flag = if force { "-D" } else { "-d" };
+        self.exec(self.command(["branch", flag, "--"]).args(names))
+            .await?;
+        Ok(())
+    }
+
     async fn rename_branch(&self, old: &str, new: &str) -> Result<()> {
         self.exec(self.command(["branch", "-m", old, new])).await?;
         Ok(())
@@ -64,6 +74,16 @@ impl BranchOps for CliBackend {
 
     async fn delete_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
         self.exec(self.command(["push", remote, "--delete", branch]))
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_remote_branches(&self, remote: &str, branches: &[String]) -> Result<()> {
+        if branches.is_empty() {
+            return Ok(());
+        }
+        let heads = branches.iter().map(|branch| format!("refs/heads/{branch}"));
+        self.exec(self.command(["push", "--delete", "--", remote]).args(heads))
             .await?;
         Ok(())
     }

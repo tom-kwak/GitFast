@@ -1418,6 +1418,144 @@ async fn failed_checkout_clears_progress_and_allows_retry() {
 }
 
 #[tokio::test]
+async fn refs_can_delete_a_range_after_review_and_keep_checked_out_branches() {
+    let linked = tempfile::tempdir().expect("linked worktree parent");
+    let worktree = linked.path().join("worktree");
+    let mut ui = Ui::open_with(|repo| {
+        for name in ["aaa", "bbb", "held"] {
+            repo.git(&["branch", name]);
+        }
+        repo.git(&["worktree", "add", worktree.to_str().expect("path"), "held"]);
+    })
+    .await;
+    let _ = ui.click("aaa").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::SHIFT))
+        .await;
+    let _ = ui.click("main").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::empty()))
+        .await;
+    assert!(ui.shows("[ Delete 5… ]"));
+    let _ = ui.right_click("bbb").await;
+    assert!(ui.shows("5 branches selected"));
+    let _ = ui.click("delete selected branches").await;
+    for entry in [
+        "Local: aaa",
+        "Local: bbb",
+        "Local: feature",
+        "Keep main (checked out)",
+        "Keep held (checked out)",
+    ] {
+        assert!(ui.shows(entry), "review should include {entry}");
+    }
+    let enter = ui.send(Message::Key(Shortcut::Enter)).await;
+    assert!(
+        !enter.repo_changed,
+        "destructive confirmation needs a click"
+    );
+    assert!(ui.shows("[ Delete 3 ]"));
+
+    let _ = ui.click("[ Delete 3 ]").await;
+    let remaining = ui
+        .fixture
+        .repo
+        .git(&["branch", "--list", "--format=%(refname:short)"]);
+    assert_eq!(remaining.lines().collect::<Vec<_>>(), ["held", "main"]);
+    let _ = ui.send(Message::Key(Shortcut::Undo)).await;
+    let restored = ui
+        .fixture
+        .repo
+        .git(&["branch", "--list", "--format=%(refname:short)"]);
+    assert_eq!(
+        restored.lines().collect::<Vec<_>>(),
+        ["aaa", "bbb", "feature", "held", "main"]
+    );
+}
+
+#[tokio::test]
+async fn branch_batch_deletion_keeps_an_unmerged_branch_and_records_partial_undo() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["reset", "--hard"]);
+        repo.git(&["clean", "-fd"]);
+        repo.git(&["switch", "-c", "unmerged"]);
+        repo.write("only-branch.txt", "unmerged content");
+        repo.commit_all("unmerged work");
+        repo.git(&["switch", "main"]);
+    })
+    .await;
+    let _ = ui.click("feature").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::COMMAND))
+        .await;
+    let _ = ui.click("unmerged").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::empty()))
+        .await;
+    let _ = ui.click("[ Delete 2… ]").await;
+    let _ = ui.click("[ Delete 2 ]").await;
+    assert!(ui.shows("Some selected branches could not be deleted"));
+    let remaining = ui
+        .fixture
+        .repo
+        .git(&["branch", "--list", "--format=%(refname:short)"]);
+    assert_eq!(remaining.lines().collect::<Vec<_>>(), ["main", "unmerged"]);
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    let _ = ui.send(Message::Key(Shortcut::Undo)).await;
+    let restored = ui
+        .fixture
+        .repo
+        .git(&["branch", "--list", "--format=%(refname:short)"]);
+    assert_eq!(
+        restored.lines().collect::<Vec<_>>(),
+        ["feature", "main", "unmerged"]
+    );
+}
+
+#[tokio::test]
+async fn branch_batch_confirms_local_and_remote_destinations_together() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["branch", "remote-only"]);
+        repo.git(&["push", "origin", "remote-only"]);
+        repo.git(&["tag", "remote-only"]);
+        repo.git(&["push", "origin", "refs/tags/remote-only"]);
+        repo.git(&["branch", "-D", "remote-only"]);
+    })
+    .await;
+    let _ = ui.click("feature").await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::ToggleBranch(
+            "refs/remotes/origin/feature".into(),
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::ToggleBranch(
+            "refs/remotes/origin/remote-only".into(),
+        )))
+        .await;
+    let _ = ui.click("[ Delete 3… ]").await;
+    for text in [
+        "Local: feature",
+        "On remote origin: feature",
+        "On remote origin: remote-only",
+    ] {
+        assert!(ui.shows(text), "review should include {text}");
+    }
+    let _ = ui.click("[ Delete 3 ]").await;
+    assert!(ui.app.dialog.is_none(), "batch succeeded");
+    assert!(
+        ui.fixture
+            .repo
+            .git(&["branch", "--list", "feature"])
+            .is_empty()
+    );
+    let refs = ui.fixture.repo.git(&["ls-remote", "origin"]);
+    assert!(!refs.contains("refs/heads/feature"));
+    assert!(!refs.contains("refs/heads/remote-only"));
+    assert!(refs.contains("refs/tags/remote-only"));
+}
+
+#[tokio::test]
 async fn removing_a_worktree_closes_its_open_tab() {
     let mut ui = Ui::open().await;
     let folder = tempfile::tempdir().expect("worktree parent");

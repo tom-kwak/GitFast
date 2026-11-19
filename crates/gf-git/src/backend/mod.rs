@@ -96,6 +96,13 @@ pub trait BranchOps {
     /// is not merged, which protects work.
     fn delete_branch(&self, name: &str, force: bool) -> impl Future<Output = Result<()>> + Send;
 
+    /// Deletes local branches in one operation.
+    fn delete_branches(
+        &self,
+        names: &[String],
+        force: bool,
+    ) -> impl Future<Output = Result<()>> + Send;
+
     fn rename_branch(&self, old: &str, new: &str) -> impl Future<Output = Result<()>> + Send;
 
     /// Deletes a branch on a remote (`git push <remote> --delete <branch>`).
@@ -103,6 +110,13 @@ pub trait BranchOps {
         &self,
         remote: &str,
         branch: &str,
+    ) -> impl Future<Output = Result<()>> + Send;
+
+    /// Deletes several heads in a single push to the same remote.
+    fn delete_remote_branches(
+        &self,
+        remote: &str,
+        branches: &[String],
     ) -> impl Future<Output = Result<()>> + Send;
 }
 

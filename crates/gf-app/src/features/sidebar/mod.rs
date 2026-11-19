@@ -3,7 +3,7 @@
 //! history (or diff, for stashes) and an action bar for it; section headers
 //! have `+` buttons to create new items.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gf_core::model::{Branch, RefKind, StashEntry, Tag};
 use iced::widget::text::Wrapping;
@@ -45,6 +45,9 @@ pub struct State {
     collapsed: HashSet<Section>,
     filter: String,
     selected: Option<Selection>,
+    marked_branches: BTreeSet<String>,
+    mark_cursor: Option<String>,
+    mark_anchor: Option<String>,
     /// Branch folders (`feature/`) the user closed, by section and path.
     folded: HashSet<(Section, String)>,
     /// The keyboard cursor is on this section header or folder (instead of
@@ -71,6 +74,9 @@ impl Default for State {
             ]),
             filter: String::new(),
             selected: None,
+            marked_branches: BTreeSet::new(),
+            mark_cursor: None,
+            mark_anchor: None,
             folded: HashSet::new(),
             cursor: None,
             last_click: None,
@@ -235,6 +241,9 @@ pub enum Message {
     ToggleFolder(Section, String),
     Filter(String),
     Select(Selection),
+    ToggleBranch(String),
+    SelectBranchRange(String),
+    ClearBranchMarks,
     /// Header `+` buttons and the actions menu entries.
     Act(Action),
     /// `.` on the keyboard: menu for the selection.
@@ -299,6 +308,7 @@ pub enum Output {
     Checkout(Branch),
     RenameBranch(String),
     DeleteBranch(Branch),
+    DeleteBranches(Vec<Branch>),
     PushBranch(Branch),
     /// Merge this branch (short name) into the current branch.
     Merge(String),
@@ -331,6 +341,27 @@ impl State {
     /// Forgets a selection that no longer exists (deleted branch, dropped
     /// stash). Returns false when it was forgotten.
     pub fn retain_existing(&mut self, snapshot: &Snapshot) -> bool {
+        if !self.marked_branches.is_empty() {
+            let existing: HashSet<_> = snapshot.branches.iter().map(|b| b.name.as_str()).collect();
+            self.marked_branches
+                .retain(|name| existing.contains(name.as_str()));
+            if self
+                .mark_cursor
+                .as_ref()
+                .is_some_and(|name| !existing.contains(name.as_str()))
+                || self.marked_branches.is_empty()
+            {
+                self.mark_cursor = None;
+            }
+            if self.marked_branches.is_empty()
+                || self
+                    .mark_anchor
+                    .as_ref()
+                    .is_some_and(|name| !existing.contains(name.as_str()))
+            {
+                self.mark_anchor = None;
+            }
+        }
         let exists = match &self.selected {
             None => return true,
             Some(Selection::Ref(r)) => {
@@ -351,6 +382,7 @@ impl State {
     }
 
     pub fn clear_selection(&mut self) {
+        self.clear_branch_marks();
         self.selected = None;
     }
 
@@ -361,6 +393,7 @@ impl State {
         snap: &Snapshot,
         t: &Tokens,
     ) -> iced::Task<Message> {
+        self.clear_branch_marks();
         let full = branch.name.as_str();
         let short = branch.name.short();
         self.selected = Some(Selection::Ref(full.to_owned()));
@@ -387,7 +420,66 @@ impl State {
     }
 
     fn is_selected_ref(&self, full: &str) -> bool {
-        matches!(&self.selected, Some(Selection::Ref(r)) if r == full)
+        if self.marked_branches.is_empty() {
+            matches!(&self.selected, Some(Selection::Ref(r)) if r == full)
+        } else {
+            self.marked_branches.contains(full)
+        }
+    }
+
+    fn clear_branch_marks(&mut self) {
+        self.marked_branches.clear();
+        self.mark_cursor = None;
+        self.mark_anchor = None;
+    }
+
+    fn mark_branch(&mut self, name: String, range: bool, snap: &Snapshot) {
+        if !snap.branches.iter().any(|b| b.name.as_str() == name) {
+            return;
+        }
+        let selected = match &self.selected {
+            Some(Selection::Ref(anchor))
+                if snap.branches.iter().any(|b| b.name.as_str() == anchor) =>
+            {
+                Some(anchor.as_str())
+            }
+            _ => None,
+        };
+        let anchor = self.mark_anchor.as_deref().or(selected).unwrap_or(&name);
+        if range {
+            let rows = self.rows(snap);
+            let branches: Vec<_> = rows
+                .iter()
+                .filter_map(|row| match row {
+                    SideRow::Branch(b, _) => Some(b.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let index = |r: &str| branches.iter().position(|&b| b == r);
+            self.marked_branches = index(&name).map_or_else(
+                || BTreeSet::from([name.clone()]),
+                |end| {
+                    let start = index(anchor).unwrap_or(end);
+                    branches[start.min(end)..=start.max(end)]
+                        .iter()
+                        .map(|&r| r.to_owned())
+                        .collect()
+                },
+            );
+        } else {
+            if self.marked_branches.is_empty()
+                && let Some(anchor) = selected
+            {
+                self.marked_branches.insert(anchor.to_owned());
+            }
+            if !self.marked_branches.remove(&name) {
+                self.marked_branches.insert(name.clone());
+            }
+        }
+        self.mark_anchor = (!self.marked_branches.is_empty()).then(|| anchor.to_owned());
+        self.mark_cursor = (!self.marked_branches.is_empty()).then_some(name);
+        self.cursor = None;
+        self.last_click = None;
     }
 
     fn tree<'a>(&self, section: Section, branches: &[&'a Branch]) -> Vec<SideRow<'a>> {
@@ -592,7 +684,13 @@ impl State {
             .collect();
         let current = items.iter().position(|(_, it, _)| match it {
             Item::Fold(f) => self.cursor.as_ref() == Some(f),
-            Item::Pick(sel, _) => self.cursor.is_none() && self.selected.as_ref() == Some(sel),
+            Item::Pick(sel, _) => {
+                self.cursor.is_none()
+                    && self.mark_cursor.as_ref().map_or_else(
+                        || self.selected.as_ref() == Some(sel),
+                        |name| matches!(sel, Selection::Ref(r) if r == name),
+                    )
+            }
         });
         let here = current.map(|c| items[c].1.clone());
         // The section or folder that contains the cursor's row.
@@ -625,12 +723,13 @@ impl State {
                 };
             }
             Key::Char('.') => {
-                return self
-                    .selected
-                    .as_ref()
-                    .map(|_| Moved::message(Message::OpenActions));
+                return (self.selected.is_some() || !self.marked_branches.is_empty())
+                    .then(|| Moved::message(Message::OpenActions));
             }
             Key::Enter | Key::Space => {
+                if !self.marked_branches.is_empty() {
+                    return Some(Moved::stay());
+                }
                 return match here? {
                     Item::Fold(f) => Some(Moved::message(Self::toggle_message(&f))),
                     Item::Pick(_, Some(action)) => Some(Moved::message(Message::Act(action))),
@@ -644,7 +743,30 @@ impl State {
         if current == Some(i) {
             return Some(Moved::stay());
         }
-        let (row, item, _) = items[i].clone();
+        let (row, item, _) = if nav.shift {
+            let range = if current.is_some_and(|c| c > i) {
+                items[..=i].iter().rev().find(|(_, item, _)| {
+                    matches!(item, Item::Pick(Selection::Ref(r), _) if r.starts_with("refs/heads/") || r.starts_with("refs/remotes/"))
+                })
+            } else {
+                items[i..].iter().find(|(_, item, _)| {
+                    matches!(item, Item::Pick(Selection::Ref(r), _) if r.starts_with("refs/heads/") || r.starts_with("refs/remotes/"))
+                })
+            };
+            let Some((row, Item::Pick(Selection::Ref(name), _), _)) = range else {
+                return Some(Moved::stay());
+            };
+            return Some(
+                Moved::message(Message::SelectBranchRange(name.clone())).with_task(nav::reveal(
+                    LIST_ID,
+                    self.scroll,
+                    *row,
+                    h,
+                )),
+            );
+        } else {
+            items[i].clone()
+        };
         let reveal = nav::reveal(LIST_ID, self.scroll, row, h);
         Some(match item {
             Item::Fold(f) => {
@@ -785,7 +907,11 @@ impl State {
             }
             None => format!("{} · {}", b.name.short(), b.target.short()),
         };
-        widgets::tip(t, row, hint)
+        widgets::tip(
+            t,
+            row,
+            format!("{hint} · ⌘-click to mark · ⇧-click for a range"),
+        )
     }
 
     fn tag_row<'a>(&self, t: &'a Tokens, tag: &'a Tag) -> Element<'a, Message> {
@@ -954,6 +1080,26 @@ impl State {
     /// Actions for the current selection (a right-click, or `.`). `None`
     /// when there is nothing to do with it.
     fn menu(&self, snap: &Snapshot) -> Option<Menu<Message>> {
+        if !self.marked_branches.is_empty() {
+            let n = self.marked_branches.len();
+            return Some(Menu {
+                title: format!("{n} branches selected"),
+                entries: vec![
+                    Entry::caution(
+                        'd',
+                        "delete selected branches…",
+                        "review the branches before deleting",
+                        Message::Act(Action::Delete),
+                    ),
+                    Entry::item(
+                        'c',
+                        "clear selection",
+                        "unmark the selected branches",
+                        Message::ClearBranchMarks,
+                    ),
+                ],
+            });
+        }
         let item = |key: char, label: &str, hint: &str, a: Action| {
             Entry::item(key, label, hint, Message::Act(a))
         };
@@ -1095,6 +1241,15 @@ impl State {
             _ => {}
         }
         let snap = snap?;
+        if action == Action::Delete && !self.marked_branches.is_empty() {
+            let branches = snap
+                .branches
+                .iter()
+                .filter(|b| self.marked_branches.contains(b.name.as_str()))
+                .cloned()
+                .collect();
+            return Some(Output::DeleteBranches(branches));
+        }
         match self.selected.as_ref()? {
             Selection::Worktree(p) => match action {
                 Action::Open => Some(Output::OpenRepo(p.clone())),
@@ -1164,7 +1319,19 @@ impl State {
                 self.filter = f;
                 Update::none()
             }
+            Message::ToggleBranch(ref name) | Message::SelectBranchRange(ref name) => {
+                let range = matches!(message, Message::SelectBranchRange(_));
+                if let Some(snap) = snap {
+                    self.mark_branch(name.clone(), range, snap);
+                }
+                Update::none()
+            }
+            Message::ClearBranchMarks => {
+                self.clear_branch_marks();
+                Update::none()
+            }
             Message::Select(sel) => {
+                self.clear_branch_marks();
                 // A double click does what Enter does (checkout, open …).
                 let default = snap.and_then(|s| Self::default_action(&sel, s));
                 let double = default.is_some()
@@ -1215,6 +1382,14 @@ impl State {
                 None => Update::none(),
             },
             Message::RightClick(sel) => {
+                if matches!(&sel, Selection::Ref(r) if self.marked_branches.contains(r)) {
+                    return snap
+                        .and_then(|s| self.menu(s))
+                        .map_or_else(Update::none, |menu| {
+                            Update::output(Output::Menu { show: None, menu })
+                        });
+                }
+                self.clear_branch_marks();
                 // Selecting by right-click never unselects; the app shows
                 // the item's history/diff like a left click would.
                 let changed = self.selected.as_ref() != Some(&sel);
@@ -1351,10 +1526,26 @@ impl State {
             Message::Scrolled,
         );
 
+        let mut actions = row![].spacing(4);
+        if !self.marked_branches.is_empty() {
+            let label = format!("Delete {}…", self.marked_branches.len());
+            actions = actions.push(widgets::danger_button(
+                t,
+                &label,
+                Some(Message::Act(Action::Delete)),
+            ));
+        }
+        actions = actions.push(widgets::icon_button(
+            t,
+            "«",
+            t.accent(),
+            "hide refs ⌘B",
+            Message::Collapse,
+        ));
         widgets::panel_with_action(
             t,
             "REFS".into(),
-            widgets::icon_button(t, "«", t.accent(), "hide refs ⌘B", Message::Collapse),
+            actions,
             column![filter, list].spacing(4).width(Length::Fill),
         )
     }

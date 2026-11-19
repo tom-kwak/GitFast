@@ -17,6 +17,7 @@
 //! outputs, `dialogs` owns confirmation/input dialogs.
 
 mod advanced;
+mod branch_delete;
 mod dialogs;
 mod focus;
 mod ops;
@@ -588,7 +589,30 @@ impl App {
                 }
             }
             Message::Sidebar(m) => {
-                if matches!(m, sidebar::Message::Select(_) | sidebar::Message::Toggle(_)) {
+                let m = match m {
+                    sidebar::Message::Select(sidebar::Selection::Ref(name))
+                        if (name.starts_with("refs/heads/")
+                            || name.starts_with("refs/remotes/"))
+                            && self.modifiers.shift() =>
+                    {
+                        sidebar::Message::SelectBranchRange(name)
+                    }
+                    sidebar::Message::Select(sidebar::Selection::Ref(name))
+                        if (name.starts_with("refs/heads/")
+                            || name.starts_with("refs/remotes/"))
+                            && self.modifiers.command() =>
+                    {
+                        sidebar::Message::ToggleBranch(name)
+                    }
+                    other => other,
+                };
+                if matches!(
+                    m,
+                    sidebar::Message::Select(_)
+                        | sidebar::Message::Toggle(_)
+                        | sidebar::Message::ToggleBranch(_)
+                        | sidebar::Message::SelectBranchRange(_)
+                ) {
                     self.focus_pane(Pane::Sidebar);
                 }
                 let Some(tab) = self.active_tab_mut() else {
