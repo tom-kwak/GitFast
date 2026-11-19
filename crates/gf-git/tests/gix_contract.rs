@@ -187,6 +187,24 @@ async fn reads_match_the_git_cli() {
         .iter()
         .map(|r| work.git(&["rev-parse", r]).parse().unwrap())
         .collect();
+    same(&repo, "squash_preview rejects merges", |b| {
+        let ids = &ids;
+        async move {
+            let error = call!(b, RebaseOps::squash_preview(ids))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("includes merge commit"));
+            Ok(error)
+        }
+    })
+    .await;
+
+    // The feature's two commits form a linear range with no merge to replay.
+    work.git(&["switch", "--detach", "feature"]);
+    let ids: Vec<Oid> = ["HEAD", "HEAD~1"]
+        .iter()
+        .map(|r| work.git(&["rev-parse", r]).parse().unwrap())
+        .collect();
     same(&repo, "squash_preview", |b| {
         let ids = &ids;
         async move { call!(b, RebaseOps::squash_preview(ids)) }

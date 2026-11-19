@@ -207,6 +207,40 @@ async fn squash_range_with_autostash_and_pushed_count() {
 }
 
 #[tokio::test]
+async fn squash_rejects_a_merge_in_the_rewrite_plan_before_changing_history() {
+    let repo = TestRepo::new();
+    repo.write("base.txt", "base");
+    repo.commit_all("base");
+    repo.git(&["branch", "topic"]);
+    repo.write("first.txt", "first");
+    let first = repo.commit_all("first");
+    repo.write("second.txt", "second");
+    let second = repo.commit_all("second");
+    repo.git(&["switch", "topic"]);
+    repo.write("topic.txt", "topic");
+    repo.commit_all("topic");
+    repo.git(&["switch", "main"]);
+    repo.git(&["merge", "--no-ff", "--no-edit", "topic"]);
+
+    let r = open(&repo).await;
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let ids = [second.parse().unwrap(), first.parse().unwrap()];
+    let preview_error = r.squash_preview(&ids).await.unwrap_err().to_string();
+    assert!(preview_error.contains("includes merge commit"));
+    assert!(preview_error.contains(&head[..7]));
+    assert_eq!(
+        r.squash(&ids, "combined", false)
+            .await
+            .unwrap_err()
+            .to_string(),
+        preview_error
+    );
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head);
+    assert_eq!(r.state().await.unwrap(), RepoState::Clean);
+    assert!(!repo.path().join(".git/gf-rebase").exists());
+}
+
+#[tokio::test]
 async fn squash_from_the_root_commit() {
     let repo = TestRepo::new();
     repo.write("a.txt", "a\n");

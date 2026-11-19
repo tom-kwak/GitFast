@@ -47,7 +47,8 @@ pub fn melds_into_nothing(items: &[TodoItem]) -> bool {
 }
 
 /// Where the commits `ids` sit in `items` (oldest first): a run of
-/// adjacent rows, as `first..=last`. Errors name what is wrong.
+/// adjacent rows, as `first..=last`. The entire plan must be linear since
+/// the rebase todo cannot replay merge commits.
 pub fn squash_range(items: &[TodoItem], ids: &[Oid]) -> Result<std::ops::RangeInclusive<usize>> {
     let mut pos = ids
         .iter()
@@ -74,6 +75,12 @@ pub fn squash_range(items: &[TodoItem], ids: &[Oid]) -> Result<std::ops::RangeIn
         return Err(GfError::Other(
             "only adjacent commits can be squashed; select a continuous range".into(),
         ));
+    }
+    if let Some(merge) = items.iter().find(|item| item.commit.parents.len() > 1) {
+        return Err(GfError::Other(format!(
+            "The history to rewrite includes merge commit {}.\nSelect a range of commits after that merge.",
+            merge.commit.id.short()
+        )));
     }
     Ok(pos[0]..=pos[pos.len() - 1])
 }
