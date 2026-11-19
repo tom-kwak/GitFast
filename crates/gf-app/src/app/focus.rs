@@ -94,7 +94,7 @@ impl App {
     /// After a dialog, menu or command: back to the prompt only if the user
     /// was typing there (or there is nothing else to focus).
     pub(super) fn restore_focus(&self) -> Task<Message> {
-        if self.settings_open {
+        if self.settings_open || self.code_dialog.is_some() {
             return Task::none();
         }
         if self.picker.is_some() {
@@ -127,6 +127,25 @@ impl App {
                 }
                 None => run(self, k.shortcut),
             };
+        }
+        if self.dialog.is_none()
+            && let Some(viewer) = &self.code_dialog
+        {
+            use crate::features::code_view::Message as Code;
+            let action = match k.shortcut {
+                Some(Shortcut::Escape) => Some(Code::Close),
+                Some(Shortcut::Copy) => Some(Code::Copy),
+                Some(Shortcut::SelectAll) => Some(Code::SelectAll),
+                _ => None,
+            };
+            if let Some(action) = action {
+                return self.on_code_view(action);
+            }
+            return k.nav.map_or_else(Task::none, |nav| {
+                viewer
+                    .scroll_key(nav.key, &self.tokens)
+                    .map(Message::CodeDialog)
+            });
         }
         if self.settings_open && self.dialog.is_none() {
             match k.nav.map(|nav| nav.key) {

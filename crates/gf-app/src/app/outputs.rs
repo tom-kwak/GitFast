@@ -2,7 +2,7 @@
 //! git work to run (directly, or after a confirmation dialog).
 
 use gf_core::model::{Branch, RefKind};
-use gf_git::{CommitOptions, PullMode, StashOptions};
+use gf_git::{CommitOptions, FileVersion, PullMode, StashOptions};
 use iced::Task;
 use iced::widget::operation;
 
@@ -10,11 +10,12 @@ use super::dialogs::{Confirm, Purpose};
 use super::ops::Record;
 use super::ops::{load_diff, load_history};
 use super::{App, Message, OpKind, Shortcut};
+use crate::feature::Feature;
 use crate::features::command_log::NoteKind;
 use crate::features::diff_view::{self, Action, DiffSource};
 use crate::features::prompt::PROMPT_ID;
 use crate::features::prompt::parse::{BUILTINS, PromptCommand};
-use crate::features::{changes, commit_box, history, sidebar, toolbar};
+use crate::features::{changes, code_view, commit_box, history, sidebar, toolbar};
 use crate::repo_tab::{Parts, Snapshot};
 use crate::theme;
 use crate::undo;
@@ -34,6 +35,47 @@ impl App {
         load_diff(tab, source)
     }
 
+    pub(super) fn open_code_view(
+        &mut self,
+        path: std::path::PathBuf,
+        version: FileVersion,
+    ) -> Task<Message> {
+        let Some(repo) = self.active_tab().map(|tab| tab.repo.clone()) else {
+            return Task::none();
+        };
+        self.code_dialog_request = self.code_dialog_request.wrapping_add(1);
+        let (viewer, load) = code_view::State::open(self.code_dialog_request, repo, path, version);
+        self.code_dialog = Some(viewer);
+        Task::batch([
+            load.map(Message::CodeDialog),
+            iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus()),
+        ])
+    }
+
+    pub(super) fn on_code_view(&mut self, m: code_view::Message) -> Task<Message> {
+        let Some(viewer) = self.code_dialog.as_mut() else {
+            return Task::none();
+        };
+        let m = match m {
+            code_view::Message::Pressed(line, pointer)
+                if self.modifiers.shift() && pointer.button == iced::mouse::Button::Left =>
+            {
+                code_view::Message::Extend(line, pointer)
+            }
+            other => other,
+        };
+        let update = viewer.update(m);
+        match update.output {
+            Some(code_view::Output::Close) => {
+                self.code_dialog = None;
+                self.restore_focus()
+            }
+            Some(code_view::Output::Copy(text)) => self.copy_text(text, "code"),
+            Some(code_view::Output::Menu(menu)) => self.open_menu(menu.map(Message::CodeDialog)),
+            None => update.task.map(Message::CodeDialog),
+        }
+    }
+
     pub(super) fn on_changes(&mut self, out: changes::Output) -> Task<Message> {
         match out {
             changes::Output::ShowDiff(source) => {
@@ -42,6 +84,7 @@ impl App {
                 }
                 self.show_diff(source)
             }
+            changes::Output::ViewFile(path, version) => self.open_code_view(path, version),
             changes::Output::ResolveConflict(path) => self.open_conflict(path),
             changes::Output::Stage(paths) => {
                 let label = format!("stage {}", names(&paths));
@@ -1146,6 +1189,7 @@ impl App {
                     "  history ⇧↑/↓ range · . actions · working tree Space stage · d discard · diff n/p hunk"
                         .into(),
                 );
+                lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());
                 lines.push(
                     "click a ref for its history · click diff lines to stage just those".into(),
                 );

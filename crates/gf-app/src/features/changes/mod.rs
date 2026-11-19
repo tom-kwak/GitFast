@@ -3,9 +3,10 @@
 //! shows its diff; right-click (or `.`) opens the file's actions, which
 //! depend on its group.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gf_core::model::{ChangeKind, ConflictKind, StatusEntry};
+use gf_git::FileVersion;
 use iced::widget::text::Wrapping;
 use iced::widget::{container, row};
 use iced::{Color, Element, Length};
@@ -71,6 +72,7 @@ pub enum Message {
     RightClick(PathBuf, Group),
     /// `.`: the selected row's actions.
     OpenActions,
+    ViewFile(PathBuf, Group),
     /// A menu action (a request to the app).
     Act(Output),
 }
@@ -78,6 +80,7 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub enum Output {
     ShowDiff(DiffSource),
+    ViewFile(PathBuf, FileVersion),
     /// A conflicted file was picked: open the conflict resolver.
     ResolveConflict(PathBuf),
     Stage(Vec<PathBuf>),
@@ -126,7 +129,7 @@ pub fn ignore_patterns(path: &std::path::Path) -> Vec<(char, String, String)> {
 /// The actions for `path` as listed in `group`, with the git command each
 /// runs as its hint. `in_head`: the last commit has the file (so it has
 /// a history and a blame).
-fn file_menu(path: &std::path::Path, group: Group, in_head: bool) -> Menu<Message> {
+fn file_menu(path: &Path, group: Group, in_head: bool) -> Menu<Message> {
     let p = path.display().to_string();
     let act = |o: Output| Message::Act(o);
     let pb = path.to_path_buf();
@@ -216,6 +219,12 @@ fn file_menu(path: &std::path::Path, group: Group, in_head: bool) -> Menu<Messag
         ],
     };
     entries.push(Entry::Separator);
+    entries.push(Entry::item(
+        'v',
+        "View file",
+        "show the entire file",
+        Message::ViewFile(pb.clone(), group),
+    ));
     // A new file has no history or blame yet.
     if in_head && matches!(group, Group::Staged | Group::Unstaged) {
         entries.push(Entry::item(
@@ -335,6 +344,27 @@ fn row_height(t: &Tokens) -> f32 {
 
 /// Scrollable id of the list.
 const LIST_ID: &str = "gf-working-tree";
+
+fn file_version(group: Group, entry: Option<&StatusEntry>) -> FileVersion {
+    match (group, entry) {
+        (
+            Group::Staged,
+            Some(StatusEntry::Changed {
+                index: ChangeKind::Deleted,
+                ..
+            }),
+        ) => FileVersion::Revision("HEAD".into()),
+        (Group::Staged, _)
+        | (
+            Group::Unstaged,
+            Some(StatusEntry::Changed {
+                worktree: ChangeKind::Deleted,
+                ..
+            }),
+        ) => FileVersion::Index,
+        _ => FileVersion::WorkTree,
+    }
+}
 
 fn diff_source(path: PathBuf, group: Group) -> DiffSource {
     match group {
@@ -543,6 +573,10 @@ impl State {
         message: Message,
         snap: Option<&crate::repo_tab::Snapshot>,
     ) -> Update<Message, Output> {
+        if let Message::ViewFile(path, group) = message {
+            let entry = snap.and_then(|s| s.status.entries.iter().find(|e| e.path() == &path));
+            return Update::output(Output::ViewFile(path, file_version(group, entry)));
+        }
         // Only menus need it (not every scroll).
         if !matches!(message, Message::RightClick(..) | Message::OpenActions) {
             return self.update(message);
@@ -618,6 +652,9 @@ impl Feature for State {
                 }),
                 None => Update::none(),
             },
+            Message::ViewFile(path, group) => {
+                Update::output(Output::ViewFile(path, file_version(group, None)))
+            }
             Message::Act(output) => Update::output(output),
         }
     }
@@ -729,7 +766,15 @@ impl Feature for State {
             },
             Message::Scrolled,
         );
-        widgets::panel(t, format!("WORKING TREE ({total})"), list)
+        let action = widgets::text_button(
+            t,
+            "View file",
+            None,
+            self.selected
+                .clone()
+                .map(|(path, group)| Message::ViewFile(path, group)),
+        );
+        widgets::panel_with_action(t, format!("WORKING TREE ({total})"), action, list)
     }
 }
 
@@ -770,7 +815,7 @@ mod tests {
             Some(DiffSource::WorkTree("src/a.rs".into())),
             "diff follows"
         );
-        assert_eq!(keys(&menu), "szdhbyf");
+        assert_eq!(keys(&menu), "szdvhbyf");
         // Again on the same row: nothing new to show.
         let out = s
             .update(Message::RightClick("src/a.rs".into(), Group::Unstaged))
@@ -784,20 +829,20 @@ mod tests {
 
         assert_eq!(
             keys(&file_menu("a.rs".as_ref(), Group::Staged, true)),
-            "uzhbyf"
+            "uzvhbyf"
         );
         assert_eq!(
             keys(&file_menu("a.rs".as_ref(), Group::Conflicts, true)),
-            "rotsyf"
+            "rotsvyf"
         );
         assert_eq!(
             keys(&file_menu("logs/x.log".as_ref(), Group::Untracked, true)),
-            "siegdyf"
+            "siegdvyf"
         );
         // A file new in the index has no history or blame to show yet.
         assert_eq!(
             keys(&file_menu("a.rs".as_ref(), Group::Staged, false)),
-            "uzyf"
+            "uzvyf"
         );
     }
 
