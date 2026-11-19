@@ -12,7 +12,7 @@ use super::ops::{load_diff, load_history};
 use super::{App, CheckoutPhase, Message, OpKind, Shortcut};
 use crate::feature::Feature;
 use crate::features::command_log::NoteKind;
-use crate::features::diff_view::{self, Action, DiffSource};
+use crate::features::diff_view::{self, Action, DiffSource, FileAction};
 use crate::features::prompt::PROMPT_ID;
 use crate::features::prompt::parse::{BUILTINS, PromptCommand};
 use crate::features::{changes, code_view, commit_box, history, sidebar, toolbar};
@@ -126,21 +126,10 @@ impl App {
                 let open = self.open_menu(menu.map(Message::Changes));
                 Task::batch([shown, open])
             }
-            changes::Output::FileHistory(path) => self.open_file_history(path),
+            changes::Output::FileHistory(path) => self.open_file_history(path, None),
             changes::Output::Blame(path) => self.open_blame(path, None),
-            changes::Output::CopyPath(path) => {
-                let text = path.display().to_string();
-                self.flash(NoteKind::Info, format!("copied {text}"));
-                iced::clipboard::write(text)
-            }
-            changes::Output::Reveal(path) => {
-                if let Some(abs) = self.active_tab().map(|t| t.repo.cwd().join(&path))
-                    && let Err(e) = reveal(&abs)
-                {
-                    self.flash(NoteKind::Error, format!("could not show it: {e}"));
-                }
-                Task::none()
-            }
+            changes::Output::CopyPath(path) => self.copy_path(&path),
+            changes::Output::Reveal(path) => self.reveal_worktree_path(path),
             changes::Output::StashFile(path) => {
                 let label = format!("stash {}", path.display());
                 let record = Record::new(undo::stash(vec![path.clone()]));
@@ -326,8 +315,20 @@ impl App {
                 let snap = self.active_tab().and_then(|tab| tab.snapshot.as_deref());
                 self.on_changes(changes::view_file(path, group, snap))
             }
-            diff_view::Output::Blame { path, rev } => self.open_blame(path, Some(rev)),
-            diff_view::Output::FileHistory(path) => self.open_file_history(path),
+            diff_view::Output::FileMenu { menu, highlight } => {
+                let open = self.open_menu(menu.map(Message::CommitDiff));
+                let load = highlight.map_or_else(Task::none, |i| {
+                    self.on_diff(role, diff_view::Output::Highlight(i))
+                });
+                Task::batch([open, load])
+            }
+            diff_view::Output::FileAction(action) => match action {
+                FileAction::View(path, version) => self.open_code_view(path, version),
+                FileAction::Blame(path, rev) => self.open_blame(path, Some(rev)),
+                FileAction::History(path, rev) => self.open_file_history(path, Some(rev)),
+                FileAction::CopyPath(path) => self.copy_path(&path),
+                FileAction::Reveal(path) => self.reveal_worktree_path(path),
+            },
             diff_view::Output::Reload => {
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
@@ -1144,6 +1145,27 @@ impl App {
         }
     }
 
+    fn copy_path(&mut self, path: &std::path::Path) -> Task<Message> {
+        let text = path.display().to_string();
+        self.flash(NoteKind::Info, format!("copied {text}"));
+        iced::clipboard::write(text)
+    }
+
+    fn reveal_worktree_path(&self, path: std::path::PathBuf) -> Task<Message> {
+        let Some(abs) = self.active_tab().map(|tab| tab.repo.cwd().join(path)) else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || reveal(&abs))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())
+            },
+            Message::PathRevealed,
+        )
+    }
+
     fn copy_text(&mut self, text: String, what: &str) -> Task<Message> {
         self.flash(NoteKind::Info, format!("copied {what}"));
         iced::clipboard::write(text)
@@ -1264,7 +1286,7 @@ impl App {
                     "panels: ↑/↓ PgUp/PgDn Home/End move · ←/→ ⇥ switch panel · / prompt".into(),
                 );
                 lines.push(
-                    "  history ⇧↑/↓ range · . actions · working tree Space stage · d discard · diff n/p hunk"
+                    "  history ⇧↑/↓ range · history / files . actions · working tree Space stage · d discard · diff n/p hunk"
                         .into(),
                 );
                 lines.push("refs: ⌘-click marks branches · ⇧-click or ⇧↑/↓ selects a range · . then d reviews deletion".into());
@@ -1388,9 +1410,10 @@ pub(super) fn stash_options(
 
 /// Shows `path` selected in the file manager (Finder on macOS).
 fn reveal(path: &std::path::Path) -> std::io::Result<()> {
-    // Tests check the path exists instead of opening Finder windows.
+    // Historical paths may have been removed from the working tree.
+    std::fs::symlink_metadata(path)?;
     if cfg!(test) {
-        return std::fs::metadata(path).map(|_| ());
+        return Ok(());
     }
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = std::process::Command::new("open");

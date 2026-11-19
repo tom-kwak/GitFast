@@ -164,6 +164,7 @@ pub enum Message {
     Commit(commit_box::Message),
     Dialog(dialog::Message),
     CodeDialog(code_view::Message),
+    PathRevealed(Result<(), String>),
     Picker(repo_picker::Message),
     Switcher(tab_switcher::Message),
     TabList(tab_list::Message),
@@ -541,6 +542,12 @@ impl App {
             Message::TabList(m) => self.on_tab_list(m),
             Message::Settings(m) => self.on_settings(m),
             Message::CodeDialog(m) => self.on_code_view(m),
+            Message::PathRevealed(result) => {
+                if let Err(e) = result {
+                    self.flash(NoteKind::Error, format!("could not show it: {e}"));
+                }
+                Task::none()
+            }
             Message::Switcher(tab_switcher::Message::Pick(i)) => {
                 self.switcher = None;
                 self.select_tab(i)
@@ -1020,7 +1027,9 @@ impl App {
             other => other,
         };
         match m {
-            diff_view::Message::SelectFile(_) => self.focus_pane(Pane::Files),
+            diff_view::Message::SelectFile(_) | diff_view::Message::FileMenu(_) => {
+                self.focus_pane(Pane::Files);
+            }
             diff_view::Message::LineClicked(..)
             | diff_view::Message::LinePressedAdd(_)
             | diff_view::Message::LinePressedRange(_) => self.focus_pane(Pane::Diff),

@@ -992,13 +992,20 @@ impl App {
         }
     }
 
-    pub(super) fn open_file_history(&mut self, path: std::path::PathBuf) -> Task<Message> {
+    pub(super) fn open_file_history(
+        &mut self,
+        path: std::path::PathBuf,
+        revision: Option<Oid>,
+    ) -> Task<Message> {
         let Some(tab) = self.active_tab_mut() else {
             return Task::none();
         };
         tab.code_view = Role::Commit;
         tab.sidebar.clear_selection();
-        let key = format!("file: {}", path.display());
+        let key = match revision {
+            Some(oid) => format!("file {oid}: {}", path.display()),
+            None => format!("file: {}", path.display()),
+        };
         tab.history.set_revision(Some(key.clone()));
         super::ops::load_history(tab, key)
     }

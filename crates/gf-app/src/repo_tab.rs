@@ -56,9 +56,11 @@ impl History {
     pub async fn load_path(
         repo: &Repository,
         path: PathBuf,
+        revision: Option<String>,
         limit: usize,
     ) -> gf_core::Result<Self> {
         let query = LogQuery {
+            revisions: revision.into_iter().collect(),
             paths: vec![path],
             follow: true,
             // One extra tells whether there is more.
