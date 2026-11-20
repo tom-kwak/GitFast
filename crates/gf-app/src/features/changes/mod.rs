@@ -1,11 +1,9 @@
-//! Working tree changes grouped like `git status` (conflicts, staged,
-//! unstaged, untracked) with per-row and per-group actions. Clicking a row
-//! shows its diff; right-click (or `.`) opens the file's actions, which
-//! depend on its group.
+//! Working tree files with staging checkboxes, diff selection, and file actions.
 
 mod files;
 pub use files::FileLists;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -26,7 +24,7 @@ use crate::widgets::memo::{self, Memo};
 use crate::widgets::virtual_list::ScrollPos;
 use crate::widgets::{self, dim};
 
-/// Which group a row is listed in (a partly staged file is in two).
+/// The diff or resolver to open for the selected file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Group {
     Conflicts,
@@ -39,19 +37,21 @@ pub enum Group {
 pub struct State {
     selected: Option<(PathBuf, Group)>,
     scroll: ScrollPos,
-    folders: file_tree::Folders<Group>,
-    visible: Memo<(memo::Same<FileLists>, bool, u64), Rc<files::Visible>>,
+    folders: file_tree::Folders<()>,
+    visible: Memo<(memo::Same<FileLists>, bool, u64), Rc<[files::Row]>>,
+    pending_stage: HashMap<PathBuf, bool>,
+    partial_menu: Option<Group>,
     /// Widest entry of the status shown, in columns.
     widest: Memo<memo::Id, usize>,
-    /// Files the last commit does not have (set before a menu opens).
-    new_files: Vec<PathBuf>,
+    /// Whether the current menu's file is absent from HEAD.
+    menu_new_file: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Select(PathBuf, Group),
-    FocusFolder(Group, PathBuf),
-    ToggleFolder(Group, PathBuf),
+    FocusFolder(PathBuf),
+    ToggleFolder(PathBuf),
     SetTree(bool),
     Stage(PathBuf),
     Unstage(PathBuf),
@@ -325,15 +325,44 @@ pub(crate) fn diff_source(path: PathBuf, group: Group) -> DiffSource {
 }
 
 impl State {
-    /// Selection belongs to the row, so the group must match as well as the path.
+    /// Whether this is the file and diff already open in the pane.
     pub(crate) fn is_selected(&self, path: &Path, group: Group) -> bool {
         self.selected
             .as_ref()
             .is_some_and(|(p, g)| p == path && *g == group)
     }
 
+    fn is_selected_path(&self, path: &Path) -> bool {
+        self.selected.as_ref().is_some_and(|(p, _)| p == path)
+    }
+
+    pub(crate) fn set_pending_stage(&mut self, path: PathBuf, checked: bool) {
+        self.pending_stage.insert(path, checked);
+    }
+
+    pub(crate) fn clear_pending_stage(&mut self) {
+        self.pending_stage.clear();
+    }
+
+    pub(crate) fn forget_pending_stage(&mut self, path: &Path) {
+        self.pending_stage.remove(path);
+    }
+
+    fn stage_message(&self, path: &Path, file: files::File) -> Message {
+        let checked = self
+            .pending_stage
+            .get(path)
+            .copied()
+            .unwrap_or(file.staged && !file.unstaged);
+        if checked {
+            Message::Unstage(path.to_path_buf())
+        } else {
+            Message::Stage(path.to_path_buf())
+        }
+    }
+
     /// Keeps the selection pointing at something that still exists, moving
-    /// it between groups when a file was staged/unstaged. Returns the diff
+    /// its displayed diff when a file was staged/unstaged. Returns the diff
     /// to show if the selection moved.
     pub fn follow(&mut self, entries: &[StatusEntry]) -> Option<DiffSource> {
         let (path, group) = self.selected.clone()?;
@@ -369,11 +398,12 @@ impl State {
         &self,
         t: &'a Tokens,
         e: &'a StatusEntry,
-        group: Group,
+        file: files::File,
         lines: &LineStats,
         depth: Option<usize>,
         staging: bool,
     ) -> Element<'a, Message> {
+        let group = files::file_group(e);
         let (code_text, color, detail): (String, Color, Option<String>) = match e {
             StatusEntry::Changed {
                 index,
@@ -414,7 +444,7 @@ impl State {
         if let Some(d) = detail {
             line = line.push(dim(t, d).wrapping(Wrapping::None));
         }
-        let selected = self.is_selected(path, group);
+        let selected = self.is_selected_path(path);
         let main = iced::widget::mouse_area(widgets::list_row(
             t,
             line,
@@ -428,20 +458,27 @@ impl State {
             main.into()
         };
 
-        let checked = group == Group::Staged;
-        let path_to_stage = path.clone();
+        let partial = file.staged && file.unstaged && !self.pending_stage.contains_key(path);
+        let action = self.stage_message(path, file);
+        let checked = matches!(action, Message::Unstage(_));
+        let control = checkbox(checked || partial)
+            .size(t.font_size)
+            .style(crate::theme::style::staged_checkbox(t))
+            .on_toggle_maybe((!staging).then_some(move |_| action.clone()));
+        let control = if partial {
+            control.icon(iced::widget::checkbox::Icon {
+                font: iced::Font::MONOSPACE,
+                code_point: '−',
+                size: None,
+                line_height: Default::default(),
+                shaping: Default::default(),
+            })
+        } else {
+            control
+        };
         let toggle = widgets::tip(
             t,
-            checkbox(checked)
-                .size(t.font_size)
-                .style(crate::theme::style::staged_checkbox(t))
-                .on_toggle_maybe((!staging).then_some(move |next| {
-                    if next {
-                        Message::Stage(path_to_stage.clone())
-                    } else {
-                        Message::Unstage(path_to_stage.clone())
-                    }
-                })),
+            control,
             if checked {
                 "remove these changes from the next commit (Space)"
             } else {
@@ -512,25 +549,48 @@ impl State {
         if !matches!(message, Message::RightClick(..) | Message::OpenActions) {
             return self.update(message);
         }
-        self.new_files = snap.map_or_else(Vec::new, |s| {
-            s.status
-                .entries
-                .iter()
-                .filter_map(|e| match e {
-                    StatusEntry::Changed {
-                        path,
-                        index: ChangeKind::Added | ChangeKind::Renamed | ChangeKind::Copied,
-                        ..
-                    } => Some(path.clone()),
-                    _ => None,
-                })
-                .collect()
+        let path = match &message {
+            Message::RightClick(path, _) => Some(path),
+            _ => self.selected.as_ref().map(|(path, _)| path),
+        };
+        self.partial_menu = snap.zip(path).and_then(|(snap, path)| {
+            let file = snap.change_files.find(&snap.status.entries, path)?;
+            (file.staged && file.unstaged)
+                .then(|| files::file_group(&snap.status.entries[file.entry]))
+        });
+        self.menu_new_file = snap.zip(path).is_some_and(|(snap, path)| {
+            snap.status.entries.iter().any(|entry| matches!(entry,
+                StatusEntry::Changed { path: changed, index: ChangeKind::Added | ChangeKind::Renamed | ChangeKind::Copied, .. }
+                    if changed == path))
         });
         self.update(message)
     }
 
-    fn in_head(&self, path: &std::path::Path) -> bool {
-        !self.new_files.iter().any(|p| p == path)
+    fn menu(&self, path: &Path, group: Group) -> Menu<Message> {
+        let mut menu = file_menu(path, group, !self.menu_new_file);
+        if let Some(worktree) = self.partial_menu {
+            let (label, side) = if group == Group::Staged {
+                ("worktree diff", worktree)
+            } else {
+                menu.entries.insert(
+                    1,
+                    Entry::item(
+                        'u',
+                        "unstage",
+                        "remove changes from the index",
+                        Message::Unstage(path.to_path_buf()),
+                    ),
+                );
+                ("staged diff", Group::Staged)
+            };
+            menu.entries.push(Entry::item(
+                'x',
+                label,
+                "show the other side of this file",
+                Message::Select(path.to_path_buf(), side),
+            ));
+        }
+        menu
     }
 }
 
@@ -548,12 +608,12 @@ impl Feature for State {
                     output: Some(Output::SetTree(tree)),
                 }
             }
-            Message::FocusFolder(group, path) => {
-                self.folders.focused = Some((group, path));
+            Message::FocusFolder(path) => {
+                self.folders.focused = Some(((), path));
                 Update::none()
             }
-            Message::ToggleFolder(group, path) => {
-                self.folders.toggle(group, path);
+            Message::ToggleFolder(path) => {
+                self.folders.toggle((), path);
                 Update::none()
             }
             Message::Select(path, Group::Conflicts) => {
@@ -591,13 +651,13 @@ impl Feature for State {
                     .then(|| diff_source(path.clone(), group));
                 Update::output(Output::Menu {
                     show,
-                    menu: file_menu(&path, group, self.in_head(&path)),
+                    menu: self.menu(&path, group),
                 })
             }
             Message::OpenActions => match self.selected.clone() {
                 Some((path, group)) => Update::output(Output::Menu {
                     show: None,
-                    menu: file_menu(&path, group, self.in_head(&path)),
+                    menu: self.menu(&path, group),
                 }),
                 None => Update::none(),
             },
@@ -693,21 +753,18 @@ mod tests {
     }
 
     #[test]
-    fn partly_staged_file_is_in_both_groups() {
+    fn partly_staged_file_occupies_one_row() {
         let entries = vec![
             changed("a", ChangeKind::Modified, ChangeKind::Modified),
             StatusEntry::Untracked { path: "b".into() },
             StatusEntry::Ignored { path: "c".into() },
         ];
         let files = FileLists::new(&entries);
-        assert_eq!(
-            (
-                files.indices(Group::Staged).len(),
-                files.indices(Group::Unstaged).len(),
-                files.indices(Group::Untracked).len()
-            ),
-            (1, 1, 1)
-        );
+        assert_eq!(files.changed_count(), 2);
+        let partial = files
+            .find(&entries, Path::new("a"))
+            .expect("partial file row");
+        assert!(partial.staged && partial.unstaged);
     }
 
     #[test]
@@ -736,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn arrows_skip_headers_and_space_stages() {
+    fn arrows_follow_sorted_paths_and_space_stages() {
         let t = crate::theme::preset("gf-dark");
         let entries = vec![
             changed("s", ChangeKind::Modified, ChangeKind::Unmodified),
@@ -756,9 +813,9 @@ mod tests {
             s.nav(Nav::plain(k), &snap, &t, false)
                 .and_then(|m| m.message)
         };
-        // Nothing selected: ↓ picks the first file, not the STAGED header.
+        // Nothing selected: ↓ picks the first alphabetical file.
         assert!(
-            matches!(msg(&s, Key::Down), Some(Message::Select(p, Group::Staged)) if p.as_path() == std::path::Path::new("s"))
+            matches!(msg(&s, Key::Down), Some(Message::Select(p, Group::Untracked)) if p.as_path() == Path::new("n"))
         );
         let _ = s.update(Message::Select("s".into(), Group::Staged));
         assert!(
@@ -773,6 +830,7 @@ mod tests {
             msg(&s, Key::Char('d')),
             Some(Message::Discard(_, Group::Untracked))
         ));
+        let _ = s.update(Message::Select("u".into(), Group::Unstaged));
         assert!(msg(&s, Key::Down).is_none(), "already last: stays");
     }
 }

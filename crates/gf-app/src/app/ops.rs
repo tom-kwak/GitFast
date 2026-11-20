@@ -1,9 +1,9 @@
 //! Running git work for the UI: loading data, generic operations with
 //! result reporting, and network operations with progress and cancel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gf_core::model::RepoId;
@@ -22,6 +22,24 @@ use crate::repo_tab::{History, Parts, RepoTab, Snapshot, StageUpdate, Touched};
 use crate::undo::Step;
 use crate::widgets::format::truncate;
 use gf_git::{Capture, HeadMode, Scope};
+
+/// Pending clicks belong to the repository so switching or closing its tab
+/// cannot drop a queued index write.
+#[derive(Debug)]
+pub(super) struct FileStages {
+    repo: Repository,
+    current: Option<(PathBuf, bool)>,
+    waiting: VecDeque<(PathBuf, bool)>,
+}
+
+impl FileStages {
+    pub(super) fn restore(&self, tab: &mut RepoTab) {
+        tab.stage_update = Some(StageUpdate::Running);
+        for (path, checked) in self.current.iter().chain(&self.waiting) {
+            tab.changes.set_pending_stage(path.clone(), *checked);
+        }
+    }
+}
 
 /// Reads the tab's queued parts. Only one load runs per tab: each starts
 /// from the last snapshot, so a load finishing after a newer one would put
@@ -235,6 +253,7 @@ impl App {
             && !(tab.queued.status || tab.queued.refs || tab.queued.config)
         {
             tab.stage_update = None;
+            tab.changes.clear_pending_stage();
         }
         // The refresh asked for is done once no read is left queued.
         let refreshed = tab.queued.is_empty() && std::mem::take(&mut tab.refresh_asked);
@@ -377,7 +396,20 @@ impl App {
         let Some(tab) = self.active_tab() else {
             return Task::none();
         };
-        let repo = tab.repo.clone();
+        Self::recorded_task(tab.repo.clone(), label, kind, record, f)
+    }
+
+    fn recorded_task<F, Fut>(
+        repo: Repository,
+        label: impl Into<String>,
+        kind: OpKind,
+        record: Option<Record>,
+        f: F,
+    ) -> Task<Message>
+    where
+        F: FnOnce(Repository) -> Fut,
+        Fut: Future<Output = gf_core::Result<()>> + Send + 'static,
+    {
         let id = repo.id();
         let label = label.into();
         let fut = f(repo.clone());
@@ -423,10 +455,90 @@ impl App {
             return Task::none();
         };
         if tab.stage_update.is_some() || tab.commit.is_committing() {
+            self.flash(NoteKind::Info, "wait for staged changes to update");
             return Task::none();
         }
+        let git_dir = tab.repo.handle().git_dir.clone();
         tab.stage_update = Some(StageUpdate::Running);
-        self.op_recorded(label, OpKind::Stage, record, f)
+        self.op_recorded(
+            label,
+            OpKind::Stage {
+                git_dir,
+                file: None,
+            },
+            record,
+            f,
+        )
+    }
+
+    /// Reflect each click immediately and serialize the actual Git index writes.
+    pub(super) fn queue_stage_files(
+        &mut self,
+        paths: Vec<PathBuf>,
+        checked: bool,
+    ) -> Task<Message> {
+        let Some(tab) = self.active_tab_mut() else {
+            return Task::none();
+        };
+        if tab.commit.is_committing() || paths.is_empty() {
+            return Task::none();
+        }
+        let running = tab.stage_update == Some(StageUpdate::Running);
+        let repo = tab.repo.clone();
+        let git_dir = repo.handle().git_dir.clone();
+        for path in &paths {
+            tab.changes.set_pending_stage(path.clone(), checked);
+        }
+        tab.stage_update = Some(StageUpdate::Running);
+        let queue = self
+            .stage_files
+            .entry(git_dir.clone())
+            .or_insert_with(|| FileStages {
+                repo,
+                current: None,
+                waiting: VecDeque::new(),
+            });
+        queue
+            .waiting
+            .extend(paths.into_iter().map(|path| (path, checked)));
+        if running {
+            Task::none()
+        } else {
+            self.next_file_stage(&git_dir).unwrap_or_else(Task::none)
+        }
+    }
+
+    fn next_file_stage(&mut self, git_dir: &Path) -> Option<Task<Message>> {
+        let queue = self.stage_files.get_mut(git_dir)?;
+        let Some((path, checked)) = queue.waiting.pop_front() else {
+            self.stage_files.remove(git_dir);
+            return None;
+        };
+        queue.current = Some((path.clone(), checked));
+        let label = format!(
+            "{} {}",
+            if checked { "stage" } else { "unstage" },
+            path.display()
+        );
+        let kind = OpKind::Stage {
+            git_dir: git_dir.to_path_buf(),
+            file: Some(path.clone()),
+        };
+        let paths = vec![path];
+        let record = Record::new(crate::undo::index(paths.clone()));
+        Some(Self::recorded_task(
+            queue.repo.clone(),
+            label,
+            kind,
+            Some(record),
+            move |r| async move {
+                if checked {
+                    r.stage(&paths).await
+                } else {
+                    r.unstage(&paths).await
+                }
+            },
+        ))
     }
 
     /// Network operation with live progress and cancel (Esc).
@@ -552,7 +664,23 @@ impl App {
         result: Result<(), String>,
         recorded: bool,
     ) -> Task<Message> {
-        if matches!(kind, OpKind::Stage | OpKind::Commit)
+        let next_stage = if let OpKind::Stage { git_dir, file } = &kind {
+            if result.is_err()
+                && let Some(path) = file
+                && self
+                    .stage_files
+                    .get(git_dir)
+                    .is_none_or(|queue| !queue.waiting.iter().any(|(queued, _)| queued == path))
+                && let Some(tab) = self.tab_mut(id)
+            {
+                tab.changes.forget_pending_stage(path);
+            }
+            self.next_file_stage(git_dir)
+        } else {
+            None
+        };
+        if matches!(kind, OpKind::Stage { .. } | OpKind::Commit)
+            && next_stage.is_none()
             && let Some(tab) = self.tab_mut(id)
         {
             tab.stage_update = Some(StageUpdate::Refreshing);
@@ -569,7 +697,11 @@ impl App {
                 self.checkouts.remove(git_dir);
             }
         }
-        let refresh = if let OpKind::DeleteBranches(git_dir) = &kind {
+        let refresh = if let Some(next) = next_stage {
+            next
+        } else if matches!(kind, OpKind::Stage { .. }) {
+            self.request_parts(id, Parts::STATUS)
+        } else if let OpKind::DeleteBranches(git_dir) = &kind {
             self.deleting_branches.remove(git_dir);
             self.request_touched(
                 id,
