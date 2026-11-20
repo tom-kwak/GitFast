@@ -11,8 +11,10 @@ curl -fsSL https://raw.githubusercontent.com/tom-kwak/GitFast/main/scripts/insta
 ```
 
 It installs the latest release as `/Applications/gf.app` (or `~/Applications`) and
-opens without a Gatekeeper prompt. Run it again to update. gf needs `git`
-(Xcode Command Line Tools or Homebrew).
+opens without a Gatekeeper prompt. Run it again to update.
+
+gf requires **Git 2.43.1 or later**. Check your version with `git --version`.
+Git is available through Xcode Command Line Tools or Homebrew.
 
 ## What's new in 0.0.4
 
