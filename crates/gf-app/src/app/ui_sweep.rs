@@ -947,6 +947,185 @@ async fn working_tree(ui: Ui) -> Ui {
 }
 
 #[tokio::test]
+async fn working_tree_folds_the_same_directory_independently_in_each_group() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            r.write("src/staged.txt", "staged\n");
+            r.git(&["add", "src/staged.txt"]);
+            r.write("src/lib.rs", "unstaged\n");
+        })
+        .await,
+    )
+    .await;
+    let _ = ui.click("[ Tree ]").await;
+    assert!(ui.shows("staged.txt"));
+    assert!(ui.shows("lib.rs"));
+    let staged_folder = ui
+        .targets()
+        .into_iter()
+        .find(|target| {
+            target.label == "src/"
+                && matches!(
+                    ui.press(target.at, mouse::Button::Left).as_slice(),
+                    [Message::Changes(changes::Message::ToggleFolder(
+                        changes::Group::Staged,
+                        _
+                    ))]
+                )
+        })
+        .expect("staged src folder");
+    let _ = ui.click_at(&staged_folder, mouse::Button::Left).await;
+    assert!(!ui.shows("staged.txt"));
+    assert!(ui.shows("lib.rs"));
+    let moved = ui
+        .app
+        .active_tab()
+        .expect("repository")
+        .changes
+        .nav(
+            crate::nav::Nav::plain(crate::nav::Key::Enter),
+            ui.app
+                .active_tab()
+                .expect("repository")
+                .snapshot
+                .as_deref()
+                .expect("status"),
+            &ui.app.tokens,
+            true,
+        )
+        .and_then(|m| m.message)
+        .expect("Enter expands the focused folder");
+    let _ = ui.send(Message::Changes(moved)).await;
+    assert!(ui.shows("staged.txt"));
+    let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
+    assert!(saved.appearance.working_tree_dirs);
+    assert!(!saved.appearance.history_file_dirs);
+}
+
+#[tokio::test]
+async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() {
+    let mut ui = Ui::open_with(|r| {
+        r.write("moved/keep.txt", "directory\n");
+        r.git(&["mv", "src/lib.rs", "moved/lib_new.rs"]);
+        r.git(&["add", "moved/keep.txt"]);
+        r.git(&["commit", "-qm", "move source file"]);
+    })
+    .await;
+    let _ = ui.click("move source file").await;
+    let _ = ui.click("[ Tree ]").await;
+    assert!(ui.shows("moved/"));
+    assert!(!ui.shows("src/"));
+    assert!(ui.shows("lib.rs → lib_new.rs"));
+    let _ = ui.click("lib.rs → lib_new.rs").await;
+    assert_eq!(
+        ui.app
+            .active_tab()
+            .expect("repository")
+            .commit_diff
+            .current_path()
+            .as_deref(),
+        Some(std::path::Path::new("moved/lib_new.rs"))
+    );
+    let _ = ui.click("moved/").await;
+    assert!(!ui.shows("lib.rs → lib_new.rs"));
+    let _ = ui.click("[ List ]").await;
+    assert!(ui.shows("lib_new.rs"));
+}
+
+#[tokio::test]
+async fn staging_checkboxes_commit_only_the_checked_changes() {
+    let mut ui = working_tree(Ui::open().await).await;
+    for (name, checked) in [("b.txt", true), ("a.txt", false)] {
+        ui.settle();
+        let file = ui
+            .targets()
+            .into_iter()
+            .find(|target| target.label == name)
+            .expect("file row");
+        let target = (0..140_u16).step_by(3).find_map(|x| {
+            let at = Point::new(file.at.x - f32::from(x), file.at.y);
+            match ui.press(at, mouse::Button::Left).as_slice() {
+                [Message::Changes(changes::Message::Stage(path))]
+                    if !checked && path.ends_with(name) =>
+                {
+                    Some(Target {
+                        label: name.into(),
+                        at,
+                    })
+                }
+                [Message::Changes(changes::Message::Unstage(path))]
+                    if checked && path.ends_with(name) =>
+                {
+                    Some(Target {
+                        label: name.into(),
+                        at,
+                    })
+                }
+                _ => None,
+            }
+        });
+        let effects = ui
+            .click_at(&target.expect("staging checkbox"), mouse::Button::Left)
+            .await;
+        assert!(effects.repo_changed, "{name}");
+    }
+    let staged = ui.fixture.repo.git(&["show", ":a.txt"]);
+    ui.fixture.repo.write("a.txt", "a new unstaged edit\n");
+    let _ = ui.send(Message::Toolbar(toolbar::Message::Refresh)).await;
+    let _ = ui
+        .send(Message::Commit(commit_box::Message::Summary(
+            "commit the checked file".into(),
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Commit(commit_box::Message::Submit {
+            amend: false,
+        }))
+        .await;
+    assert_eq!(
+        ui.fixture
+            .repo
+            .git(&["show", "--format=", "--name-only", "HEAD"])
+            .trim(),
+        "a.txt"
+    );
+    assert!(
+        ui.fixture
+            .repo
+            .git(&["status", "--short"])
+            .contains("?? b.txt")
+    );
+    assert_eq!(ui.fixture.repo.git(&["show", "HEAD:a.txt"]), staged);
+    assert!(
+        ui.fixture
+            .repo
+            .git(&["diff", "--", "a.txt"])
+            .contains("a new unstaged edit")
+    );
+}
+
+#[tokio::test]
+async fn commit_shortcut_waits_until_staging_finishes() {
+    let mut ui = working_tree(Ui::open().await).await;
+    let before = ui.fixture.repo.git(&["rev-parse", "HEAD"]);
+    let _ = ui
+        .send(Message::Commit(commit_box::Message::Summary(
+            "commit after unstaging".into(),
+        )))
+        .await;
+    let _pending = ui
+        .app
+        .update(Message::Changes(changes::Message::Unstage("b.txt".into())));
+    let _ = ui
+        .send(Message::Commit(commit_box::Message::Submit {
+            amend: false,
+        }))
+        .await;
+    assert!(ui.flash().contains("wait for staged changes"));
+    assert_eq!(ui.fixture.repo.git(&["rev-parse", "HEAD"]), before);
+}
+
+#[tokio::test]
 async fn sweep_recognizes_reselecting_a_file_after_copying_its_path() {
     let mut ui = working_tree(Ui::open().await).await;
     let _ = ui.right_click("b.txt").await;

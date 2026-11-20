@@ -11,6 +11,7 @@
 //! diffs stay responsive. Syntax highlighting runs off the UI thread: the
 //! first file when the diff loads, others when they are first selected.
 
+mod files;
 mod loading;
 mod select;
 pub use loading::Completion;
@@ -32,6 +33,7 @@ use crate::features::context_menu::{Entry, Menu};
 use crate::highlight::{self, Spans};
 use crate::nav::{self, Key, Moved, Nav};
 use crate::theme::{Tokens, style};
+use crate::widgets::file_tree;
 use crate::widgets::memo::{self, Memo};
 use crate::widgets::selectable_line::TextPointer;
 use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
@@ -301,6 +303,8 @@ pub struct LoadedDiff {
     line_counts: Vec<select::LineCounts>,
     entry_counts: Vec<widgets::EntryCounts>,
     file_list_columns: usize,
+    file_tree: file_tree::Tree,
+    file_tree_columns: usize,
     submodules: Vec<bool>,
 }
 
@@ -336,15 +340,23 @@ impl LoadedDiff {
                 }))
             })
             .collect();
-        let file_list_columns = files
-            .iter()
-            .zip(&entry_counts)
-            .filter_map(|(file, &counts)| {
-                file.display_path()
-                    .map(|path| widgets::file_entry_columns(path, counts))
-            })
-            .max()
-            .unwrap_or(0);
+        let (file_list_columns, file_tree_columns) =
+            files
+                .iter()
+                .zip(&entry_counts)
+                .fold((0, 0), |(list, tree), (file, &counts)| {
+                    let path = files::display_path(file);
+                    let width = widgets::file_entry_columns(path, counts);
+                    let old = files::original_name(file)
+                        .map_or(0, |name| columns(&name.to_string_lossy()) + 3);
+                    (list.max(width), tree.max(width + old + 10))
+                });
+        let file_tree = file_tree::Tree::new(
+            files
+                .iter()
+                .enumerate()
+                .map(|(i, file)| (i, files::display_path(file))),
+        );
         let submodules = files.iter().map(FileDiff::is_submodule).collect();
         Self {
             files,
@@ -353,6 +365,8 @@ impl LoadedDiff {
             line_counts,
             entry_counts,
             file_list_columns,
+            file_tree,
+            file_tree_columns,
             submodules,
         }
     }
@@ -432,6 +446,8 @@ pub struct State {
     ignore_whitespace: bool,
     scroll: ScrollPos,
     files_scroll: ScrollPos,
+    folders: file_tree::Folders<()>,
+    visible_files: Memo<(memo::Same<LoadedDiff>, u64), Rc<[usize]>>,
     /// Rows of the file shown, per loaded diff and file.
     /// The rows index into the diff's hunks: keyed by the diff itself.
     rows: Memo<(memo::Same<LoadedDiff>, usize), Rc<[DiffRow]>>,
@@ -463,6 +479,9 @@ pub enum Message {
     DiscardSubmodule,
     Selected(Action),
     SelectFile(usize),
+    FocusFolder(PathBuf),
+    ToggleFolder(PathBuf),
+    SetTree(bool),
     FileMenu(usize),
     OpenFileMenu,
     FileAction(FileAction),
@@ -484,6 +503,7 @@ pub enum FileAction {
 
 #[derive(Debug, Clone)]
 pub enum Output {
+    SetTree(bool),
     Menu(Menu<Message>),
     FileMenu {
         menu: Menu<Message>,
@@ -536,6 +556,8 @@ impl State {
             ignore_whitespace: false,
             scroll: ScrollPos::default(),
             files_scroll: ScrollPos::default(),
+            folders: file_tree::Folders::default(),
+            visible_files: Memo::default(),
             rows: Memo::default(),
         }
     }
@@ -878,40 +900,6 @@ impl State {
         (t.font_size * 1.6).round()
     }
 
-    fn files_row_height(t: &Tokens) -> f32 {
-        (t.font_size * 1.7).round()
-    }
-
-    /// Keys for the commit's file list: arrows pick the file.
-    pub fn files_nav(&self, nav: Nav, t: &Tokens) -> Option<Moved<Message>> {
-        if nav.key == Key::Char('.') {
-            return Some(if self.diff.files.is_empty() {
-                Moved::stay()
-            } else {
-                Moved::message(Message::OpenFileMenu)
-            });
-        }
-        let h = Self::files_row_height(t);
-        let len = self.diff.files.len();
-        let i = nav::step(
-            Some(self.file),
-            len,
-            nav.key,
-            nav::page(self.files_scroll, h),
-        )?;
-        if i == self.file {
-            return Some(Moved::stay());
-        }
-        Some(
-            Moved::message(Message::SelectFile(i)).with_task(nav::reveal(
-                FILES_ID,
-                self.files_scroll,
-                i,
-                h,
-            )),
-        )
-    }
-
     /// Keys for the diff itself: arrows and PgUp/PgDn scroll, Home/End
     /// jump, `n`/`p` go to the next/previous hunk.
     pub fn diff_nav(&self, nav: Nav, t: &Tokens) -> Option<Moved<Message>> {
@@ -1179,7 +1167,24 @@ impl State {
                     ),
                 })
             }
+            Message::SetTree(tree) => {
+                self.folders.focused = None;
+                self.files_scroll = ScrollPos::default();
+                Update {
+                    task: nav::scroll_y(FILES_ID, 0.0),
+                    output: Some(Output::SetTree(tree)),
+                }
+            }
+            Message::FocusFolder(path) => {
+                self.folders.focused = Some(((), path));
+                Update::none()
+            }
+            Message::ToggleFolder(path) => {
+                self.folders.toggle((), path);
+                Update::none()
+            }
             Message::SelectFile(i) => {
+                self.folders.focused = None;
                 if i >= self.diff.files.len() || i == self.file {
                     return Update::none();
                 }
@@ -1238,65 +1243,6 @@ impl State {
     }
 
     /// Changed files of the commit/stash being shown.
-    pub fn files_view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
-        let t = cx.tokens;
-        let accent = self.role.accent(t);
-        let files = &self.diff.files;
-        let title = if files.is_empty() {
-            "FILES".to_owned()
-        } else {
-            format!("FILES ({})", files.len())
-        };
-        let body: Element<'a, Message> = if self.source.is_none() {
-            widgets::empty_hint(t, "pick a commit ↑")
-        } else if self.loading && files.is_empty() {
-            widgets::empty_hint(t, "loading…")
-        } else if files.is_empty() {
-            widgets::empty_hint(t, "no file changes")
-        } else {
-            let path_of = |f: &FileDiff| {
-                f.display_path()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default()
-            };
-            let content_width = t.cols(self.diff.file_list_columns) + 30.0;
-            let current = self.file;
-            virtual_list(
-                FILES_ID,
-                files.len(),
-                Self::files_row_height(t),
-                content_width,
-                self.files_scroll,
-                move |i| {
-                    let f = &files[i];
-                    let code = match f.change {
-                        FileChange::Added => "A",
-                        FileChange::Deleted => "D",
-                        FileChange::Modified => "M",
-                        FileChange::Renamed { .. } => "R",
-                        FileChange::Copied { .. } => "C",
-                    };
-                    let color = widgets::change_color(t, code.chars().next().unwrap_or(' '));
-                    let path = f
-                        .display_path()
-                        .map(PathBuf::as_path)
-                        .unwrap_or(std::path::Path::new(""));
-                    let line = widgets::file_entry(t, code, color, path, self.diff.entry_counts[i]);
-                    let item = iced::widget::mouse_area(widgets::list_row(
-                        t,
-                        line,
-                        i == current,
-                        Message::SelectFile(i),
-                    ))
-                    .on_right_press(Message::FileMenu(i));
-                    widgets::tip(t, item, path_of(f))
-                },
-                Message::FilesScrolled,
-            )
-        };
-        widgets::accent_panel(t, title, accent, body)
-    }
-
     pub fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
         let t = cx.tokens;
         let accent = self.role.accent(t);

@@ -54,6 +54,7 @@ impl State {
             self.file = 0;
             self.scroll = ScrollPos::default();
             self.files_scroll = ScrollPos::default();
+            self.folders.focused = None;
         }
         self.source = Some(source);
         self.loading = true;
@@ -63,9 +64,12 @@ impl State {
     }
 
     pub fn close(&mut self) {
+        let mut folders = std::mem::take(&mut self.folders);
+        folders.focused = None;
         *self = Self {
             generation: self.generation,
             ignore_whitespace: self.ignore_whitespace,
+            folders,
             ..Self::new(self.role)
         };
     }

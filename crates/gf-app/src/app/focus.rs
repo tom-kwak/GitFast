@@ -472,10 +472,18 @@ impl App {
                 .history
                 .nav(n, snap.as_deref(), t)?
                 .map(Message::History),
-            Pane::Files => tab.commit_diff.files_nav(n, t)?.map(Message::CommitDiff),
+            Pane::Files => tab
+                .commit_diff
+                .files_nav(n, t, self.settings.appearance.history_file_dirs)?
+                .map(Message::CommitDiff),
             Pane::Changes => tab
                 .changes
-                .nav(n, &snap?.status.entries, t)?
+                .nav(
+                    n,
+                    snap.as_deref()?,
+                    t,
+                    self.settings.appearance.working_tree_dirs,
+                )?
                 .map(Message::Changes),
             Pane::Diff => {
                 let role = tab.code_view;

@@ -3,13 +3,17 @@
 //! shows its diff; right-click (or `.`) opens the file's actions, which
 //! depend on its group.
 
+mod files;
+pub use files::FileLists;
+
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gf_core::model::{ChangeKind, ConflictKind, StatusEntry};
 use gf_git::FileVersion;
 use iced::widget::text::Wrapping;
-use iced::widget::{container, row};
-use iced::{Color, Element, Length};
+use iced::widget::{checkbox, row, space};
+use iced::{Color, Element};
 
 use crate::feature::{Cx, Feature, Update};
 use crate::features::context_menu::{Entry, Menu};
@@ -17,12 +21,13 @@ use crate::features::diff_view::DiffSource;
 use crate::nav::{self, Key, Moved, Nav};
 use crate::repo_tab::{LineStats, Snapshot};
 use crate::theme::Tokens;
+use crate::widgets::file_tree;
 use crate::widgets::memo::{self, Memo};
-use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
-use crate::widgets::{self, colored, dim};
+use crate::widgets::virtual_list::ScrollPos;
+use crate::widgets::{self, dim};
 
 /// Which group a row is listed in (a partly staged file is in two).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Group {
     Conflicts,
     Staged,
@@ -34,34 +39,20 @@ pub enum Group {
 pub struct State {
     selected: Option<(PathBuf, Group)>,
     scroll: ScrollPos,
+    folders: file_tree::Folders<Group>,
+    visible: Memo<(memo::Same<FileLists>, bool, u64), Rc<files::Visible>>,
     /// Widest entry of the status shown, in columns.
     widest: Memo<memo::Id, usize>,
     /// Files the last commit does not have (set before a menu opens).
     new_files: Vec<PathBuf>,
 }
 
-/// One row of the flattened list: a group header or a file.
-#[derive(Debug, Clone, Copy)]
-enum WtRow<'a> {
-    Header {
-        title: &'static str,
-        color: Color,
-        count: usize,
-        action: Option<HeaderAction>,
-    },
-    Entry(&'a StatusEntry, Group),
-}
-
-/// Header buttons (kept `Copy` for the row enum).
-#[derive(Debug, Clone, Copy)]
-enum HeaderAction {
-    StageAll,
-    UnstageAll,
-}
-
 #[derive(Debug, Clone)]
 pub enum Message {
     Select(PathBuf, Group),
+    FocusFolder(Group, PathBuf),
+    ToggleFolder(Group, PathBuf),
+    SetTree(bool),
     Stage(PathBuf),
     Unstage(PathBuf),
     Discard(PathBuf, Group),
@@ -78,6 +69,7 @@ pub enum Message {
 
 #[derive(Debug, Clone)]
 pub enum Output {
+    SetTree(bool),
     ShowDiff(DiffSource),
     /// A conflicted file was picked: open the conflict resolver.
     ResolveConflict(PathBuf),
@@ -289,54 +281,6 @@ fn conflict_label(kind: ConflictKind) -> &'static str {
     }
 }
 
-#[derive(Default)]
-pub struct Groups<'a> {
-    pub conflicts: Vec<&'a StatusEntry>,
-    pub staged: Vec<&'a StatusEntry>,
-    pub unstaged: Vec<&'a StatusEntry>,
-    pub untracked: Vec<&'a StatusEntry>,
-}
-
-pub fn group(entries: &[StatusEntry]) -> Groups<'_> {
-    let mut g = Groups::default();
-    for e in entries {
-        match e {
-            StatusEntry::Conflicted { .. } => g.conflicts.push(e),
-            StatusEntry::Untracked { .. } => g.untracked.push(e),
-            StatusEntry::Ignored { .. } => {}
-            StatusEntry::Changed { .. } => {
-                // A partly staged file appears in both groups, like `git status`.
-                if e.is_staged() {
-                    g.staged.push(e);
-                }
-                if e.has_unstaged_changes() {
-                    g.unstaged.push(e);
-                }
-            }
-        }
-    }
-    g
-}
-
-/// Rows as listed: `None` for a group header, then its files.
-fn flat(entries: &[StatusEntry]) -> Vec<Option<(PathBuf, Group)>> {
-    let g = group(entries);
-    let mut rows = Vec::new();
-    for (items, group) in [
-        (&g.conflicts, Group::Conflicts),
-        (&g.staged, Group::Staged),
-        (&g.unstaged, Group::Unstaged),
-        (&g.untracked, Group::Untracked),
-    ] {
-        if items.is_empty() {
-            continue;
-        }
-        rows.push(None);
-        rows.extend(items.iter().map(|e| Some((e.path().clone(), group))));
-    }
-    rows
-}
-
 fn row_height(t: &Tokens) -> f32 {
     (t.font_size * 1.8).round()
 }
@@ -393,26 +337,22 @@ impl State {
     /// to show if the selection moved.
     pub fn follow(&mut self, entries: &[StatusEntry]) -> Option<DiffSource> {
         let (path, group) = self.selected.clone()?;
-        let g = self::group(entries);
-        let has = |list: &Vec<&StatusEntry>| list.iter().any(|e| e.path() == &path);
-        let in_group = match group {
-            Group::Conflicts => has(&g.conflicts),
-            Group::Staged => has(&g.staged),
-            Group::Unstaged => has(&g.unstaged),
-            Group::Untracked => has(&g.untracked),
+        let has = |group| {
+            entries
+                .iter()
+                .any(|e| e.path() == &path && files::groups(e).contains(&Some(group)))
         };
-        if in_group {
+        if has(group) {
             return None;
         }
         let moved = [
-            (Group::Staged, has(&g.staged)),
-            (Group::Unstaged, has(&g.unstaged)),
-            (Group::Untracked, has(&g.untracked)),
-            (Group::Conflicts, has(&g.conflicts)),
+            Group::Staged,
+            Group::Unstaged,
+            Group::Untracked,
+            Group::Conflicts,
         ]
         .into_iter()
-        .find(|(_, present)| *present)
-        .map(|(g, _)| g);
+        .find(|&group| has(group));
         match moved {
             Some(group) => {
                 self.selected = Some((path.clone(), group));
@@ -425,68 +365,14 @@ impl State {
         }
     }
 
-    /// Keys for the list: arrows pick a file, Space stages or unstages
-    /// it, `d` discards it (the app confirms first).
-    pub fn nav(&self, nav: Nav, entries: &[StatusEntry], t: &Tokens) -> Option<Moved<Message>> {
-        let rows = flat(entries);
-        let files: Vec<(usize, &(PathBuf, Group))> = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| r.as_ref().map(|f| (i, f)))
-            .collect();
-        let current = self
-            .selected
-            .as_ref()
-            .and_then(|sel| files.iter().position(|(_, f)| *f == sel));
-        let selected = current.map(|c| files[c].1.clone());
-        match nav.key {
-            Key::Space => {
-                let (path, group) = selected?;
-                return Some(Moved::message(match group {
-                    Group::Staged => Message::Unstage(path),
-                    Group::Unstaged | Group::Untracked => Message::Stage(path),
-                    Group::Conflicts => return Some(Moved::stay()),
-                }));
-            }
-            Key::Char('.') => {
-                return self
-                    .selected
-                    .as_ref()
-                    .map(|_| Moved::message(Message::OpenActions));
-            }
-            Key::Char('d') => {
-                let (path, group) = selected?;
-                return Some(match group {
-                    Group::Unstaged | Group::Untracked => {
-                        Moved::message(Message::Discard(path, group))
-                    }
-                    Group::Staged | Group::Conflicts => Moved::stay(),
-                });
-            }
-            _ => {}
-        }
-        let h = row_height(t);
-        let i = nav::step(current, files.len(), nav.key, nav::page(self.scroll, h))?;
-        if current == Some(i) {
-            return Some(Moved::stay());
-        }
-        let (row, (path, group)) = files[i];
-        Some(
-            Moved::message(Message::Select(path.clone(), *group)).with_task(nav::reveal(
-                LIST_ID,
-                self.scroll,
-                row,
-                h,
-            )),
-        )
-    }
-
     fn entry_row<'a>(
         &self,
         t: &'a Tokens,
         e: &'a StatusEntry,
         group: Group,
         lines: &LineStats,
+        depth: Option<usize>,
+        staging: bool,
     ) -> Element<'a, Message> {
         let (code_text, color, detail): (String, Color, Option<String>) = match e {
             StatusEntry::Changed {
@@ -511,8 +397,11 @@ impl State {
             StatusEntry::Ignored { .. } => ("!".into(), t.dim, None),
         };
         let path = e.path();
+        let name = depth
+            .and_then(|_| path.file_name())
+            .map_or(path.as_path(), Path::new);
         let mut line =
-            widgets::file_entry(t, &code_text, color, path, entry_counts(lines, path, group));
+            widgets::file_entry(t, &code_text, color, name, entry_counts(lines, path, group));
         if let Some(d) = detail {
             line = line.push(dim(t, d).wrapping(Wrapping::None));
         }
@@ -524,16 +413,37 @@ impl State {
             Message::Select(path.clone(), group),
         ))
         .on_right_press(Message::RightClick(path.clone(), group));
+        let main: Element<'_, _> = if depth.is_some() {
+            widgets::tip(t, main, path.display().to_string())
+        } else {
+            main.into()
+        };
 
+        let checked = group == Group::Staged;
+        let path_to_stage = path.clone();
+        let toggle = widgets::tip(
+            t,
+            checkbox(checked)
+                .size(t.font_size)
+                .style(crate::theme::style::staged_checkbox(t))
+                .on_toggle_maybe((!staging).then_some(move |next| {
+                    if next {
+                        Message::Stage(path_to_stage.clone())
+                    } else {
+                        Message::Unstage(path_to_stage.clone())
+                    }
+                })),
+            if checked {
+                "remove these changes from the next commit (Space)"
+            } else {
+                "include these changes in the next commit (Space)"
+            }
+            .into(),
+        );
         let actions: Element<'a, Message> = match group {
-            Group::Staged => widgets::icon_button(
-                t,
-                "−",
-                t.removed(),
-                "unstage",
-                Message::Unstage(path.clone()),
-            ),
+            Group::Staged => toggle,
             Group::Unstaged => row![
+                toggle,
                 widgets::icon_button(
                     t,
                     "↺",
@@ -541,10 +451,10 @@ impl State {
                     "discard changes…",
                     Message::Discard(path.clone(), group)
                 ),
-                widgets::icon_button(t, "+", t.added(), "stage", Message::Stage(path.clone())),
             ]
             .into(),
             Group::Untracked => row![
+                toggle,
                 widgets::icon_button(
                     t,
                     "✕",
@@ -552,25 +462,25 @@ impl State {
                     "delete file…",
                     Message::Discard(path.clone(), group)
                 ),
-                widgets::icon_button(
-                    t,
-                    "+",
-                    t.added(),
-                    "stage (start tracking)",
-                    Message::Stage(path.clone())
-                ),
             ]
             .into(),
-            Group::Conflicts => widgets::icon_button(
+            Group::Conflicts => widgets::icon_button_maybe(
                 t,
                 "✓",
                 t.added(),
                 "mark resolved (stage)",
-                Message::Stage(path.clone()),
+                (!staging).then(|| Message::Stage(path.clone())),
             ),
         };
         // Actions on the left so they stay visible when long paths scroll.
-        row![actions, main].align_y(iced::Alignment::Center).into()
+        row![
+            actions,
+            space().width(file_tree::indent(t, depth.unwrap_or(0))),
+            main
+        ]
+        .spacing(3)
+        .align_y(iced::Alignment::Center)
+        .into()
     }
 }
 
@@ -615,11 +525,29 @@ impl Feature for State {
 
     fn update(&mut self, message: Message) -> Update<Message, Output> {
         match message {
+            Message::SetTree(tree) => {
+                self.folders.focused = None;
+                self.scroll = ScrollPos::default();
+                Update {
+                    task: nav::scroll_y(LIST_ID, 0.0),
+                    output: Some(Output::SetTree(tree)),
+                }
+            }
+            Message::FocusFolder(group, path) => {
+                self.folders.focused = Some((group, path));
+                Update::none()
+            }
+            Message::ToggleFolder(group, path) => {
+                self.folders.toggle(group, path);
+                Update::none()
+            }
             Message::Select(path, Group::Conflicts) => {
+                self.folders.focused = None;
                 self.selected = Some((path.clone(), Group::Conflicts));
                 Update::output(Output::ResolveConflict(path))
             }
             Message::Select(path, group) => {
+                self.folders.focused = None;
                 self.selected = Some((path.clone(), group));
                 Update::output(Output::ShowDiff(diff_source(path, group)))
             }
@@ -641,6 +569,7 @@ impl Feature for State {
             }
             Message::RightClick(path, group) => {
                 // Right-click selects like a click (the diff follows).
+                self.folders.focused = None;
                 let changed = !self.is_selected(&path, group);
                 self.selected = Some((path.clone(), group));
                 let show = (changed && group != Group::Conflicts)
@@ -662,113 +591,7 @@ impl Feature for State {
     }
 
     fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
-        let t = cx.tokens;
-        let Some(snap) = cx.snapshot else {
-            return widgets::panel(t, "WORKING TREE".into(), widgets::empty_hint(t, "loading…"));
-        };
-        let g = group(&snap.status.entries);
-        let total = g.conflicts.len() + g.staged.len() + g.unstaged.len() + g.untracked.len();
-        if total == 0 {
-            return widgets::panel(
-                t,
-                "WORKING TREE".into(),
-                widgets::empty_hint(t, "✓ clean — edit files and they appear here"),
-            );
-        }
-
-        let mut rows: Vec<WtRow<'a>> = Vec::new();
-        let mut section = |title: &'static str,
-                           color: Color,
-                           items: &[&'a StatusEntry],
-                           group: Group,
-                           action: Option<HeaderAction>| {
-            if items.is_empty() {
-                return;
-            }
-            rows.push(WtRow::Header {
-                title,
-                color,
-                count: items.len(),
-                action,
-            });
-            rows.extend(items.iter().map(|e| WtRow::Entry(e, group)));
-        };
-        section("CONFLICTS", t.error(), &g.conflicts, Group::Conflicts, None);
-        section(
-            "STAGED",
-            t.added(),
-            &g.staged,
-            Group::Staged,
-            Some(HeaderAction::UnstageAll),
-        );
-        let has_unstaged = !g.unstaged.is_empty() || !g.untracked.is_empty();
-        section(
-            "UNSTAGED",
-            t.removed(),
-            &g.unstaged,
-            Group::Unstaged,
-            has_unstaged.then_some(HeaderAction::StageAll),
-        );
-        section("UNTRACKED", t.dim, &g.untracked, Group::Untracked, None);
-
-        let key = memo::identity(&snap.status, snap.status.entries.len());
-        let cols = self.widest.get(key, || {
-            snap.status
-                .entries
-                .iter()
-                .map(|e| {
-                    let extra = match e {
-                        StatusEntry::Changed {
-                            orig_path: Some(o), ..
-                        } => columns(&o.display().to_string()) + 3,
-                        StatusEntry::Conflicted { .. } => 16,
-                        _ => 0,
-                    };
-                    // Widest of the groups the entry can appear in.
-                    let counts = entry_counts(&snap.lines, e.path(), Group::Staged)
-                        .or_else(|| entry_counts(&snap.lines, e.path(), Group::Unstaged))
-                        .or_else(|| entry_counts(&snap.lines, e.path(), Group::Untracked));
-                    widgets::file_entry_columns(e.path(), counts) + extra
-                })
-                .max()
-                .unwrap_or(0)
-        });
-        // two action icons, the entry and padding.
-        let content_width = 64.0 + t.cols(cols) + 24.0;
-        let list = virtual_list(
-            LIST_ID,
-            rows.len(),
-            row_height(t),
-            content_width,
-            self.scroll,
-            move |i| match rows[i] {
-                WtRow::Header {
-                    title,
-                    color,
-                    count,
-                    action,
-                } => {
-                    let mut header =
-                        row![colored(t, format!("{title} ({count})"), color).size(t.small())]
-                            .spacing(8)
-                            .align_y(iced::Alignment::Center);
-                    if let Some(a) = action {
-                        let (label, msg) = match a {
-                            HeaderAction::StageAll => ("stage all", Message::StageAll),
-                            HeaderAction::UnstageAll => ("unstage all", Message::UnstageAll),
-                        };
-                        header = header.push(widgets::text_button(t, label, None, Some(msg)));
-                    }
-                    container(header)
-                        .height(Length::Fill)
-                        .align_y(iced::Alignment::Center)
-                        .into()
-                }
-                WtRow::Entry(e, group) => self.entry_row(t, e, group, &snap.lines),
-            },
-            Message::Scrolled,
-        );
-        widgets::panel(t, format!("WORKING TREE ({total})"), list)
+        self.files_view(cx)
     }
 }
 
@@ -861,9 +684,13 @@ mod tests {
             StatusEntry::Untracked { path: "b".into() },
             StatusEntry::Ignored { path: "c".into() },
         ];
-        let g = group(&entries);
+        let files = FileLists::new(&entries);
         assert_eq!(
-            (g.staged.len(), g.unstaged.len(), g.untracked.len()),
+            (
+                files.indices(Group::Staged).len(),
+                files.indices(Group::Unstaged).len(),
+                files.indices(Group::Untracked).len()
+            ),
             (1, 1, 1)
         );
     }
@@ -902,7 +729,18 @@ mod tests {
             StatusEntry::Untracked { path: "n".into() },
         ];
         let mut s = State::default();
-        let msg = |s: &State, k| s.nav(Nav::plain(k), &entries, &t).and_then(|m| m.message);
+        let snap = Snapshot {
+            change_files: std::sync::Arc::new(FileLists::new(&entries)),
+            status: gf_core::model::StatusReport {
+                entries,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let msg = |s: &State, k| {
+            s.nav(Nav::plain(k), &snap, &t, false)
+                .and_then(|m| m.message)
+        };
         // Nothing selected: ↓ picks the first file, not the STAGED header.
         assert!(
             matches!(msg(&s, Key::Down), Some(Message::Select(p, Group::Staged)) if p.as_path() == std::path::Path::new("s"))

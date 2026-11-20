@@ -24,6 +24,10 @@ pub struct Cx<'a> {
     pub snapshot: Option<&'a Snapshot>,
     /// Whether the active repository's history shows every branch.
     pub all_branches: bool,
+    /// Whether this file pane shows directory rows.
+    pub file_tree: bool,
+    /// Wait for the Git index and its displayed staging state to agree.
+    pub staging: bool,
 }
 
 /// Result of handling a message: async follow-up work for the feature

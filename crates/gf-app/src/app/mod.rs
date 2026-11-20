@@ -111,6 +111,7 @@ pub enum Shortcut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpKind {
     Generic,
+    Stage,
     Checkout(PathBuf),
     DeleteBranches(PathBuf),
     RemoveWorktree(PathBuf),
@@ -658,7 +659,10 @@ impl App {
             Message::Changes(m) => {
                 if matches!(
                     m,
-                    changes::Message::Select(..) | changes::Message::RightClick(..)
+                    changes::Message::Select(..)
+                        | changes::Message::RightClick(..)
+                        | changes::Message::ToggleFolder(..)
+                        | changes::Message::SetTree(_)
                 ) {
                     self.focus_pane(Pane::Changes);
                 }
@@ -728,6 +732,10 @@ impl App {
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
+                if matches!(m, commit_box::Message::Submit { .. }) && tab.stage_update.is_some() {
+                    self.flash(NoteKind::Info, "wait for staged changes to update");
+                    return Task::none();
+                }
                 let Update { task, output } = tab.commit.update(m);
                 let task = task.map(Message::Commit);
                 match output {
@@ -1062,7 +1070,10 @@ impl App {
             other => other,
         };
         match m {
-            diff_view::Message::SelectFile(_) | diff_view::Message::FileMenu(_) => {
+            diff_view::Message::SelectFile(_)
+            | diff_view::Message::FileMenu(_)
+            | diff_view::Message::ToggleFolder(_)
+            | diff_view::Message::SetTree(_) => {
                 self.focus_pane(Pane::Files);
             }
             diff_view::Message::LineClicked(..)
@@ -1510,6 +1521,8 @@ impl App {
             tokens: t,
             snapshot: tab.and_then(|tab| tab.snapshot.as_deref()),
             all_branches: tab.is_some_and(|t| t.all_branches),
+            file_tree: false,
+            staging: tab.is_some_and(|tab| tab.stage_update.is_some()),
         };
         let spinner = widgets::spinner_frame(self.tick);
         let checkout = tab.and_then(|tab| self.checkouts.get(&tab.repo.handle().git_dir));
@@ -1557,16 +1570,8 @@ impl App {
                 for banner in op.into_iter().chain(left_here) {
                     main = main.push(banner.map(Message::Banner));
                 }
-                let main: Element<'_, Message> = main
-                    .push(main_area(
-                        t,
-                        tab,
-                        cx,
-                        active,
-                        appearance.list_cols,
-                        appearance.show_history,
-                    ))
-                    .into();
+                let main: Element<'_, Message> =
+                    main.push(main_area(t, tab, cx, active, appearance)).into();
                 row![left, main].spacing(4).height(Length::Fill).into()
             }
         };
@@ -1788,19 +1793,13 @@ fn main_area<'a>(
     tab: &'a RepoTab,
     cx: Cx<'a>,
     active: Pane,
-    list_cols: f32,
-    show_history: bool,
+    appearance: &gf_config::AppearanceSettings,
 ) -> Element<'a, Message> {
+    let list_cols = appearance.list_cols;
     let frame =
         |pane: Pane, content: Element<'a, Message>| focus::pane_frame(t, pane, active, content);
     use diff_view::Role;
-    let changed = cx.snapshot.map_or(0, |s| {
-        s.status
-            .entries
-            .iter()
-            .filter(|e| !matches!(e, gf_core::model::StatusEntry::Ignored { .. }))
-            .count()
-    });
+    let changed = cx.snapshot.map_or(0, |s| s.change_files.changed_count());
     let mode_tab = |role: Role, label: String, hint: &str| {
         widgets::tip(
             t,
@@ -1840,7 +1839,7 @@ fn main_area<'a>(
 
     match tab.code_view {
         Role::Commit => {
-            let top = if show_history {
+            let top = if appearance.show_history {
                 container(frame(
                     Pane::History,
                     tab.history.view(cx).map(Message::History),
@@ -1861,7 +1860,12 @@ fn main_area<'a>(
                     list_cols,
                     frame(
                         Pane::Files,
-                        tab.commit_diff.files_view(cx).map(Message::CommitDiff),
+                        tab.commit_diff
+                            .files_view(Cx {
+                                file_tree: appearance.history_file_dirs,
+                                ..cx
+                            })
+                            .map(Message::CommitDiff),
                     ),
                     frame(
                         Pane::Diff,
@@ -1880,7 +1884,13 @@ fn main_area<'a>(
             let left = column![
                 container(frame(
                     Pane::Changes,
-                    tab.changes.view(cx).map(Message::Changes)
+                    tab.changes
+                        .view(Cx {
+                            file_tree: appearance.working_tree_dirs,
+                            staging: cx.staging || tab.commit.is_committing(),
+                            ..cx
+                        })
+                        .map(Message::Changes)
                 ))
                 .height(Length::FillPortion(3)),
                 container(tab.commit.view(cx).map(Message::Commit)).height(Length::FillPortion(2)),

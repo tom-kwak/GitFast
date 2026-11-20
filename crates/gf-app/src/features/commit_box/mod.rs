@@ -118,12 +118,16 @@ impl State {
         self.committing = false;
     }
 
+    pub fn is_committing(&self) -> bool {
+        self.committing
+    }
+
     /// Why a new commit is not possible right now, if it is not.
     fn commit_blocked(&self, repo: Repo) -> Option<&'static str> {
         if self.committing {
             Some("committing…")
         } else if repo.staged == 0 {
-            Some("nothing staged — stage files first (Space, +, stage all)")
+            Some("nothing staged — check files to include them (Space)")
         } else if !self.has_message() {
             Some("write a summary line")
         } else {
@@ -236,8 +240,9 @@ impl Feature for State {
             .style(style::text_area(t));
 
         let loading = Some("loading…");
-        let commit_blocked = repo.map_or(loading, |r| self.commit_blocked(r));
-        let amend_blocked = repo.map_or(loading, |r| self.amend_blocked(r));
+        let staging = cx.staging.then_some("updating staged changes…");
+        let commit_blocked = staging.or_else(|| repo.map_or(loading, |r| self.commit_blocked(r)));
+        let amend_blocked = staging.or_else(|| repo.map_or(loading, |r| self.amend_blocked(r)));
         let has_head = repo.is_some_and(|r| r.has_head);
         let staged = repo.map_or(0, |r| r.staged);
 

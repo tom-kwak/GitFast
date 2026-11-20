@@ -83,6 +83,11 @@ impl App {
 
     pub(super) fn on_changes(&mut self, out: changes::Output) -> Task<Message> {
         match out {
+            changes::Output::SetTree(enabled) => {
+                self.settings.appearance.working_tree_dirs = enabled;
+                self.save_settings();
+                Task::none()
+            }
             changes::Output::ShowDiff(source) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.conflict = None;
@@ -93,31 +98,30 @@ impl App {
             changes::Output::Stage(paths) => {
                 let label = format!("stage {}", names(&paths));
                 let record = Record::new(undo::index(paths.clone()));
-                self.op_recorded(label, OpKind::Generic, Some(record), move |r| async move {
+                self.stage_op(label, Some(record), move |r| async move {
                     r.stage(&paths).await
                 })
             }
             changes::Output::Unstage(paths) => {
                 let label = format!("unstage {}", names(&paths));
                 let record = Record::new(undo::index(paths.clone()));
-                self.op_recorded(label, OpKind::Generic, Some(record), move |r| async move {
+                self.stage_op(label, Some(record), move |r| async move {
                     r.unstage(&paths).await
                 })
             }
             changes::Output::StageAll => {
                 let record = Record::new(undo::index(self.changed_paths()));
-                self.op_recorded("stage all", OpKind::Generic, Some(record), |r| async move {
-                    r.stage_all().await
-                })
+                self.stage_op(
+                    "stage all",
+                    Some(record),
+                    |r| async move { r.stage_all().await },
+                )
             }
             changes::Output::UnstageAll => {
                 let record = Record::new(undo::index(self.changed_paths()));
-                self.op_recorded(
-                    "unstage all",
-                    OpKind::Generic,
-                    Some(record),
-                    |r| async move { r.unstage_all().await },
-                )
+                self.stage_op("unstage all", Some(record), |r| async move {
+                    r.unstage_all().await
+                })
             }
             changes::Output::Discard { tracked, untracked } => {
                 self.confirm_discard(tracked, untracked)
@@ -274,6 +278,11 @@ impl App {
         out: diff_view::Output,
     ) -> Task<Message> {
         match out {
+            diff_view::Output::SetTree(enabled) => {
+                self.settings.appearance.history_file_dirs = enabled;
+                self.save_settings();
+                Task::none()
+            }
             diff_view::Output::Apply {
                 patches,
                 action,
@@ -382,12 +391,17 @@ impl App {
                     Record::new(undo::index(vec![p]))
                 }
             });
-        self.op_recorded(description, OpKind::Generic, record, move |r| async move {
+        let apply = move |r: gf_git::Repository| async move {
             for p in patches {
                 r.apply_patch(p, cached, reverse).await?;
             }
             Ok(())
-        })
+        };
+        if cached {
+            self.stage_op(description, record, apply)
+        } else {
+            self.op_recorded(description, OpKind::Generic, record, apply)
+        }
     }
 
     pub(super) fn on_commit(&mut self, out: commit_box::Output) -> Task<Message> {
@@ -1337,6 +1351,9 @@ impl App {
                         .into(),
                 );
                 lines.push("refs: ⌘-click marks branches · ⇧-click or ⇧↑/↓ selects a range · . then d reviews deletion".into());
+                lines.push(
+                    "file lists: T switches list / tree · Enter toggles a focused folder".into(),
+                );
                 lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());
                 lines.push("file viewer / blame ⌘F find · Enter / ⌘G next · ⇧Enter / ⌘⇧G previous · Esc closes search".into());
                 lines.push(
