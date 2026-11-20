@@ -95,20 +95,8 @@ impl App {
                 self.show_diff(source)
             }
             changes::Output::ResolveConflict(path) => self.open_conflict(path),
-            changes::Output::Stage(paths) => {
-                let label = format!("stage {}", names(&paths));
-                let record = Record::new(undo::index(paths.clone()));
-                self.stage_op(label, Some(record), move |r| async move {
-                    r.stage(&paths).await
-                })
-            }
-            changes::Output::Unstage(paths) => {
-                let label = format!("unstage {}", names(&paths));
-                let record = Record::new(undo::index(paths.clone()));
-                self.stage_op(label, Some(record), move |r| async move {
-                    r.unstage(&paths).await
-                })
-            }
+            changes::Output::Stage(paths) => self.queue_stage_files(paths, true),
+            changes::Output::Unstage(paths) => self.queue_stage_files(paths, false),
             changes::Output::StageAll => {
                 let record = Record::new(undo::index(self.changed_paths()));
                 self.stage_op(

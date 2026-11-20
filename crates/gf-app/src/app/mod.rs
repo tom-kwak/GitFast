@@ -111,7 +111,10 @@ pub enum Shortcut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpKind {
     Generic,
-    Stage,
+    Stage {
+        git_dir: PathBuf,
+        file: Option<PathBuf>,
+    },
     Checkout(PathBuf),
     DeleteBranches(PathBuf),
     RemoveWorktree(PathBuf),
@@ -345,6 +348,7 @@ pub struct App {
     sync: Option<(toolbar::Sync, CancellationToken)>,
     /// Keyed by worktree git directory so a running switch survives closing its tab.
     checkouts: HashMap<PathBuf, Checkout>,
+    stage_files: HashMap<PathBuf, ops::FileStages>,
     deleting_branches: HashSet<PathBuf>,
     flash: Option<Flash>,
     tick: usize,
@@ -435,6 +439,7 @@ impl App {
             pointer: crate::widgets::pointer::Pointer::default(),
             sync: None,
             checkouts: HashMap::new(),
+            stage_files: HashMap::new(),
             deleting_branches: HashSet::new(),
             flash: None,
             tick: 0,
@@ -762,7 +767,15 @@ impl App {
                 self.request_touched(repo, parts, crate::repo_tab::Touched::paths(&paths))
             }
             Message::Core(CoreEvent::IndexChanged(repo)) => {
-                self.request_parts(repo, crate::repo_tab::Parts::STATUS)
+                if self.tabs.iter().any(|tab| {
+                    tab.repo.id() == repo
+                        && tab.stage_update == Some(crate::repo_tab::StageUpdate::Running)
+                }) {
+                    // The pending stage operation will refresh the finished index.
+                    Task::none()
+                } else {
+                    self.request_parts(repo, crate::repo_tab::Parts::STATUS)
+                }
             }
             // A checkout or fetch can also move submodules' recorded commits.
             Message::Core(CoreEvent::RefsChanged(repo)) => self.request_parts(
@@ -932,7 +945,9 @@ impl App {
                 step,
             } => {
                 let repo = match &kind {
-                    OpKind::Checkout(git_dir) | OpKind::DeleteBranches(git_dir) => self
+                    OpKind::Checkout(git_dir)
+                    | OpKind::DeleteBranches(git_dir)
+                    | OpKind::Stage { git_dir, .. } => self
                         .tabs
                         .iter()
                         .find(|tab| tab.repo.handle().git_dir == *git_dir)
@@ -1124,7 +1139,12 @@ impl App {
         // A new tab queues its first load; `load_due` starts it once it is
         // the tab's turn (after every message).
         self.dismiss_repo_overlays();
-        self.tabs.push(RepoTab::new(repo, watcher));
+        let git_dir = repo.handle().git_dir.clone();
+        let mut tab = RepoTab::new(repo, watcher);
+        if let Some(stage_files) = self.stage_files.get(&git_dir) {
+            stage_files.restore(&mut tab);
+        }
+        self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.note_active();
         self.settings.remember_repo(&cwd);
@@ -1887,7 +1907,7 @@ fn main_area<'a>(
                     tab.changes
                         .view(Cx {
                             file_tree: appearance.working_tree_dirs,
-                            staging: cx.staging || tab.commit.is_committing(),
+                            staging: tab.commit.is_committing(),
                             ..cx
                         })
                         .map(Message::Changes)
