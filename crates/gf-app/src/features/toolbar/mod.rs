@@ -7,7 +7,7 @@ use gf_git::Progress;
 use iced::widget::{container, row, space};
 use iced::{Element, Length, Padding};
 
-use crate::repo_tab::RepoTab;
+use crate::repo_tab::{RepoTab, Snapshot};
 use crate::theme::{Tokens, style};
 use crate::widgets::{self, colored, dim};
 
@@ -162,6 +162,21 @@ pub fn fetch_label(
     }
 }
 
+fn sync_available(snapshot: &Snapshot) -> (bool, bool) {
+    let head = &snapshot.status.head;
+    if head.branch.is_none() || head.oid.is_none() {
+        return (false, false);
+    }
+    let tracks = head.upstream.is_some();
+    let pull = tracks && (head.behind > 0 || snapshot.last_fetch.is_none());
+    let push_tags = snapshot
+        .pending_tags
+        .as_ref()
+        .map_or_else(|| !snapshot.tags.is_empty(), |tags| !tags.names.is_empty());
+    let push = !tracks || head.ahead > 0 || push_tags;
+    (pull, push)
+}
+
 pub fn view<'a>(
     t: &'a Tokens,
     tab: &'a RepoTab,
@@ -176,7 +191,11 @@ pub fn view<'a>(
     };
     let busy = sync.is_some();
     let enabled = |m: Message| (!busy && has_remote).then_some(m);
-    let counts = tab
+    let (pull, push) = tab
+        .snapshot
+        .as_deref()
+        .map_or((false, false), sync_available);
+    let mut counts = tab
         .snapshot
         .as_ref()
         .map(|s| {
@@ -187,6 +206,22 @@ pub fn view<'a>(
             c
         })
         .unwrap_or_default();
+    if !pull
+        && tab
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.status.head.upstream.is_some())
+    {
+        counts.pull_hint = "no incoming commits at the last fetch · Fetch to check again".into();
+    }
+    if !push
+        && tab
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.status.head.upstream.is_some())
+    {
+        counts.push_hint = "no outgoing commits or tags".into();
+    }
     let fetch = fetch_label(
         tab.snapshot.as_ref().and_then(|s| s.last_fetch),
         tab.snapshot.as_ref().map_or(0, |s| s.remotes.len()),
@@ -201,12 +236,22 @@ pub fn view<'a>(
         ),
         widgets::tip(
             t,
-            widgets::text_button(t, &counts.pull_label, None, enabled(Message::Pull)),
+            widgets::text_button(
+                t,
+                &counts.pull_label,
+                None,
+                enabled(Message::Pull).filter(|_| pull)
+            ),
             counts.pull_hint.clone(),
         ),
         widgets::tip(
             t,
-            widgets::text_button(t, &counts.push_label, None, enabled(Message::Push)),
+            widgets::text_button(
+                t,
+                &counts.push_label,
+                None,
+                enabled(Message::Push).filter(|_| push)
+            ),
             counts.push_hint.clone(),
         ),
         dim(t, "│"),
@@ -310,6 +355,30 @@ mod tests {
             "⇡ push (4 new +1 tag)"
         );
         assert!(sync_counts(&new, Some(4), 1).push_hint.contains("1 tag(s)"));
+    }
+
+    #[test]
+    fn keeps_sync_available_for_incoming_commits_and_unpushed_tags() {
+        let mut snapshot = Snapshot::default();
+        snapshot.status.head = head(Some("main"), Some("origin/main"), 0, 0);
+        snapshot.status.head.oid = Some(
+            "1111111111111111111111111111111111111111"
+                .parse()
+                .expect("oid"),
+        );
+        assert_eq!(
+            sync_available(&snapshot),
+            (true, false),
+            "the remote has not been fetched"
+        );
+        snapshot.last_fetch = Some(std::time::SystemTime::UNIX_EPOCH);
+        assert_eq!(sync_available(&snapshot), (false, false));
+        snapshot.status.head.behind = 2;
+        snapshot.pending_tags = Some(crate::repo_tab::PendingTags {
+            remote: "origin".into(),
+            names: vec!["release-next".into()],
+        });
+        assert_eq!(sync_available(&snapshot), (true, true));
     }
 
     #[test]

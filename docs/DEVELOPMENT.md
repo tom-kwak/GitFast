@@ -160,6 +160,7 @@ mod tests { /* update/nav 단위 테스트 */ }
    - `App::confirm(Confirm::delete(..) | Confirm::change(key, ..))`를 쓰고, 실행할 작업은 `dialogs::Purpose`에 variant로 추가합니다.
    - `delete`(빨강, 클릭 필수): discard, 브랜치·태그·stash 삭제, force push.
    - `change`(노랑, "다시 묻지 않기" 가능): checkout, pull/push, stash apply, amend 등.
+   - 일반 Pull은 fast-forward만 바로 실행합니다. 브랜치가 갈라졌거나 로컬 파일과 겹치면 확인을 받은 뒤 통합합니다. 일반 Push는 바로 실행하고, 알려진 거절 가능성과 원격 ref를 강제로 변경하는 설정은 확인을 거칩니다.
    - 확인 없이 실행: stage/unstage, 사용자가 프롬프트에 직접 입력한 명령.
 8. **우클릭/액션 메뉴**는 `features/context_menu`를 재사용합니다.
    - `Menu { title, entries: vec![Entry::item(key, label, hint, msg), Entry::Separator, Entry::caution(..)] }`를 `Output`으로 넘깁니다.

@@ -5,7 +5,7 @@
 //!
 //! ```ignore
 //! self.confirm(
-//!     Confirm::change("pull", "Pull", vec!["…what will happen…".into()], "Pull", Purpose::Pull)
+//!     Confirm::change("pull", "Pull", vec!["…what will happen…".into()], "Pull", purpose)
 //! )
 //! ```
 //!
@@ -70,7 +70,7 @@ pub enum Purpose {
         branch: Option<String>,
         to: Option<super::PushTo>,
     },
-    PullStrategy,
+    PullStrategy(gf_core::model::RepoId),
     CheckoutDetached(String),
     Checkout {
         target: String,
@@ -84,13 +84,18 @@ pub enum Purpose {
     },
     StashApply(usize),
     StashPop(usize),
-    Pull,
+    Pull {
+        repo: gf_core::model::RepoId,
+        mode: PullMode,
+    },
     Push {
+        repo: gf_core::model::RepoId,
         branch: String,
         /// Set for a branch that is not checked out.
         to: Option<super::PushTo>,
         /// Tags the remote does not have, sent along (checked-out branch).
         tags: Option<PendingTags>,
+        allow_configured_rewrites: bool,
     },
     PushTag {
         remote: String,
@@ -634,6 +639,8 @@ impl App {
                     OpKind::Push {
                         branch: Some(branch),
                         to,
+                        offer_force: true,
+                        tags: None,
                     },
                     move |r, run| async move {
                         r.push(&opts, run).await?;
@@ -648,15 +655,23 @@ impl App {
                 };
                 self.sync_op(
                     "force push (with lease)",
-                    OpKind::Push { branch, to },
+                    OpKind::Push {
+                        branch,
+                        to,
+                        offer_force: false,
+                        tags: None,
+                    },
                     move |r, run| async move { r.push(&opts, run).await },
                 )
             }
-            Purpose::PullStrategy => self.pull(if check(0) {
-                PullMode::Rebase
-            } else {
-                PullMode::Merge
-            }),
+            Purpose::PullStrategy(repo) => self.pull(
+                repo,
+                if check(0) {
+                    PullMode::Rebase
+                } else {
+                    PullMode::Merge
+                },
+            ),
             Purpose::CheckoutDetached(rev) => {
                 let short: String = rev.chars().take(7).collect();
                 self.checkout_op(
@@ -727,16 +742,31 @@ impl App {
                 ),
                 move |r| async move { r.stash_pop(i).await },
             ),
-            Purpose::Pull => self.pull(PullMode::Config),
-            Purpose::Push { branch, to, tags } => {
+            Purpose::Pull { repo, mode } => self.pull(repo, mode),
+            Purpose::Push {
+                repo,
+                branch,
+                to,
+                tags,
+                allow_configured_rewrites,
+            } => {
+                if self.active_tab().is_none_or(|tab| tab.repo.id() != repo) {
+                    return self.restore_focus();
+                }
+                let guard = to.is_none() && !allow_configured_rewrites;
                 let opts = push_options(to.as_ref());
                 self.sync_op(
                     format!("push {branch}"),
                     OpKind::Push {
-                        branch: Some(branch),
+                        branch: Some(branch.clone()),
                         to,
+                        offer_force: true,
+                        tags: tags.clone(),
                     },
                     move |r, run| async move {
+                        if guard {
+                            r.guard_default_push(&branch).await?;
+                        }
                         r.push(&opts, run).await?;
                         push_tags(&r, tags).await
                     },

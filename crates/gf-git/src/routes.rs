@@ -511,6 +511,9 @@ impl Repository {
     pub async fn push(&self, push: &PushOptions, opts: RunOptions) -> Result<()> {
         SyncOps::push(&self.cli, push, opts).await
     }
+    pub async fn guard_default_push(&self, branch: &str) -> Result<()> {
+        self.cli.guard_default_push(branch).await
+    }
 
     // ---- TagOps
     /// Creates a tag at `target` (default HEAD). With a message the tag is

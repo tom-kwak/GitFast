@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gf_core::model::RepoId;
-use gf_git::{CancellationToken, GitCommand, Repository, RunOptions};
+use gf_git::{CancellationToken, GitCommand, PullMode, Repository, RunOptions};
 use iced::Task;
 use iced::futures::SinkExt;
 
@@ -425,7 +425,7 @@ impl App {
         let id = repo.id();
         let label = label.into();
         // A pull moves the branch; let it be undone.
-        let record = (kind == OpKind::Pull).then(|| Record::head(HeadMode::Keep));
+        let record = matches!(kind, OpKind::Pull(_)).then(|| Record::head(HeadMode::Keep));
         let step_label = label.clone();
         let token = CancellationToken::new();
         self.sync = Some((
@@ -526,7 +526,7 @@ impl App {
         result: Result<(), String>,
         recorded: bool,
     ) -> Task<Message> {
-        if matches!(kind, OpKind::Fetch | OpKind::Push { .. } | OpKind::Pull) {
+        if matches!(kind, OpKind::Fetch | OpKind::Push { .. } | OpKind::Pull(_)) {
             self.sync = None;
         }
         if let OpKind::Checkout(git_dir) = &kind {
@@ -604,11 +604,36 @@ impl App {
                     && self.code_dialog.is_none()
                     && self.rebase_editor().is_none();
                 let asked = match &kind {
-                    OpKind::Push { branch, to }
-                        if can_ask
-                            && (e.contains("non-fast-forward")
-                                || e.contains("fetch first")
-                                || e.contains("[rejected]")) =>
+                    OpKind::Push {
+                        branch: Some(branch),
+                        to: None,
+                        tags,
+                        ..
+                    } if can_ask && e.contains(gf_git::CONFIGURED_PUSH_REWRITES) => {
+                        tasks.push(self.confirm(Confirm::delete(
+                            "Push may overwrite remote refs",
+                            vec![
+                                "Git is configured to force updates, delete refs or mirror the remote.".into(),
+                                "Review the remote configuration before continuing.".into(),
+                            ],
+                            "Push with configured rules",
+                            Purpose::Push {
+                                repo: id,
+                                branch: branch.clone(),
+                                to: None,
+                                tags: tags.clone(),
+                                allow_configured_rewrites: true,
+                            },
+                        )));
+                        true
+                    }
+                    OpKind::Push {
+                        branch,
+                        to,
+                        offer_force: true,
+                        ..
+                    } if can_ask
+                        && (e.contains("non-fast-forward") || e.contains("fetch first")) =>
                     {
                         // Overwrites commits on the remote: a deletion.
                         let ask = self.confirm(Confirm::delete(
@@ -628,8 +653,12 @@ impl App {
                         tasks.push(ask);
                         true
                     }
-                    OpKind::Pull
-                        if can_ask && (e.contains("divergent") || e.contains("reconcile")) =>
+                    OpKind::Pull(
+                        PullMode::FastForwardOnly | PullMode::FastForwardWithAutostash,
+                    ) if can_ask
+                        && (e.contains("Not possible to fast-forward")
+                            || e.contains("divergent")
+                            || e.contains("reconcile")) =>
                     {
                         let ask = self.confirm(
                             Confirm::change(
@@ -640,13 +669,32 @@ impl App {
                                     "Choose how to combine them:".into(),
                                 ],
                                 "Pull",
-                                Purpose::PullStrategy,
+                                Purpose::PullStrategy(id),
                             )
                             .always()
                             .check(
                                 "rebase my commits on top (instead of a merge commit)",
                                 false,
                             ),
+                        );
+                        tasks.push(ask);
+                        true
+                    }
+                    OpKind::Pull(PullMode::FastForwardOnly)
+                        if can_ask && e.contains("local changes") && e.contains("overwritten") =>
+                    {
+                        let ask = self.confirm(
+                            Confirm::change(
+                                "pull-autostash",
+                                "Local changes overlap the pull",
+                                vec![
+                                    "Git stopped before updating your working tree.".into(),
+                                    "Temporarily stash tracked changes, pull, and reapply them? Reapplying can produce conflicts.".into(),
+                                ],
+                                "Stash and pull",
+                                Purpose::Pull { repo: id, mode: PullMode::FastForwardWithAutostash },
+                            )
+                            .always(),
                         );
                         tasks.push(ask);
                         true
