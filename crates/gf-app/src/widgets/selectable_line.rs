@@ -239,7 +239,7 @@ impl State {
     fn lay_out(&mut self, raw: &str, size: f32, renderer: &iced::Renderer) -> (&str, &Paragraph) {
         let stale = !matches!(&self.laid_out, Some((r, s, _, _)) if r == raw && *s == size);
         if stale {
-            let shown = format::code_line(raw);
+            let shown = format::code_line(raw).into_owned();
             let paragraph = Paragraph::with_text(text::Text {
                 content: shown.as_str(),
                 bounds: Size::INFINITE,

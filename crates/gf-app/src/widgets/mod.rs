@@ -1,6 +1,7 @@
 //! Reusable terminal-style building blocks. Features compose these instead
 //! of styling raw iced widgets, so the look stays consistent.
 
+pub mod file_search;
 pub mod format;
 pub mod graph_canvas;
 pub mod memo;

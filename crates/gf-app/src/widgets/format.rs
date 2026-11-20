@@ -1,5 +1,6 @@
 //! Text formatting for display (dates, paths, durations). Dependency-free.
 
+use std::borrow::Cow;
 use std::path::Path;
 use std::time::Duration;
 
@@ -124,15 +125,21 @@ pub fn truncate_columns(s: &str, max: usize) -> String {
 /// U+2028/9) split one line into several bidi paragraphs, and cosmic-text
 /// panics when they differ in direction — a blamed binary file or a
 /// right-to-left text file with CRLF endings crashed the whole app.
-pub fn code_line(s: &str) -> String {
+pub fn code_line(s: &str) -> Cow<'_, str> {
     code_text(s.strip_suffix('\r').unwrap_or(s))
 }
 
 /// [`code_line`] for a piece of a line (a highlighted span): keeps `\r`
 /// visible wherever it is.
-pub fn code_text(s: &str) -> String {
+pub fn code_text(s: &str) -> Cow<'_, str> {
+    let Some(first) =
+        s.find(|c: char| c.is_ascii_control() || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}'))
+    else {
+        return Cow::Borrowed(s);
+    };
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
+    out.push_str(&s[..first]);
+    for c in s[first..].chars() {
         match c {
             '\t' => out.push_str("    "),
             '\0'..='\x1f' => {
@@ -143,7 +150,7 @@ pub fn code_text(s: &str) -> String {
             c => out.push(c),
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -165,6 +172,10 @@ mod tests {
         assert_eq!(code_line("a\rb\x1c\u{85}\u{2029}\x7f\0"), "a␍b␜␤␤␡␀");
         assert_eq!(code_text("x\r"), "x␍");
         assert_eq!(code_line("한글 שלום"), "한글 שלום");
+        assert!(matches!(
+            code_line("한글 text\r"),
+            Cow::Borrowed("한글 text")
+        ));
     }
 
     /// The text renderer must accept whatever a binary file's bytes decode

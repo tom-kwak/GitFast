@@ -988,23 +988,46 @@ impl App {
         &mut self,
         m: crate::features::blame_view::Message,
     ) -> Task<Message> {
-        use crate::features::blame_view::Output;
-        let Some(out) = self
-            .active_tab_mut()
-            .and_then(|t| t.blame.as_mut())
-            .and_then(|b| b.update(m))
+        let Some(tab) = self
+            .active_tab()
+            .filter(|tab| tab.code_view == Role::Commit)
         else {
             return Task::none();
         };
-        match out {
-            Output::Close => {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.blame = None;
-                }
-                Task::none()
+        self.update_blame(tab.repo.id(), tab.blame_request, m)
+    }
+
+    pub(super) fn update_blame(
+        &mut self,
+        id: RepoId,
+        request: u64,
+        m: crate::features::blame_view::Message,
+    ) -> Task<Message> {
+        use crate::features::blame_view::Output;
+        let visible = self
+            .active_tab()
+            .is_some_and(|tab| tab.repo.id() == id && tab.code_view == Role::Commit);
+        let Some(tab) = self.tab_mut(id).filter(|tab| tab.blame_request == request) else {
+            return Task::none();
+        };
+        let Some(blame) = &mut tab.blame else {
+            return Task::none();
+        };
+        let update = blame.update(m);
+        match update.output {
+            Some(Output::Close) => {
+                tab.blame = None;
+                self.restore_focus()
             }
             // Blame stays open: the history finds the commit beside it.
-            Output::ShowCommit(oid) => self.reveal_commit(oid),
+            Some(Output::ShowCommit(oid)) if visible => self.reveal_commit(oid),
+            Some(Output::RevealMatch) if visible => self
+                .active_tab()
+                .and_then(|tab| tab.blame.as_ref())
+                .map_or_else(Task::none, |blame| {
+                    blame.reveal_match(&self.tokens).map(Message::Blame)
+                }),
+            _ => update.task.map(move |m| Message::BlameTask(id, request, m)),
         }
     }
 
