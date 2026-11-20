@@ -216,6 +216,8 @@ pub(super) struct Effects {
     pub state_changed: bool,
     /// The window looks different afterwards (checked for clicks only).
     pub screen_changed: bool,
+    /// The click selected the same file in the changes list and its view was open.
+    change_reselected: bool,
     pub repo_changed: bool,
     pub widget_ops: usize,
     pub clipboard: usize,
@@ -537,7 +539,27 @@ impl Ui {
 
     pub async fn click_at(&mut self, target: &Target, button: mouse::Button) -> Effects {
         let messages = self.press(target.at, button);
-        self.run(messages, true).await
+        let change_reselected = self.reselects_open_change(&messages);
+        let mut effects = self.run(messages, true).await;
+        effects.change_reselected = change_reselected;
+        effects
+    }
+
+    fn reselects_open_change(&self, messages: &[Message]) -> bool {
+        let [Message::Changes(changes::Message::Select(path, group))] = messages else {
+            return false;
+        };
+        self.app.active_tab().is_some_and(|tab| {
+            tab.code_view == diff_view::Role::Local
+                && tab.changes.is_selected(path, *group)
+                && match (&tab.conflict, group) {
+                    (Some(conflict), changes::Group::Conflicts) => conflict.path == *path,
+                    (None, changes::Group::Conflicts) | (Some(_), _) => false,
+                    (None, group) => {
+                        tab.local_diff.source() == Some(&changes::diff_source(path.clone(), *group))
+                    }
+                }
+        })
     }
 
     /// Clears the flash: one already shown would hide one the next click
@@ -604,7 +626,6 @@ fn reselect(messages: &[String]) -> bool {
         "FocusPane(",
         "Dialog(Choose(",
         "History(Select(",
-        "Changes(Select(",
         "Sidebar(Select(",
         "CommitDiff(SelectFile(",
         "LocalDiff(SelectFile(",
@@ -706,7 +727,7 @@ where
                 continue;
             };
             let fx = ui.click_at(&target, button).await;
-            let quiet = fx.silent() && !reselect(&fx.messages);
+            let quiet = fx.silent() && !fx.change_reselected && !reselect(&fx.messages);
             println!(
                 "{} › {button_name} {:?} → {}{}",
                 screen.name,
@@ -923,6 +944,51 @@ async fn working_tree(ui: Ui) -> Ui {
     let mut ui = ui;
     let _ = ui.send(Message::CodeView(diff_view::Role::Local)).await;
     ui
+}
+
+#[tokio::test]
+async fn sweep_recognizes_reselecting_a_file_after_copying_its_path() {
+    let mut ui = working_tree(Ui::open().await).await;
+    let _ = ui.right_click("b.txt").await;
+    assert_eq!(ui.click("copy path").await.clipboard, 1);
+
+    let selected = ui.click("b.txt").await;
+    assert!(selected.change_reselected);
+    assert!(
+        selected
+            .messages
+            .iter()
+            .any(|m| m.starts_with("DiffFinished("))
+    );
+
+    let other = ui.click("a.txt").await;
+    assert!(!other.change_reselected);
+    assert!(other.screen_changed);
+}
+
+#[tokio::test]
+async fn reselecting_an_open_conflict_keeps_its_choices() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            diverged(r);
+            let _ = r.git_output(&["merge", "feature"]);
+        })
+        .await,
+    )
+    .await;
+    let _ = ui.right_click("a.txt").await;
+    let opened = ui.click("open resolver").await;
+    assert!(!opened.change_reselected);
+    assert!(ui.shows("RESOLVE CONFLICT"));
+
+    let _ = ui
+        .send(Message::Conflict(
+            crate::features::conflict_view::Message::Choose(0, gf_git::conflict::Choice::Ours),
+        ))
+        .await;
+    let selected = ui.click("a.txt").await;
+    assert!(selected.change_reselected);
+    assert!(ui.shows("all conflicts chosen"));
 }
 
 #[tokio::test]

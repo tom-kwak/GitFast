@@ -834,7 +834,12 @@ impl App {
             return Task::none();
         };
         tab.code_view = Role::Local;
-        tab.conflict = Some(crate::features::conflict_view::State::loading(path.clone()));
+        // A reload of the same file keeps choices for unchanged conflict blocks.
+        if let Some(conflict) = tab.conflict.as_mut().filter(|c| c.path == path) {
+            conflict.reload();
+        } else {
+            tab.conflict = Some(crate::features::conflict_view::State::loading(path.clone()));
+        }
         let repo = tab.repo.clone();
         let id = repo.id();
         Task::perform(
