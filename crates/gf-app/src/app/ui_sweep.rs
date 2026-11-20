@@ -1225,6 +1225,8 @@ async fn local_view_shows_removed_lines_but_copies_the_current_file() {
 async fn file_find_searches_removed_text_and_both_comparison_panes() {
     let mut ui = a_txt_shown().await;
     let _ = ui.click("[ View ]").await;
+    let hint = ui.click("Find in file ⌘F").await;
+    assert!(hint.messages.is_empty(), "the shortcut hint is plain text");
     let press = |key: keyboard::Key, code, modifiers| {
         global_event(
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
@@ -1256,6 +1258,28 @@ async fn file_find_searches_removed_text_and_both_comparison_panes() {
             .is_some_and(code_view::State::find_is_open)
     );
     assert_eq!(opened.widget_ops, 2);
+    {
+        let mut sim = ui.simulator();
+        let field_id = iced::advanced::widget::Id::from(code_view::find::FIELD_ID);
+        let field = sim
+            .find(move |candidate: Candidate<'_>| match candidate {
+                Candidate::TextInput { id, bounds, .. } if id == Some(&field_id) => Some(bounds),
+                _ => None,
+            })
+            .expect("search input");
+        let filename = sim
+            .find(move |candidate: Candidate<'_>| match candidate {
+                Candidate::Text {
+                    content: "a.txt",
+                    bounds,
+                    ..
+                } if (bounds.x - field.x).abs() < 1.0 => Some(bounds),
+                _ => None,
+            })
+            .expect("filename in the file viewer");
+        assert!(field.y >= filename.y + filename.height);
+        assert!(field.width > WINDOW.width * 0.75);
+    }
     let find = |query: &str| Message::CodeDialog(code_view::Message::FindQuery(query.into()));
     let removed = ui.send(find("THREE")).await;
     assert!(ui.shows("1 of 1"));
@@ -1976,6 +2000,69 @@ async fn blame_truncates_a_wide_author_to_the_column_width() {
     let _ = ui.right_click("b.txt").await;
     let _ = ui.click("blame").await;
     assert!(ui.targets().iter().any(|t| t.label == "가나다라마…"));
+}
+
+#[tokio::test]
+async fn blame_search_finds_worktree_lines_and_keeps_commit_navigation() {
+    use crate::features::blame_view::Message as Blame;
+    use keyboard::key::Code;
+
+    let mut ui = a_txt_shown().await;
+    let _ = ui.right_click("a.txt").await;
+    let _ = ui.click("blame").await;
+    assert!(ui.shows("Find in file ⌘F"));
+
+    let command = |key: &str, code, modifiers| {
+        let key = keyboard::Key::Character(key.into());
+        global_event(
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: keyboard::key::Physical::Code(code),
+                modifiers,
+                text: None,
+                location: keyboard::Location::Standard,
+                repeat: false,
+            }),
+            event::Status::Ignored,
+            window::Id::unique(),
+        )
+        .expect("search shortcut")
+    };
+    let mods = keyboard::Modifiers::COMMAND;
+    assert_eq!(ui.send(command("ㄹ", Code::KeyF, mods)).await.widget_ops, 2);
+    let query = |text: &str| Message::Blame(Blame::FindQuery(text.into()));
+    assert_eq!(ui.send(query("CHANGED")).await.widget_ops, 1);
+    assert!(ui.shows("1 of 1"));
+    let _ = ui.send(query("O")).await;
+    assert!(ui.shows("1 of 3"));
+    let _ = ui
+        .send(command("ㅎ", Code::KeyG, mods | keyboard::Modifiers::SHIFT))
+        .await;
+    assert!(ui.shows("3 of 3"));
+    let _ = ui.send(command("ㅎ", Code::KeyG, mods)).await;
+    assert!(ui.shows("1 of 3"));
+    let _ = ui.send(query("changed")).await;
+
+    let selected = ui.click("    4").await;
+    assert!(
+        selected
+            .messages
+            .iter()
+            .any(|message| message.starts_with("Blame(Select("))
+    );
+    assert!(
+        ui.shows("1 of 1"),
+        "the search survives following a blame row"
+    );
+    let _ = ui
+        .send(Message::KeyInput(focus::KeyInput {
+            shortcut: Some(Shortcut::Escape),
+            nav: None,
+            menu: None,
+        }))
+        .await;
+    assert!(ui.shows("Find in file ⌘F"), "Escape closes the search only");
 }
 
 #[tokio::test]

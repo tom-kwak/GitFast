@@ -214,6 +214,32 @@ impl App {
             return run(self, k.shortcut.filter(|s| !text_edit(*s)));
         }
         let field = self.pointer.field_at_key();
+        if let Some(blame) = self
+            .active_tab()
+            .filter(|tab| tab.code_view == Role::Commit)
+            .and_then(|tab| tab.blame.as_ref())
+        {
+            use crate::features::blame_view::{FIND_FIELD_ID, Message as Blame};
+            let action = match k.shortcut {
+                Some(Shortcut::FindInFile) => Some(Blame::FindOpen),
+                Some(Shortcut::Escape)
+                    if blame.find_is_open()
+                        && (field == Field::None || field.is(FIND_FIELD_ID)) =>
+                {
+                    Some(Blame::FindClose)
+                }
+                Some(Shortcut::FindMatch { back }) if blame.find_is_open() => {
+                    Some(Blame::FindMove { back })
+                }
+                _ => k
+                    .nav
+                    .filter(|nav| nav.key == Key::Enter && field.is(FIND_FIELD_ID))
+                    .map(|nav| Blame::FindMove { back: nav.shift }),
+            };
+            if let Some(action) = action {
+                return self.on_blame_message(action);
+            }
+        }
         if field != Field::None {
             let in_prompt = field.is(PROMPT_ID);
             // Esc leaves the field (the field itself drops focus).
