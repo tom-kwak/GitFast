@@ -16,28 +16,27 @@ opens without a Gatekeeper prompt. Run it again to update.
 gf requires **Git 2.43.1 or later**. Check your version with `git --version`.
 Git is available through Xcode Command Line Tools or Homebrew.
 
-## What's new in 0.0.4
+## What's new in 0.0.5
 
-- Press **⌘F** to find text in file previews, full-file comparisons, and Blame.
-  Matches are highlighted and scrolled into view. Use **⌘G** or **⌘⇧G** to jump
-  between matches.
-- File previews scroll more smoothly through long lines, including in side-by-side
-  mode. The preview grows with the app window, and the search field has its own
-  row below the filename.
-- The welcome screen has a text-art gf logo that follows the active theme.
-  The crab moves from side to side.
-- The macOS app has a new icon in Finder and the Dock.
+- Switch between flat lists and collapsible folder trees in Working Tree and
+  History. Each pane remembers its view. History shows file change types and
+  places renamed files under their destination folders.
+- Use file checkboxes to stage or unstage changes in Working Tree. Commits
+  include the staged changes, including selected lines from partially staged files.
+- Pull and Push run directly for routine updates and ask before known risky
+  operations. The toolbar disables actions when it knows there is nothing to sync.
+- Reopening a conflict keeps your choices while its contents are unchanged.
 
-[Release notes](https://github.com/tom-kwak/GitFast/releases/tag/release-0.0.4)
+[Release notes](https://github.com/tom-kwak/GitFast/releases/tag/release-0.0.5)
 
 ## Releases
 
 A release is a tag `release-<version>` on a commit in `main`, where
 `<version>` matches the workspace version in the tagged commit's `Cargo.toml`.
-For example, tag the commit with workspace version `0.0.4`:
+For example, tag the commit with workspace version `0.0.5`:
 
 ```bash
-git tag release-0.0.4 && git push origin release-0.0.4
+git tag release-0.0.5 && git push origin release-0.0.5
 ```
 
 Pushing the tag starts the release workflow if the tagged commit is already
