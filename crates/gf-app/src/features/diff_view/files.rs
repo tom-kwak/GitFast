@@ -107,11 +107,14 @@ impl State {
                 || name.to_string(),
                 |old| format!("{} → {name}", old.to_string_lossy()),
             );
-            let entry = widgets::file_entry_named(t, code, color, name, None, counts);
+            let entry = widgets::file_entry_details(t, format!("/{name}"), None, counts);
             row![
+                colored(t, code, color),
                 iced::widget::space().width(file_tree::indent(t, depth)),
                 entry
             ]
+            .spacing(3)
+            .align_y(iced::Alignment::Center)
         } else {
             widgets::file_entry(t, code, color, path, counts)
         };
@@ -165,19 +168,27 @@ impl State {
                             self.file_row(t, *index, Some(*depth))
                         }
                         file_tree::Row::Folder {
-                            path, depth, count, ..
-                        } => file_tree::folder(
-                            t,
                             path,
-                            *depth,
-                            *count,
-                            self.folders.open((), path),
-                            self.folders
-                                .focused
-                                .as_ref()
-                                .is_some_and(|(_, p)| p == path),
-                            Message::ToggleFolder(path.clone()),
-                        ),
+                            label,
+                            depth,
+                            count,
+                            ..
+                        } => row![
+                            iced::widget::space().width(Length::Fixed(t.cols(1) + 6.0)),
+                            file_tree::folder(
+                                t,
+                                label,
+                                *depth,
+                                *count,
+                                self.folders.open((), path),
+                                self.folders
+                                    .focused
+                                    .as_ref()
+                                    .is_some_and(|(_, p)| p == path),
+                                Message::ToggleFolder(path.clone()),
+                            ),
+                        ]
+                        .into(),
                     },
                 },
                 Message::FilesScrolled,

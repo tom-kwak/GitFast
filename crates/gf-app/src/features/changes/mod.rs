@@ -12,8 +12,8 @@ use std::rc::Rc;
 use gf_core::model::{ChangeKind, ConflictKind, StatusEntry};
 use gf_git::FileVersion;
 use iced::widget::text::Wrapping;
-use iced::widget::{checkbox, row, space};
-use iced::{Color, Element};
+use iced::widget::{checkbox, container, row, space};
+use iced::{Color, Element, Length};
 
 use crate::feature::{Cx, Feature, Update};
 use crate::features::context_menu::{Entry, Menu};
@@ -397,11 +397,20 @@ impl State {
             StatusEntry::Ignored { .. } => ("!".into(), t.dim, None),
         };
         let path = e.path();
-        let name = depth
-            .and_then(|_| path.file_name())
-            .map_or(path.as_path(), Path::new);
-        let mut line =
-            widgets::file_entry(t, &code_text, color, name, entry_counts(lines, path, group));
+        let counts = entry_counts(lines, path, group);
+        let mut line = if let Some(depth) = depth {
+            let name = path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy();
+            row![
+                space().width(file_tree::indent(t, depth)),
+                widgets::file_entry_details(t, format!("/{name}"), None, counts),
+            ]
+            .align_y(iced::Alignment::Center)
+        } else {
+            widgets::file_entry(t, &code_text, color, path, counts)
+        };
         if let Some(d) = detail {
             line = line.push(dim(t, d).wrapping(Wrapping::None));
         }
@@ -472,15 +481,21 @@ impl State {
                 (!staging).then(|| Message::Stage(path.clone())),
             ),
         };
-        // Actions on the left so they stay visible when long paths scroll.
-        row![
-            actions,
-            space().width(file_tree::indent(t, depth.unwrap_or(0))),
-            main
-        ]
-        .spacing(3)
-        .align_y(iced::Alignment::Center)
-        .into()
+        // Keep action and status columns outside the indented path.
+        let line = if depth.is_some() {
+            let status =
+                iced::widget::mouse_area(widgets::colored(t, code_text, color).width(t.cols(1)))
+                    .on_press(Message::Select(path.clone(), group))
+                    .on_right_press(Message::RightClick(path.clone(), group));
+            row![
+                status,
+                container(actions).width(Length::Fixed(files::action_width(t))),
+                main
+            ]
+        } else {
+            row![actions, main]
+        };
+        line.spacing(3).align_y(iced::Alignment::Center).into()
     }
 }
 

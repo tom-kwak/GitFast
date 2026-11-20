@@ -17,7 +17,9 @@ pub struct Tree(Vec<Row>);
 #[derive(Debug)]
 pub enum Row {
     Folder {
+        /// The first directory is the fold key even if the label grows or shrinks.
         path: PathBuf,
+        label: PathBuf,
         depth: usize,
         count: usize,
         end: usize,
@@ -36,22 +38,32 @@ struct Directory {
 }
 
 impl Directory {
-    fn flatten(self, path: &mut PathBuf, depth: usize, rows: &mut Vec<Row>) {
-        for (name, directory) in self.folders {
-            path.push(name);
+    fn flatten(self, parent: &Path, depth: usize, rows: &mut Vec<Row>) {
+        for (name, mut directory) in self.folders {
+            let path = parent.join(&name);
+            let mut label = PathBuf::from(name);
+            // Consecutive folders with no file rows or branches share one row.
+            while directory.files.is_empty() && directory.folders.len() == 1 {
+                let Some((child, nested)) = directory.folders.pop_first() else {
+                    break;
+                };
+                label.push(child);
+                directory = nested;
+            }
             let start = rows.len();
+            let child_parent = parent.join(&label);
             rows.push(Row::Folder {
-                path: path.clone(),
+                path,
+                label,
                 depth,
                 count: directory.count,
                 end: 0,
             });
-            directory.flatten(path, depth + 1, rows);
+            directory.flatten(&child_parent, depth + 1, rows);
             let end = rows.len();
             if let Row::Folder { end: next, .. } = &mut rows[start] {
                 *next = end;
             }
-            path.pop();
         }
         rows.extend(
             self.files
@@ -78,7 +90,7 @@ impl Tree {
             dir.files.entry(name.into()).or_default().push(index);
         }
         let mut rows = Vec::new();
-        root.flatten(&mut PathBuf::new(), 0, &mut rows);
+        root.flatten(Path::new(""), 0, &mut rows);
         Self(rows)
     }
 
@@ -143,21 +155,17 @@ pub fn indent(t: &Tokens, depth: usize) -> Length {
 
 pub fn folder<'a, M: Clone + 'a>(
     t: &'a Tokens,
-    path: &Path,
+    label: &Path,
     depth: usize,
     count: usize,
     open: bool,
     focused: bool,
     message: M,
 ) -> Element<'a, M> {
-    let name = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy();
     let line = row![
         space().width(indent(t, depth)),
         widgets::colored(t, if open { "▾ " } else { "▸ " }, t.accent()),
-        widgets::mono(t, format!("{name}/")).wrapping(Wrapping::None),
+        widgets::mono(t, label.display().to_string()).wrapping(Wrapping::None),
         widgets::dim(t, format!(" ({count})")).wrapping(Wrapping::None),
     ]
     .align_y(iced::Alignment::Center);
@@ -212,5 +220,33 @@ mod tests {
             ]
         ));
         assert_eq!(tree.visible(|_| true).count(), 7);
+    }
+
+    #[test]
+    fn compacts_only_unbranched_folders_without_files() {
+        let paths = [
+            "a/b/c/hello.world",
+            "a/b/c/sub/other.txt",
+            "root/x/first",
+            "root/y/second",
+        ];
+        let tree = Tree::new(paths.into_iter().map(Path::new).enumerate());
+        assert!(
+            matches!(tree.row(0), Row::Folder { path, label, depth: 0, count: 2, .. }
+            if path == Path::new("a") && label == Path::new("a/b/c"))
+        );
+        assert!(
+            matches!(tree.row(1), Row::Folder { path, label, depth: 1, .. }
+            if path == Path::new("a/b/c/sub") && label == Path::new("sub"))
+        );
+        assert!(matches!(tree.row(3), Row::File { index: 0, depth: 1 }));
+        assert!(
+            matches!(tree.row(4), Row::Folder { label, depth: 0, .. } if label == Path::new("root"))
+        );
+        assert_eq!(
+            tree.visible(|path| path != Path::new("a"))
+                .collect::<Vec<_>>(),
+            [0, 4, 5, 6, 7, 8]
+        );
     }
 }
