@@ -946,31 +946,48 @@ async fn working_tree(ui: Ui) -> Ui {
     ui
 }
 
+fn file_status_x(ui: &Ui, filename: &str, code: &str) -> f32 {
+    let targets = ui.targets();
+    let file = targets
+        .iter()
+        .find(|t| t.label == filename)
+        .expect("file row");
+    let status = targets
+        .iter()
+        .find(|t| t.label == code && (t.at.y - file.at.y).abs() < 2.0)
+        .expect("status column");
+    assert!(status.at.x < file.at.x);
+    status.at.x
+}
+
 #[tokio::test]
 async fn working_tree_folds_the_same_directory_independently_in_each_group() {
     let mut ui = working_tree(
         Ui::open_with(|r| {
-            r.write("src/staged.txt", "staged\n");
-            r.git(&["add", "src/staged.txt"]);
+            r.write("src/staged/deep/staged.txt", "staged\n");
+            r.git(&["add", "src/staged/deep/staged.txt"]);
             r.write("src/lib.rs", "unstaged\n");
         })
         .await,
     )
     .await;
-    let _ = ui.click("[ Tree ]").await;
-    assert!(ui.shows("staged.txt"));
-    assert!(ui.shows("lib.rs"));
+    assert!(ui.shows("[ List ]"));
+    assert!(ui.shows("/staged.txt"));
+    assert!(ui.shows("/lib.rs"));
+    assert!(
+        (file_status_x(&ui, "/b.txt", "A") - file_status_x(&ui, "/staged.txt", "A")).abs() < 1.0
+    );
     let staged_folder = ui
         .targets()
         .into_iter()
         .find(|target| {
-            target.label == "src/"
+            target.label == "src/staged/deep"
                 && matches!(
                     ui.press(target.at, mouse::Button::Left).as_slice(),
                     [Message::Changes(changes::Message::ToggleFolder(
                         changes::Group::Staged,
-                        _
-                    ))]
+                        path
+                    ))] if path.as_path() == std::path::Path::new("src")
                 )
         })
         .expect("staged src folder");
@@ -997,25 +1014,39 @@ async fn working_tree_folds_the_same_directory_independently_in_each_group() {
         .expect("Enter expands the focused folder");
     let _ = ui.send(Message::Changes(moved)).await;
     assert!(ui.shows("staged.txt"));
+    let _ = ui.click("[ List ]").await;
     let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
-    assert!(saved.appearance.working_tree_dirs);
-    assert!(!saved.appearance.history_file_dirs);
+    assert!(!saved.appearance.working_tree_dirs);
+    assert!(saved.appearance.history_file_dirs);
 }
 
 #[tokio::test]
 async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() {
     let mut ui = Ui::open_with(|r| {
-        r.write("moved/keep.txt", "directory\n");
-        r.git(&["mv", "src/lib.rs", "moved/lib_new.rs"]);
-        r.git(&["add", "moved/keep.txt"]);
+        r.write("moved/deep/target/keep.txt", "directory\n");
+        r.git(&["mv", "src/lib.rs", "moved/deep/target/lib_new.rs"]);
+        r.git(&["add", "moved/deep/target/keep.txt"]);
         r.git(&["commit", "-qm", "move source file"]);
     })
     .await;
     let _ = ui.click("move source file").await;
-    let _ = ui.click("[ Tree ]").await;
-    assert!(ui.shows("moved/"));
-    assert!(!ui.shows("src/"));
-    assert!(ui.shows("lib.rs → lib_new.rs"));
+    assert!(ui.shows("[ List ]"));
+    let labels: Vec<_> = ui
+        .targets()
+        .into_iter()
+        .map(|target| target.label)
+        .collect();
+    assert!(labels.iter().any(|label| label == "moved/deep/target"));
+    assert!(
+        !labels
+            .iter()
+            .any(|label| label == "moved" || label == "src")
+    );
+    assert!(ui.shows("/lib.rs → lib_new.rs"));
+    assert!(
+        (file_status_x(&ui, "/b.txt", "A") - file_status_x(&ui, "/lib.rs → lib_new.rs", "R")).abs()
+            < 1.0
+    );
     let _ = ui.click("lib.rs → lib_new.rs").await;
     assert_eq!(
         ui.app
@@ -1024,9 +1055,9 @@ async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() 
             .commit_diff
             .current_path()
             .as_deref(),
-        Some(std::path::Path::new("moved/lib_new.rs"))
+        Some(std::path::Path::new("moved/deep/target/lib_new.rs"))
     );
-    let _ = ui.click("moved/").await;
+    let _ = ui.click("moved/deep/target").await;
     assert!(!ui.shows("lib.rs → lib_new.rs"));
     let _ = ui.click("[ List ]").await;
     assert!(ui.shows("lib_new.rs"));
@@ -1040,7 +1071,7 @@ async fn staging_checkboxes_commit_only_the_checked_changes() {
         let file = ui
             .targets()
             .into_iter()
-            .find(|target| target.label == name)
+            .find(|target| target.label.strip_prefix('/') == Some(name))
             .expect("file row");
         let target = (0..140_u16).step_by(3).find_map(|x| {
             let at = Point::new(file.at.x - f32::from(x), file.at.y);
@@ -1128,10 +1159,10 @@ async fn commit_shortcut_waits_until_staging_finishes() {
 #[tokio::test]
 async fn sweep_recognizes_reselecting_a_file_after_copying_its_path() {
     let mut ui = working_tree(Ui::open().await).await;
-    let _ = ui.right_click("b.txt").await;
+    let _ = ui.right_click("/b.txt").await;
     assert_eq!(ui.click("copy path").await.clipboard, 1);
 
-    let selected = ui.click("b.txt").await;
+    let selected = ui.click("/b.txt").await;
     assert!(selected.change_reselected);
     assert!(
         selected
@@ -1140,7 +1171,7 @@ async fn sweep_recognizes_reselecting_a_file_after_copying_its_path() {
             .any(|m| m.starts_with("DiffFinished("))
     );
 
-    let other = ui.click("a.txt").await;
+    let other = ui.click("/a.txt").await;
     assert!(!other.change_reselected);
     assert!(other.screen_changed);
 }
@@ -1155,7 +1186,7 @@ async fn reselecting_an_open_conflict_keeps_its_choices() {
         .await,
     )
     .await;
-    let _ = ui.right_click("a.txt").await;
+    let _ = ui.right_click("/a.txt").await;
     let opened = ui.click("open resolver").await;
     assert!(!opened.change_reselected);
     assert!(ui.shows("RESOLVE CONFLICT"));
@@ -1165,7 +1196,7 @@ async fn reselecting_an_open_conflict_keeps_its_choices() {
             crate::features::conflict_view::Message::Choose(0, gf_git::conflict::Choice::Ours),
         ))
         .await;
-    let selected = ui.click("a.txt").await;
+    let selected = ui.click("/a.txt").await;
     assert!(selected.change_reselected);
     assert!(ui.shows("all conflicts chosen"));
 }
@@ -1329,7 +1360,7 @@ async fn local_view_keeps_keyboard_copy_and_working_tree_menu_opens_plain_file()
         .await;
     assert!(ui.app.code_dialog.is_none());
 
-    let _ = ui.right_click("a.txt").await;
+    let _ = ui.right_click("/a.txt").await;
     assert!(ui.app.menu.is_some());
     let opened = ui.click("view file").await;
     assert!(!opened.repo_changed);
@@ -1349,7 +1380,7 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     let mut ui = Ui::open().await;
     let revision = ui.fixture.repo.git(&["rev-parse", "HEAD~2"]);
     let _ = ui.click("first").await;
-    let clicked = ui.right_click("lib.rs").await;
+    let clicked = ui.right_click("/lib.rs").await;
     assert!(!clicked.repo_changed);
     assert!(ui.shows("file history"));
     assert!(ui.shows("blame"));
@@ -1358,7 +1389,7 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     assert_eq!(copied.clipboard, 1);
     assert_eq!(ui.flash(), "copied src/lib.rs");
 
-    let _ = ui.right_click("lib.rs").await;
+    let _ = ui.right_click("/lib.rs").await;
     let opened = ui.click("view file").await;
     assert!(!opened.repo_changed);
     assert!(ui.app.code_dialog.is_some());
@@ -1372,7 +1403,7 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     let close = code_close_target(&ui);
     let _ = ui.click_at(&close, mouse::Button::Left).await;
     assert!(ui.app.code_dialog.is_none());
-    let _ = ui.right_click("lib.rs").await;
+    let _ = ui.right_click("/lib.rs").await;
     let _ = ui.click("file history").await;
     assert!(ui.shows("first"));
     assert!(!ui.shows("third"));
@@ -1418,7 +1449,7 @@ async fn history_files_preview_uses_the_parent_for_a_deleted_file() {
     })
     .await;
     let _ = ui.click("remove gone").await;
-    let _ = ui.right_click("gone.txt").await;
+    let _ = ui.right_click("/gone.txt").await;
     let _ = ui.click("view file").await;
     assert!(ui.app.code_dialog.is_some());
     assert!(ui.shows("FILE CONTENTS"));
@@ -2371,7 +2402,7 @@ async fn blame_truncates_a_wide_author_to_the_column_width() {
     let _ = ui.click("wide author").await;
     assert!(!ui.shows("[ file history ]"));
     assert!(!ui.shows("[ blame ]"));
-    let _ = ui.right_click("b.txt").await;
+    let _ = ui.right_click("/b.txt").await;
     let _ = ui.click("blame").await;
     assert!(ui.targets().iter().any(|t| t.label == "가나다라마…"));
 }
@@ -2382,7 +2413,7 @@ async fn blame_search_finds_worktree_lines_and_keeps_commit_navigation() {
     use keyboard::key::Code;
 
     let mut ui = a_txt_shown().await;
-    let _ = ui.right_click("a.txt").await;
+    let _ = ui.right_click("/a.txt").await;
     let _ = ui.click("blame").await;
     assert!(ui.shows("Find in file ⌘F"));
 

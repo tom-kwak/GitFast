@@ -54,8 +54,8 @@ impl Default for AppearanceSettings {
             show_refs: true,
             show_history: true,
             list_cols: DEFAULT_LIST_COLS,
-            working_tree_dirs: false,
-            history_file_dirs: false,
+            working_tree_dirs: true,
+            history_file_dirs: true,
         }
     }
 }

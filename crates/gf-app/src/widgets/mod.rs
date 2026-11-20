@@ -384,25 +384,25 @@ pub fn file_entry<'a, M: 'a>(
         || path.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
-    file_entry_named(t, code, code_color, name, path.parent(), counts)
+    row![
+        colored(t, code.to_owned(), code_color),
+        file_entry_details(t, name, path.parent(), counts),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center)
 }
 
-/// File row with a custom name, useful for showing a rename in a tree.
-pub fn file_entry_named<'a, M: 'a>(
+/// Name and change counts, placed after the status and any tree indentation.
+pub fn file_entry_details<'a, M: 'a>(
     t: &Tokens,
-    code: &str,
-    code_color: Color,
     name: String,
     directory: Option<&std::path::Path>,
     counts: EntryCounts,
 ) -> iced::widget::Row<'a, M> {
     use iced::widget::text::Wrapping;
-    let mut line = row![
-        colored(t, code.to_owned(), code_color),
-        mono(t, name).wrapping(Wrapping::None),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center);
+    let mut line = row![mono(t, name).wrapping(Wrapping::None)]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
     match counts_text(counts) {
         Some((added, removed)) if removed.is_empty() => {
             line = line.push(dim(t, added).wrapping(Wrapping::None));

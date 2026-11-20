@@ -16,6 +16,11 @@ const GROUPS: [Group; 4] = [
     Group::Untracked,
 ];
 
+/// Checkbox and up to one auxiliary file action, aligned across groups.
+pub(super) fn action_width(t: &Tokens) -> f32 {
+    t.font_size + t.cols(1) + 10.0
+}
+
 pub(super) fn groups(entry: &StatusEntry) -> [Option<Group>; 2] {
     match entry {
         StatusEntry::Conflicted { .. } => [Some(Group::Conflicts), None],
@@ -270,23 +275,31 @@ impl State {
                 ),
                 Row::Folder(group, index) => {
                     let file_tree::Row::Folder {
-                        path, depth, count, ..
+                        path,
+                        label,
+                        depth,
+                        count,
+                        ..
                     } = lists.tree(group).row(index)
                     else {
                         return widgets::empty_hint(t, "");
                     };
-                    file_tree::folder(
-                        t,
-                        path,
-                        *depth,
-                        *count,
-                        self.folders.open(group, path),
-                        self.folders
-                            .focused
-                            .as_ref()
-                            .is_some_and(|(g, p)| *g == group && p == path),
-                        Message::ToggleFolder(group, path.clone()),
-                    )
+                    row![
+                        space().width(Length::Fixed(t.cols(1) + action_width(t) + 6.0)),
+                        file_tree::folder(
+                            t,
+                            label,
+                            *depth,
+                            *count,
+                            self.folders.open(group, path),
+                            self.folders
+                                .focused
+                                .as_ref()
+                                .is_some_and(|(g, p)| *g == group && p == path),
+                            Message::ToggleFolder(group, path.clone()),
+                        ),
+                    ]
+                    .into()
                 }
             },
             Message::Scrolled,
