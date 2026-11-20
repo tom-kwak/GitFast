@@ -371,7 +371,8 @@ fn file_version(group: Group, entry: Option<&StatusEntry>) -> FileVersion {
     }
 }
 
-fn diff_source(path: PathBuf, group: Group) -> DiffSource {
+/// A partly staged file has a different diff in each group.
+pub(crate) fn diff_source(path: PathBuf, group: Group) -> DiffSource {
     match group {
         Group::Staged => DiffSource::Staged(path),
         Group::Untracked => DiffSource::Untracked(path),
@@ -380,6 +381,13 @@ fn diff_source(path: PathBuf, group: Group) -> DiffSource {
 }
 
 impl State {
+    /// Selection belongs to the row, so the group must match as well as the path.
+    pub(crate) fn is_selected(&self, path: &Path, group: Group) -> bool {
+        self.selected
+            .as_ref()
+            .is_some_and(|(p, g)| p == path && *g == group)
+    }
+
     /// Keeps the selection pointing at something that still exists, moving
     /// it between groups when a file was staged/unstaged. Returns the diff
     /// to show if the selection moved.
@@ -508,10 +516,7 @@ impl State {
         if let Some(d) = detail {
             line = line.push(dim(t, d).wrapping(Wrapping::None));
         }
-        let selected = self
-            .selected
-            .as_ref()
-            .is_some_and(|(p, g)| p == path && *g == group);
+        let selected = self.is_selected(path, group);
         let main = iced::widget::mouse_area(widgets::list_row(
             t,
             line,
@@ -636,9 +641,8 @@ impl Feature for State {
             }
             Message::RightClick(path, group) => {
                 // Right-click selects like a click (the diff follows).
-                let sel = (path.clone(), group);
-                let changed = self.selected.as_ref() != Some(&sel);
-                self.selected = Some(sel);
+                let changed = !self.is_selected(&path, group);
+                self.selected = Some((path.clone(), group));
                 let show = (changed && group != Group::Conflicts)
                     .then(|| diff_source(path.clone(), group));
                 Update::output(Output::Menu {

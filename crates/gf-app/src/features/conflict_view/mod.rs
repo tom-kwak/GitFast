@@ -59,6 +59,11 @@ impl State {
         }
     }
 
+    /// Keep choices for comparison with the new content once it arrives.
+    pub fn reload(&mut self) {
+        self.loading = true;
+    }
+
     pub fn loaded(&mut self, path: &PathBuf, result: Result<Option<Vec<Segment>>, String>) {
         if &self.path != path {
             return;
@@ -87,6 +92,10 @@ impl State {
         self.choices.iter().filter(|c| c.is_some()).count()
     }
 
+    fn can_apply(&self) -> bool {
+        !self.loading && self.error.is_none() && self.chosen() > 0
+    }
+
     pub fn update(&mut self, message: Message) -> Option<Output> {
         match message {
             Message::Choose(i, c) => {
@@ -96,11 +105,14 @@ impl State {
                 }
                 None
             }
-            Message::Apply => self.segments.clone().map(|segments| Output::Apply {
-                path: self.path.clone(),
-                segments,
-                choices: self.choices.clone(),
-            }),
+            Message::Apply if self.can_apply() => {
+                self.segments.clone().map(|segments| Output::Apply {
+                    path: self.path.clone(),
+                    segments,
+                    choices: self.choices.clone(),
+                })
+            }
+            Message::Apply => None,
             Message::TakeFile(side) => Some(Output::TakeFile(self.path.clone(), side)),
             Message::MarkResolved => Some(Output::MarkResolved(self.path.clone())),
             Message::Close => Some(Output::Close),
@@ -304,7 +316,7 @@ impl State {
                 t,
                 "apply choices",
                 None,
-                (self.chosen() > 0).then_some(Message::Apply)
+                self.can_apply().then_some(Message::Apply)
             ),
         ]
         .align_y(iced::Alignment::Center);
@@ -347,10 +359,16 @@ mod tests {
     fn reloading_the_same_content_keeps_choices() {
         let mut s = state();
         let _ = s.update(Message::Choose(0, Choice::Ours));
+        s.reload();
+        assert!(s.update(Message::Apply).is_none());
+        s.loaded(&"f.txt".into(), Err("read failed".into()));
+        assert!(s.update(Message::Apply).is_none());
         // A refresh reloads the file: same text, choices stay.
+        s.reload();
         let same = "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> topic\nb\n";
         s.loaded(&"f.txt".into(), Ok(gf_git::conflict::parse(same)));
         assert_eq!(s.choices, vec![Some(Choice::Ours)]);
+        assert!(s.update(Message::Apply).is_some());
         // The file changed on disk: choices no longer apply.
         let other = "a\n<<<<<<< HEAD\nx2\n=======\ny\n>>>>>>> topic\nb\n";
         s.loaded(&"f.txt".into(), Ok(gf_git::conflict::parse(other)));
