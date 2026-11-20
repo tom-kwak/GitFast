@@ -120,8 +120,12 @@ pub enum OpKind {
         branch: Option<String>,
         /// Explicit destination; `None` pushes the current branch.
         to: Option<PushTo>,
+        /// Only an ordinary push can offer a force-with-lease retry.
+        offer_force: bool,
+        /// Tags to include if a guarded push needs another confirmation.
+        tags: Option<crate::repo_tab::PendingTags>,
     },
-    Pull,
+    Pull(gf_git::PullMode),
     /// Undoing (or redoing) a step: it moves to the other stack once this
     /// succeeds.
     Undo {

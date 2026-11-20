@@ -41,7 +41,7 @@ pub use ops::remote::remote_branch;
 pub use ops::stash::StashOptions;
 pub use ops::state::RepoState;
 pub use ops::submodule::{Submodule, SubmoduleStatus};
-pub use ops::sync::{PullMode, PushOptions};
+pub use ops::sync::{CONFIGURED_PUSH_REWRITES, PullMode, PushOptions};
 pub use ops::undo::{Capture, FileContent, HeadMode, Scope};
 pub use ops::worktree::Worktree;
 pub use repository::Repository;

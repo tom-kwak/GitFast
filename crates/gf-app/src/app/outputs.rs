@@ -724,39 +724,33 @@ impl App {
                 })
             }
             toolbar::Message::Pull => {
-                let has_upstream = self
-                    .active_tab()
-                    .and_then(|t| t.snapshot.as_ref())
-                    .is_some_and(|s| s.status.head.upstream.is_some());
-                if !has_upstream {
+                let upstream = self.active_tab().and_then(|tab| {
+                    let head = &tab.snapshot.as_ref()?.status.head;
+                    head.upstream.as_ref()?;
+                    Some(tab.repo.id())
+                });
+                let Some(repo) = upstream else {
                     self.flash(
                         NoteKind::Error,
                         "this branch has no upstream — push it first to publish it",
                     );
                     return Task::none();
-                }
-                let (up, branch, behind) = self
-                    .active_tab()
-                    .and_then(|t| t.snapshot.as_ref())
-                    .map(|s| {
-                        let h = &s.status.head;
-                        (
-                            h.upstream.clone().unwrap_or_default(),
-                            h.branch.clone().unwrap_or_default(),
-                            h.behind,
-                        )
-                    })
-                    .unwrap_or_default();
-                self.confirm(Confirm::change(
-                    "pull",
-                    "Pull",
-                    vec![
-                        format!("Bring {behind} commit(s) from `{up}` into `{branch}`?"),
-                        "Your files are updated; uses your pull.rebase / pull.ff setting.".into(),
-                    ],
-                    "Pull",
-                    Purpose::Pull,
-                ))
+                };
+                // Git fetches fresh refs before checking for a fast-forward.
+                // A stale ahead/behind count can't authorize a merge or rebase.
+                self.confirm(
+                    Confirm::change(
+                        "pull",
+                        "Pull",
+                        Vec::new(),
+                        "Pull",
+                        Purpose::Pull {
+                            repo,
+                            mode: PullMode::FastForwardOnly,
+                        },
+                    )
+                    .skip_if(true),
+                )
             }
             toolbar::Message::Push => {
                 let head = self
@@ -780,8 +774,11 @@ impl App {
         }
     }
 
-    pub(super) fn pull(&mut self, mode: PullMode) -> Task<Message> {
-        self.sync_op("pull", OpKind::Pull, move |r, opts| async move {
+    pub(super) fn pull(&mut self, repo: gf_core::model::RepoId, mode: PullMode) -> Task<Message> {
+        if !self.active_tab().is_some_and(|tab| tab.repo.id() == repo) {
+            return self.restore_focus();
+        }
+        self.sync_op("pull", OpKind::Pull(mode), move |r, opts| async move {
             r.pull(mode, opts).await
         })
     }
@@ -790,6 +787,9 @@ impl App {
         if b.name.kind() != RefKind::LocalBranch {
             return Task::none();
         }
+        let Some(repo) = self.active_tab().map(|tab| tab.repo.id()) else {
+            return Task::none();
+        };
         let branch = b.name.short().to_owned();
         if b.upstream.is_none() {
             if !self.has_remote() {
@@ -812,39 +812,61 @@ impl App {
                 .field("remote", remote, "origin"),
             );
         }
-        let (up, ahead) = b
-            .upstream
-            .as_ref()
-            .map(|u| (u.name.short().to_owned(), u.ahead))
-            .unwrap_or_default();
+        let Some(upstream) = &b.upstream else {
+            return Task::none();
+        };
+        let up = upstream.name.short();
+        let ahead = upstream.ahead;
         // `git push` alone pushes the checked-out branch; any other branch
         // needs its remote and name spelled out.
         let to = (!b.is_head).then(|| self.push_target(b)).flatten();
         // Tags go with the checked-out branch, as the toolbar counts them.
         let tags = b.is_head.then(|| self.pending_tags()).flatten();
-        let mut body = Vec::new();
-        if ahead > 0 || tags.is_none() {
-            body.push(format!("Send {ahead} commit(s) from `{branch}` to `{up}`."));
+        if !b.is_head && to.is_none() {
+            return self.show_failure(
+                "push",
+                "The branch's upstream could not be mapped to a remote destination.",
+            );
         }
+        let warning = if upstream.gone {
+            Some(format!(
+                "The last fetch did not find `{up}`. Pushing may recreate it."
+            ))
+        } else if upstream.behind > 0 {
+            Some(format!(
+                "`{up}` has {} commit(s) that `{branch}` does not have. Push may be rejected. Pull first to integrate them.",
+                upstream.behind
+            ))
+        } else {
+            None
+        };
+        let quiet = warning.is_none();
+        let mut body: Vec<_> = warning.into_iter().collect();
+        body.push(format!("Send {ahead} commit(s) from `{branch}` to `{up}`."));
         if let Some(t) = &tags {
             body.push(format!(
-                "Send tag(s) {} to `{}`.",
-                t.names
-                    .iter()
-                    .map(|n| format!("`{n}`"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                "Also send {} new tag(s) to `{}`.",
+                t.names.len(),
                 t.remote
             ));
         }
-        body.push("Others will see them.".into());
-        self.confirm(Confirm::change(
-            "push",
-            "Push",
-            body,
-            "Push",
-            Purpose::Push { branch, to, tags },
-        ))
+        self.confirm(
+            Confirm::change(
+                "push",
+                "Review push",
+                body,
+                "Push",
+                Purpose::Push {
+                    repo,
+                    branch,
+                    to,
+                    tags,
+                    allow_configured_rewrites: false,
+                },
+            )
+            .always()
+            .skip_if(quiet),
+        )
     }
 
     /// Remote and refspec of `b`'s upstream, when it is on a remote.

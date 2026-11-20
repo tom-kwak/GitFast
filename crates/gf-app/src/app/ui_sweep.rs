@@ -79,6 +79,135 @@ impl Fixture {
     }
 }
 
+fn advance_fixture_remote(repo: &TestRepo) -> String {
+    let tip = repo.git(&["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "incoming"]);
+    // A push by URL leaves the configured remote-tracking ref untouched.
+    repo.git(&["push", ".git/remote.git", &format!("{tip}:refs/heads/main")]);
+    tip
+}
+
+#[tokio::test]
+async fn sync_pull_runs_quietly_when_the_remote_can_fast_forward() {
+    let mut incoming = String::new();
+    let mut ui = Ui::open_with(|repo| incoming = advance_fixture_remote(repo)).await;
+    assert_eq!(
+        ui.app
+            .active_tab()
+            .and_then(|tab| tab.snapshot.as_ref())
+            .expect("fixture snapshot")
+            .status
+            .head
+            .behind,
+        0,
+        "the incoming commit has not been fetched",
+    );
+    let _ = ui.send(Message::Toolbar(toolbar::Message::Pull)).await;
+    assert!(ui.app.dialog.is_none(), "{:?}", ui.app.dialog);
+    assert_eq!(ui.fixture.repo.git(&["rev-parse", "HEAD"]), incoming);
+}
+
+#[tokio::test]
+async fn sync_pull_asks_when_the_remote_diverged_since_fetch() {
+    let mut ui = Ui::open_with(|repo| {
+        advance_fixture_remote(repo);
+        repo.git(&["commit", "--allow-empty", "-m", "outgoing"]);
+        repo.git(&["config", "pull.rebase", "true"]);
+    })
+    .await;
+    let before = ui.fixture.repo.git(&["rev-parse", "HEAD"]);
+    let _ = ui.send(Message::Toolbar(toolbar::Message::Pull)).await;
+    assert_eq!(
+        ui.app.dialog.as_ref().map(|d| d.title.as_str()),
+        Some("Branches have diverged")
+    );
+    assert_eq!(ui.fixture.repo.git(&["rev-parse", "HEAD"]), before);
+}
+
+#[tokio::test]
+async fn sync_pull_offers_autostash_only_when_local_files_overlap() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["switch", "-c", "incoming"]);
+        repo.write("a.txt", "remote edit\n");
+        repo.git(&["commit", "-m", "incoming", "--", "a.txt"]);
+        repo.git(&["push", ".git/remote.git", "incoming:main"]);
+        repo.git(&["switch", "main"]);
+        repo.write("a.txt", "local edit\n");
+    })
+    .await;
+    let before = ui.fixture.repo.git(&["rev-parse", "HEAD"]);
+    let _ = ui.send(Message::Toolbar(toolbar::Message::Pull)).await;
+    let dialog = ui
+        .app
+        .dialog
+        .as_ref()
+        .expect("overlapping changes are reviewed");
+    assert_eq!(dialog.title, "Local changes overlap the pull");
+    assert_eq!(ui.fixture.repo.git(&["rev-parse", "HEAD"]), before);
+    assert_eq!(
+        std::fs::read_to_string(ui.fixture.repo.path().join("a.txt")).expect("local file"),
+        "local edit\n"
+    );
+}
+
+#[tokio::test]
+async fn sync_push_runs_quietly_for_a_fast_forward() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["commit", "--allow-empty", "-m", "outgoing"]);
+    })
+    .await;
+    let _ = ui.send(Message::Toolbar(toolbar::Message::Push)).await;
+    assert!(ui.app.dialog.is_none(), "{:?}", ui.app.dialog);
+    let repo = &ui.fixture.repo;
+    assert_eq!(
+        repo.git(&["--git-dir=.git/remote.git", "rev-parse", "main"]),
+        repo.git(&["rev-parse", "HEAD"])
+    );
+}
+
+#[tokio::test]
+async fn sync_push_confirms_a_force_rule_before_contacting_the_remote() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["commit", "--allow-empty", "-m", "outgoing"]);
+        repo.git(&[
+            "config",
+            "remote.origin.push",
+            "+refs/heads/main:refs/heads/main",
+        ]);
+    })
+    .await;
+    let before = ui
+        .fixture
+        .repo
+        .git(&["--git-dir=.git/remote.git", "rev-parse", "main"]);
+    let _ = ui.send(Message::Toolbar(toolbar::Message::Push)).await;
+    let dialog = ui
+        .app
+        .dialog
+        .as_ref()
+        .expect("configured force push is reviewed");
+    assert_eq!(dialog.title, "Push may overwrite remote refs");
+    assert_eq!(dialog.severity, crate::features::dialog::Severity::Delete);
+    assert_eq!(
+        ui.fixture
+            .repo
+            .git(&["--git-dir=.git/remote.git", "rev-parse", "main"]),
+        before
+    );
+}
+
+#[tokio::test]
+async fn sync_toolbar_disables_pull_and_push_when_up_to_date() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["push", "origin", "--tags"]);
+        repo.git(&["fetch", "origin"]);
+    })
+    .await;
+    let effects = ui.click("[ ⇣ pull ]").await;
+    assert!(effects.messages.is_empty(), "{:?}", effects.messages);
+    let effects = ui.click("[ ⇡ push ]").await;
+    assert!(effects.messages.is_empty(), "{:?}", effects.messages);
+}
+
 /// What running a click (or a message) did.
 #[derive(Debug, Default)]
 pub(super) struct Effects {
