@@ -14,26 +14,25 @@ It installs the latest release as `/Applications/gf.app` (or `~/Applications`) a
 opens without a Gatekeeper prompt. Run it again to update. gf needs `git`
 (Xcode Command Line Tools or Homebrew).
 
-## What's new in 0.0.3
+## What's new in 0.0.4
 
-- Open full-file comparisons from **Local Changes** and **Commit Changes**.
-  Switch between inline and side-by-side views with aligned line numbers and
-  change markers in the scrollbar.
-- Use **view file** in the **Working Tree** and commit **Files** context menus to
-  read the corresponding file version with syntax highlighting.
-- Select multiple branches in **Refs** and review the full list before deleting
-  them. Local branch deletions can be undone.
-- See the last Git command in the collapsed command log and the app version in
-  **Settings**.
+- Press **⌘F** to find text in file previews and full-file comparisons. Matches
+  are highlighted in inline and side-by-side views. Use **⌘G** or **⌘⇧G** to
+  jump between matches.
+- The welcome screen has a text-art gf logo that follows the active theme.
+  The crab moves from side to side.
+- The macOS app has a new icon in Finder and the Dock.
+
+[Release notes](https://github.com/tom-kwak/GitFast/releases/tag/release-0.0.4)
 
 ## Releases
 
 A release is a tag `release-<version>` on a commit in `main`, where
 `<version>` matches the workspace version in the tagged commit's `Cargo.toml`.
-For example, tag the commit with workspace version `0.0.3`:
+For example, tag the commit with workspace version `0.0.4`:
 
 ```bash
-git tag release-0.0.3 && git push origin release-0.0.3
+git tag release-0.0.4 && git push origin release-0.0.4
 ```
 
 Pushing the tag starts the release workflow if the tagged commit is already
