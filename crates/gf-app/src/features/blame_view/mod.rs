@@ -10,37 +10,52 @@ use gf_core::model::Oid;
 use gf_git::BlameLine;
 use iced::widget::text::Wrapping;
 use iced::widget::{column, row};
-use iced::{Element, Length};
+use iced::{Element, Length, Task};
 
+use crate::feature::Update;
 use crate::highlight::{self, Spans};
 use crate::theme::Tokens;
-use crate::widgets::virtual_list::{ScrollPos, columns, virtual_list};
+use crate::widgets::file_search::{self, Hit, Search, line_width};
+use crate::widgets::virtual_list::{ScrollPos, virtual_list};
 use crate::widgets::{self, colored, dim, format};
+
+pub(crate) const FIND_FIELD_ID: &str = "gf-blame-find";
+const LIST_ID: &str = "gf-blame";
+const INFO_COLUMNS: usize = 34;
+const ROW_GAP: f32 = 8.0;
+const ROW_PADDING: f32 = 6.0;
 
 #[derive(Debug, Clone)]
 pub struct State {
     pub path: PathBuf,
     /// Revision blamed; `None` = the working tree file.
     pub rev: Option<String>,
-    lines: Option<Vec<BlameLine>>,
+    lines: Option<Arc<Vec<BlameLine>>>,
     /// Widest line, in columns (measured once, when the lines arrive).
     widest: usize,
     /// Syntax highlighting per line, filled in after the lines arrive.
     spans: Option<Arc<Vec<Spans>>>,
     error: Option<String>,
     scroll: ScrollPos,
+    find: Search<()>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Select(Oid),
     Scrolled(ScrollPos),
+    FindOpen,
+    FindClose,
+    FindQuery(String),
+    FindMove { back: bool },
+    FindResults(u64, Arc<[Hit<()>]>),
     Close,
 }
 
 #[derive(Debug, Clone)]
 pub enum Output {
     ShowCommit(Oid),
+    RevealMatch,
     Close,
 }
 
@@ -82,20 +97,22 @@ const MAX_HIGHLIGHT_LINES: usize = 20_000;
 
 /// Highlights the blamed file in the background; `None` when no grammar
 /// matches the path or the file is too long.
-pub async fn highlight(path: PathBuf, lines: Vec<String>) -> Option<Arc<Vec<Spans>>> {
+pub async fn highlight(path: PathBuf, lines: Arc<Vec<BlameLine>>) -> Option<Arc<Vec<Spans>>> {
     if lines.len() > MAX_HIGHLIGHT_LINES {
         return None;
     }
-    tokio::task::spawn_blocking(move || highlight_lines(&path, &lines))
-        .await
-        .ok()
-        .flatten()
-        .map(Arc::new)
+    tokio::task::spawn_blocking(move || {
+        let text: Vec<_> = lines.iter().map(|line| line.content.as_str()).collect();
+        highlight_lines(&path, &text)
+    })
+    .await
+    .ok()
+    .flatten()
+    .map(Arc::new)
 }
 
-fn highlight_lines(path: &Path, lines: &[String]) -> Option<Vec<Spans>> {
-    let text: Vec<&str> = lines.iter().map(String::as_str).collect();
-    highlight::get().highlight(path, &text)
+fn highlight_lines(path: &Path, lines: &[&str]) -> Option<Vec<Spans>> {
+    highlight::get().highlight(path, lines)
 }
 
 impl State {
@@ -108,6 +125,7 @@ impl State {
             spans: None,
             error: None,
             scroll: ScrollPos::default(),
+            find: Search::default(),
         }
     }
 
@@ -117,16 +135,16 @@ impl State {
         }
         match result {
             Ok(l) => {
-                self.widest = l.iter().map(|l| columns(&l.content)).max().unwrap_or(0);
-                self.lines = Some(l);
+                self.widest = l.iter().map(|l| line_width(&l.content)).max().unwrap_or(0);
+                self.lines = Some(Arc::new(l));
             }
             Err(e) => self.error = Some(e),
         }
     }
 
     /// The blamed lines, once loaded (for highlighting).
-    pub fn lines(&self) -> Option<&[BlameLine]> {
-        self.lines.as_deref()
+    pub fn lines(&self) -> Option<&Arc<Vec<BlameLine>>> {
+        self.lines.as_ref()
     }
 
     pub fn highlighted(&mut self, path: &PathBuf, spans: Arc<Vec<Spans>>) {
@@ -136,15 +154,92 @@ impl State {
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Option<Output> {
+    pub fn update(&mut self, message: Message) -> Update<Message, Output> {
         match message {
-            Message::Select(id) => Some(Output::ShowCommit(id)),
-            Message::Scrolled(p) => {
-                self.scroll = p;
-                None
+            Message::Select(id) => return Update::output(Output::ShowCommit(id)),
+            Message::Scrolled(p) => self.scroll = p,
+            Message::FindOpen if self.can_find() => {
+                let task = if self.find.open() {
+                    self.search()
+                } else {
+                    Task::none()
+                };
+                return Update::task(Task::batch([task, file_search::focus(FIND_FIELD_ID)]));
             }
-            Message::Close => Some(Output::Close),
+            Message::FindOpen => {}
+            Message::FindClose => self.find.close(),
+            Message::FindQuery(query) => {
+                self.find.set_query(query);
+                return Update::task(self.search());
+            }
+            Message::FindMove { back } => {
+                if self.find.move_match(back) {
+                    return Update::output(Output::RevealMatch);
+                }
+            }
+            Message::FindResults(generation, hits) => {
+                if self.find.accept(generation, hits) {
+                    return Update::output(Output::RevealMatch);
+                }
+            }
+            Message::Close => return Update::output(Output::Close),
         }
+        Update::none()
+    }
+
+    fn can_find(&self) -> bool {
+        self.lines.as_ref().is_some_and(|lines| !lines.is_empty())
+    }
+
+    pub fn find_is_open(&self) -> bool {
+        self.find.is_open()
+    }
+
+    fn search(&mut self) -> Task<Message> {
+        let Some(lines) = self.lines.clone() else {
+            return Task::none();
+        };
+        let Some((generation, query)) = self.find.restart() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    file_search::matches(
+                        &query,
+                        lines
+                            .iter()
+                            .enumerate()
+                            .map(|(row, line)| (row, (), line.content.as_str())),
+                    )
+                })
+                .await
+                .unwrap_or_default()
+            },
+            move |hits| Message::FindResults(generation, hits),
+        )
+    }
+
+    fn number_columns(&self) -> usize {
+        self.lines
+            .as_ref()
+            .and_then(|lines| lines.last())
+            .map_or(5, |line| line.line.to_string().len().max(5))
+    }
+
+    pub fn reveal_match(&self, t: &Tokens) -> Task<Message> {
+        let Some((hit, lines)) = self.find.active_match().zip(self.lines.as_ref()) else {
+            return Task::none();
+        };
+        let code_x = t.cols(INFO_COLUMNS + self.number_columns()) + 2.0 * ROW_GAP + ROW_PADDING;
+        file_search::reveal_match(
+            hit,
+            &lines[hit.row as usize].content,
+            t,
+            LIST_ID,
+            code_x,
+            row_height(t),
+        )
     }
 
     pub fn view<'a>(&'a self, t: &'a Tokens) -> Element<'a, Message> {
@@ -152,15 +247,25 @@ impl State {
             || "working tree".to_owned(),
             |r| r.chars().take(7).collect(),
         );
-        let header = row![
+        let mut header = row![
             colored(t, format!("{} @ {at}", self.path.display()), t.fg)
                 .wrapping(Wrapping::None)
                 .width(Length::Fill),
             dim(t, "click a line to find its commit in the history"),
-            widgets::icon_button(t, "✕", t.dim, "close blame", Message::Close),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center);
+        ];
+        if self.can_find() && !self.find_is_open() {
+            header = header.push(dim(t, "Find in file ⌘F"));
+        }
+        let header = header
+            .push(widgets::icon_button(
+                t,
+                "✕",
+                t.dim,
+                "close blame",
+                Message::Close,
+            ))
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
 
         let spans = self.spans.as_deref();
         let now = std::time::SystemTime::now()
@@ -171,11 +276,13 @@ impl State {
             (None, None) => widgets::empty_hint(t, "running blame…"),
             (Some(lines), None) if lines.is_empty() => widgets::empty_hint(t, "empty file"),
             (Some(lines), None) => {
-                let content_width = t.cols(self.widest + 50) + 24.0;
+                let digits = self.number_columns();
+                let content_width =
+                    t.cols(self.widest + INFO_COLUMNS + digits) + 2.0 * (ROW_GAP + ROW_PADDING);
                 virtual_list(
-                    "gf-blame",
+                    LIST_ID,
                     lines.len(),
-                    (t.font_size * 1.6).round(),
+                    row_height(t),
                     content_width,
                     self.scroll,
                     move |i| {
@@ -206,20 +313,21 @@ impl State {
                             colored(t, "│", t.lane(color_index(&l.commit))).into()
                         };
                         let line = row![
-                            iced::widget::container(info).width(Length::Fixed(t.cols(34))),
-                            dim(t, format!("{:>5}", l.line)),
-                            match spans.and_then(|s| s.get(i)) {
-                                Some(s) => widgets::highlighted_line(t, s),
-                                None => widgets::mono(t, format::code_line(&l.content))
-                                    .wrapping(Wrapping::None)
-                                    .into(),
-                            },
+                            iced::widget::container(info)
+                                .width(Length::Fixed(t.cols(INFO_COLUMNS))),
+                            dim(t, format!("{:>digits$}", l.line)).width(t.cols(digits)),
+                            file_search::code_text(
+                                t,
+                                &l.content,
+                                spans.and_then(|s| s.get(i)),
+                                self.find.row_hits(i, ())
+                            ),
                         ]
-                        .spacing(8);
+                        .spacing(ROW_GAP);
                         if uncommitted {
                             // Nothing to find: a local change, not a commit.
                             return iced::widget::container(line)
-                                .padding(iced::Padding::from([1, 6]))
+                                .padding(iced::Padding::from([1.0, ROW_PADDING]))
                                 .width(Length::Fill)
                                 .into();
                         }
@@ -235,13 +343,22 @@ impl State {
                 )
             }
         };
-        widgets::accent_panel(
-            t,
-            "BLAME".into(),
-            t.remote(),
-            column![header, body].spacing(4),
-        )
+        let mut content = column![header].spacing(4);
+        if self.find_is_open() {
+            content = content.push(self.find.view(
+                t,
+                FIND_FIELD_ID,
+                Message::FindQuery,
+                |back| Message::FindMove { back },
+                Message::FindClose,
+            ));
+        }
+        widgets::accent_panel(t, "BLAME".into(), t.remote(), content.push(body))
     }
+}
+
+fn row_height(t: &Tokens) -> f32 {
+    (t.font_size * 1.6).round()
 }
 
 #[cfg(test)]
@@ -251,7 +368,7 @@ mod tests {
     #[test]
     fn highlights_known_languages_only() {
         let _ = highlight::init(None);
-        let lines = vec!["fn main() {}".to_owned(), "let x = 1;".to_owned()];
+        let lines = ["fn main() {}", "let x = 1;"];
         let spans = highlight_lines(Path::new("src/main.rs"), &lines).expect("rust grammar");
         assert_eq!(spans.len(), 2);
         assert!(spans[0].len() > 1, "keyword and name get separate spans");

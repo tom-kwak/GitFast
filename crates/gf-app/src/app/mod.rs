@@ -227,6 +227,7 @@ pub enum Message {
     Banner(crate::features::op_banner::Message),
     Conflict(crate::features::conflict_view::Message),
     Blame(crate::features::blame_view::Message),
+    BlameTask(RepoId, u64, crate::features::blame_view::Message),
     BlameLoaded(RepoId, u64, PathBuf, Result<Vec<gf_git::BlameLine>, String>),
     BlameHighlighted(
         RepoId,
@@ -959,6 +960,7 @@ impl App {
             Message::Banner(m) => self.on_banner(m),
             Message::Conflict(m) => self.on_conflict_message(m),
             Message::Blame(m) => self.on_blame_message(m),
+            Message::BlameTask(id, request, m) => self.update_blame(id, request, m),
             Message::BlameLoaded(id, request, path, result) => {
                 let Some(b) = self
                     .tab_mut(id)
@@ -972,9 +974,8 @@ impl App {
                 let Some(lines) = b.lines().filter(|_| b.path == path) else {
                     return Task::none();
                 };
-                let text: Vec<String> = lines.iter().map(|l| l.content.clone()).collect();
                 Task::perform(
-                    crate::features::blame_view::highlight(path.clone(), text),
+                    crate::features::blame_view::highlight(path.clone(), lines.clone()),
                     move |spans| Message::BlameHighlighted(id, request, path.clone(), spans),
                 )
             }

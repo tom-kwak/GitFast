@@ -1,19 +1,18 @@
 //! Shared line rendering for the inline and side-by-side layouts.
 
 use gf_core::model::LineKind;
-use iced::widget::text::Wrapping;
-use iced::widget::{column, container, mouse_area, rich_text, row, span};
+use iced::widget::{column, container, mouse_area, row};
 use iced::{Background, Element, Length, Padding};
 
 use super::{
     COMPARE_GUTTER, Code, LIST_ID, Message, Pane, PreviewRow, State, comparison, row_height,
     scroll_marks,
 };
-use crate::highlight::Spans;
 use crate::theme::{Tokens, style};
+use crate::widgets::file_search::code_text;
 use crate::widgets::selectable_line::{Geometry, selectable_line};
 use crate::widgets::virtual_list::{virtual_gutter, virtual_list};
-use crate::widgets::{self, colored, dim, format};
+use crate::widgets::{colored, dim};
 
 impl State {
     pub(super) fn lines<'a>(&'a self, t: &'a Tokens, code: &'a Code) -> Element<'a, Message> {
@@ -224,64 +223,6 @@ impl State {
             mouse_area(list).into()
         }
     }
-}
-
-/// Split syntax spans at match boundaries while retaining their colors outside matches.
-fn code_text<'a>(
-    t: &'a Tokens,
-    raw: &'a str,
-    syntax: Option<&'a Spans>,
-    hits: impl Iterator<Item = (std::ops::Range<usize>, bool)>,
-) -> Element<'a, Message> {
-    let mut hits = hits.peekable();
-    if hits.peek().is_none() {
-        return match syntax {
-            Some(spans) => widgets::highlighted_line(t, spans),
-            None => widgets::mono(t, format::code_line(raw))
-                .wrapping(Wrapping::None)
-                .into(),
-        };
-    }
-    let colors = syntax
-        .into_iter()
-        .flatten()
-        .map(|(tone, text)| (text.len(), t.tone(*tone)))
-        .chain(std::iter::once((raw.len(), t.fg)));
-    let mut spans = Vec::new();
-    let mut at = 0;
-    for (length, color) in colors {
-        let end = (at + length).min(raw.len());
-        while at < end {
-            let (next, is_match) = match hits.peek() {
-                Some((range, active)) if range.start <= at => (range.end.min(end), Some(*active)),
-                Some((range, _)) => (range.start.min(end), None),
-                None => (end, None),
-            };
-            let text = if next == raw.len() {
-                format::code_line(&raw[at..next])
-            } else {
-                format::code_text(&raw[at..next])
-            };
-            let piece = span::<(), iced::Font>(text).color(color);
-            spans.push(if let Some(active) = is_match {
-                let (background, foreground) = t.find_match(active);
-                piece.background(background).color(foreground)
-            } else {
-                piece
-            });
-            at = next;
-            if hits.peek().is_some_and(|(range, _)| range.end == at) {
-                hits.next();
-            }
-        }
-        if at == raw.len() {
-            break;
-        }
-    }
-    rich_text(spans)
-        .size(t.font_size)
-        .wrapping(Wrapping::None)
-        .into()
 }
 
 fn row_content<'a>(

@@ -10,8 +10,10 @@
 
 use std::ops::Range;
 
+use iced::advanced::widget::{Operation, Tree, tree};
+use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer};
 use iced::widget::{Column, container, responsive, scrollable, space};
-use iced::{Element, Length};
+use iced::{Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector};
 
 /// Rows built beyond each edge of the viewport, so fast scrolling does not
 /// show blank space for a frame.
@@ -124,26 +126,157 @@ fn virtual_rows<'a, M: 'a>(
     width: f32,
     pos: ScrollPos,
     render: impl Fn(usize) -> Element<'a, M>,
-) -> Column<'a, M> {
+) -> Element<'a, M> {
     let range = pos.visible(total, row_height);
-    let mut col = Column::new().width(Length::Fixed(width));
     #[allow(clippy::cast_precision_loss)]
     let px = |rows: usize| rows as f32 * row_height;
-    if range.start > 0 {
-        col = col.push(space().height(Length::Fixed(px(range.start))));
-    }
+    let mut children = Vec::with_capacity(range.len() + 2);
+    children.push(space().height(Length::Fixed(px(range.start))).into());
     for i in range.clone() {
-        col = col.push(
+        children.push(
             container(render(i))
                 .height(Length::Fixed(row_height))
                 .width(Length::Fixed(width))
-                .clip(true),
+                .clip(true)
+                .into(),
         );
     }
-    if range.end < total {
-        col = col.push(space().height(Length::Fixed(px(total - range.end))));
+    children.push(space().height(Length::Fixed(px(total - range.end))).into());
+    // Column::push skips zero-height spacers, but their slots are fixed.
+    let column = Column::from_vec(children).width(Length::Fixed(width));
+    Element::new(VisibleRows { range, column })
+}
+
+/// Keep each visible row's widget state (including text layout) attached
+/// to its row index as the viewport shifts. The column holds a spacer at
+/// each end, so actual rows always begin at child index one.
+struct VisibleRows<'a, M> {
+    range: Range<usize>,
+    column: Column<'a, M>,
+}
+
+struct VisibleRange(Range<usize>);
+
+fn reconcile_row_states(children: &mut Vec<Tree>, previous: &Range<usize>, next: &Range<usize>) {
+    struct NewRow;
+
+    let mut old = std::mem::take(children).into_iter();
+    let top = old.next().expect("top spacer");
+    let bottom = old.next_back().expect("bottom spacer");
+    let mut old = old.skip(next.start.saturating_sub(previous.start));
+    children.reserve(next.len() + 2);
+    children.push(top);
+    children.extend(next.clone().map(|index| {
+        if previous.contains(&index) {
+            old.next().expect("overlapping row")
+        } else {
+            Tree {
+                tag: tree::Tag::of::<NewRow>(),
+                ..Tree::empty()
+            }
+        }
+    }));
+    children.push(bottom);
+}
+
+impl<M> Widget<M, Theme, Renderer> for VisibleRows<'_, M> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<VisibleRange>()
     }
-    col
+
+    fn state(&self) -> tree::State {
+        tree::State::new(VisibleRange(self.range.clone()))
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        self.column.children()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        let previous = &mut tree.state.downcast_mut::<VisibleRange>().0;
+        if *previous != self.range {
+            reconcile_row_states(&mut tree.children, previous, &self.range);
+            *previous = self.range.clone();
+        }
+        self.column.diff(tree);
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.column.size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.column.layout(tree, renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.column.operate(tree, layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, M>,
+        viewport: &Rectangle,
+    ) {
+        self.column.update(
+            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.column
+            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.column
+            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
+        self.column
+            .overlay(tree, layout, renderer, viewport, translation)
+    }
 }
 
 /// Display width of `s` in monospace columns: East Asian wide characters
@@ -184,6 +317,42 @@ mod tests {
         let r = ScrollPos::default().visible(10_000, 20.0);
         assert_eq!(r.start, 0);
         assert!(r.end >= 70 && r.end < 200, "{r:?}");
+    }
+
+    #[test]
+    fn preserves_row_state_when_the_visible_range_moves_or_resizes() {
+        fn state(index: usize) -> Tree {
+            Tree {
+                state: tree::State::new(index),
+                ..Tree::empty()
+            }
+        }
+
+        let previous = 5..10;
+        for next in [3..8, 7..12, 6..9, 4..11, 20..24, 0..0] {
+            let mut children: Vec<_> = std::iter::once(state(0))
+                .chain(previous.clone().map(state))
+                .chain(std::iter::once(state(1)))
+                .collect();
+            reconcile_row_states(&mut children, &previous, &next);
+            assert_eq!(children.len(), next.len() + 2);
+            assert_eq!(*children[0].state.downcast_ref::<usize>(), 0);
+            for (index, child) in next.zip(&children[1..]) {
+                if previous.contains(&index) {
+                    assert_eq!(*child.state.downcast_ref::<usize>(), index);
+                } else {
+                    assert!(matches!(child.state, tree::State::None));
+                }
+            }
+            assert_eq!(
+                *children
+                    .last()
+                    .expect("bottom spacer")
+                    .state
+                    .downcast_ref::<usize>(),
+                1
+            );
+        }
     }
 
     #[test]

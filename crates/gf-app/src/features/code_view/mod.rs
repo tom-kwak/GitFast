@@ -1,6 +1,8 @@
 //! Shared read-only code dialog. Callers supply a path and a file version;
 //! this feature owns the loaded text, its viewport and its selection.
 
+#[cfg(test)]
+mod benchmark;
 mod comparison;
 pub(crate) mod find;
 mod render;
@@ -15,8 +17,8 @@ use gf_core::model::{FileChange, FileDiff, LineKind};
 use gf_git::{FILE_PREVIEW_LIMIT, FileVersion, Repository};
 use iced::advanced::mouse::{Click, click};
 use iced::mouse::Button;
-use iced::widget::{button, column, container, row};
-use iced::{Background, Border, Element, Length, Padding, Task};
+use iced::widget::{button, column, container, responsive, row};
+use iced::{Background, Border, Element, Length, Padding, Size, Task};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::feature::{Cx, Feature, Update};
@@ -24,8 +26,9 @@ use crate::features::context_menu::{Entry, Menu};
 use crate::highlight::{self, Spans};
 use crate::nav::{self, Key};
 use crate::theme::{Tokens, style};
+use crate::widgets::file_search::{Hit, Search, line_width};
 use crate::widgets::selectable_line::TextPointer;
-use crate::widgets::virtual_list::{ScrollPos, columns};
+use crate::widgets::virtual_list::ScrollPos;
 use crate::widgets::{self, colored, dim};
 
 const LIST_ID: &str = "gf-code-view";
@@ -234,7 +237,7 @@ pub struct State {
     comparison_labels: Option<[&'static str; 2]>,
     split: bool,
     active_pane: Pane,
-    find: find::Find,
+    find: Search<Pane>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -263,7 +266,7 @@ pub enum Message {
     FindClose,
     FindQuery(String),
     FindMove { back: bool },
-    FindResults(u64, u64, Arc<[find::Hit]>),
+    FindResults(u64, u64, Arc<[Hit<Pane>]>),
     Pressed(Pane, usize, TextPointer),
     Extend(Pane, usize, TextPointer),
     Dragged(Pane, usize, TextPointer),
@@ -308,7 +311,7 @@ impl State {
             comparison_labels,
             split: false,
             active_pane: Pane::After,
-            find: find::Find::default(),
+            find: Search::default(),
         };
         (state, task)
     }
@@ -431,10 +434,6 @@ fn row_height(t: &Tokens) -> f32 {
     (t.font_size * 1.6).round()
 }
 
-fn line_width(line: &str) -> usize {
-    columns(line) + 3 * line.bytes().filter(|&byte| byte == b'\t').count()
-}
-
 fn rescale_scroll(mut scroll: ScrollPos, from: usize, to: usize) -> ScrollPos {
     let position = (scroll.offset / (scroll.content - scroll.height).max(1.0)).clamp(0.0, 1.0);
     #[allow(clippy::cast_precision_loss)] // Scroll dimensions are pixel estimates.
@@ -497,9 +496,16 @@ impl Feature for State {
             }
             Message::Loaded(..) => {}
             Message::FindOpen => return self.open_find(),
-            Message::FindClose => self.close_find(),
-            Message::FindQuery(query) => return Update::task(self.find_query(query)),
-            Message::FindMove { back } => return self.next_match(back),
+            Message::FindClose => self.find.close(),
+            Message::FindQuery(query) => {
+                self.find.set_query(query);
+                return Update::task(self.search());
+            }
+            Message::FindMove { back } => {
+                if self.find.move_match(back) {
+                    return Update::output(Output::RevealMatch);
+                }
+            }
             Message::FindResults(request, generation, hits) => {
                 return self.find_results(request, generation, hits);
             }
@@ -611,7 +617,17 @@ impl Feature for State {
     }
 
     fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
-        let t = cx.tokens;
+        responsive(move |size| {
+            container(self.dialog(cx.tokens, size))
+                .center(Length::Fill)
+                .into()
+        })
+        .into()
+    }
+}
+
+impl State {
+    fn dialog<'a>(&'a self, t: &'a Tokens, size: Size) -> Element<'a, Message> {
         let version = match &self.version {
             FileVersion::WorkTree => "Working tree",
             FileVersion::Index => "Staged",
@@ -642,13 +658,7 @@ impl Feature for State {
             ));
         }
         if self.code().is_some() && !self.find_is_open() {
-            header = header.push(widgets::icon_button(
-                t,
-                "Find",
-                t.dim,
-                "Find in file · ⌘F",
-                Message::FindOpen,
-            ));
+            header = header.push(dim(t, "Find in file ⌘F"));
         }
         let header = header
             .push(widgets::icon_button(
@@ -694,37 +704,33 @@ impl Feature for State {
                 Document::Text(code) => self.lines(t, code),
             },
         };
-        let mut details =
-            row![widgets::mono(t, self.path.display().to_string()).width(Length::Fill)]
-                .spacing(8)
-                .align_y(iced::Alignment::Center);
+        let path = widgets::mono(t, self.path.display().to_string()).width(Length::Fill);
+        let mut content = column![header, path].spacing(8);
         if self.find_is_open() {
-            details = details.push(
-                container(self.find_bar(t))
-                    .width(Length::Fill)
-                    .max_width(440),
-            );
+            content = content.push(self.find.view(
+                t,
+                find::FIELD_ID,
+                Message::FindQuery,
+                |back| Message::FindMove { back },
+                Message::FindClose,
+            ));
         }
-        let dialog = container(
-            column![
-                header,
-                details,
+        let width_ratio = if self.comparison_labels.is_some() {
+            0.96
+        } else {
+            0.94
+        };
+        container(
+            content.push(
                 container(body)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding(1)
                     .style(crate::theme::style::panel(t)),
-            ]
-            .spacing(8),
+            ),
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .max_width(if self.comparison_labels.is_some() {
-            1600
-        } else {
-            1200
-        })
-        .max_height(840)
+        .width(size.width * width_ratio)
+        .height(size.height * 0.94)
         .padding(Padding::from([10, 14]))
         .style(move |_| container::Style {
             text_color: Some(t.fg),
@@ -735,8 +741,8 @@ impl Feature for State {
                 radius: 0.0.into(),
             },
             ..container::Style::default()
-        });
-        container(dialog).padding(24).center(Length::Fill).into()
+        })
+        .into()
     }
 }
 
@@ -758,7 +764,7 @@ mod tests {
             comparison_labels: None,
             split: false,
             active_pane: Pane::After,
-            find: find::Find::default(),
+            find: Search::default(),
         }
     }
 
