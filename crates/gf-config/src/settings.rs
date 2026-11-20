@@ -36,6 +36,10 @@ pub struct AppearanceSettings {
     /// Width of the file list beside the diff, in character columns; the
     /// same in HISTORY and WORKING TREE. Dragged with the divider.
     pub list_cols: f32,
+    /// Directory tree in the working tree's changes list.
+    pub working_tree_dirs: bool,
+    /// Directory tree in the history commit's file list.
+    pub history_file_dirs: bool,
 }
 
 /// Default width of the file list beside the diff (character columns).
@@ -50,6 +54,8 @@ impl Default for AppearanceSettings {
             show_refs: true,
             show_history: true,
             list_cols: DEFAULT_LIST_COLS,
+            working_tree_dirs: false,
+            history_file_dirs: false,
         }
     }
 }

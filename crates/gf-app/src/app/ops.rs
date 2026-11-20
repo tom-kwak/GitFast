@@ -18,7 +18,7 @@ use crate::features::dialog::Dialog;
 use crate::features::diff_view::DiffSource;
 use crate::features::toolbar;
 use crate::git_actions;
-use crate::repo_tab::{History, Parts, RepoTab, Snapshot, Touched};
+use crate::repo_tab::{History, Parts, RepoTab, Snapshot, StageUpdate, Touched};
 use crate::undo::Step;
 use crate::widgets::format::truncate;
 use gf_git::{Capture, HeadMode, Scope};
@@ -231,6 +231,11 @@ impl App {
             return Task::none();
         };
         tab.loading = false;
+        if tab.stage_update == Some(StageUpdate::Refreshing)
+            && !(tab.queued.status || tab.queued.refs || tab.queued.config)
+        {
+            tab.stage_update = None;
+        }
         // The refresh asked for is done once no read is left queued.
         let refreshed = tab.queued.is_empty() && std::mem::take(&mut tab.refresh_asked);
         let touched = std::mem::take(&mut tab.loading_touched);
@@ -403,6 +408,27 @@ impl App {
         )
     }
 
+    /// Keep the commit box and checkboxes in sync while writing the index.
+    pub(super) fn stage_op<F, Fut>(
+        &mut self,
+        label: impl Into<String>,
+        record: Option<Record>,
+        f: F,
+    ) -> Task<Message>
+    where
+        F: FnOnce(Repository) -> Fut,
+        Fut: Future<Output = gf_core::Result<()>> + Send + 'static,
+    {
+        let Some(tab) = self.active_tab_mut() else {
+            return Task::none();
+        };
+        if tab.stage_update.is_some() || tab.commit.is_committing() {
+            return Task::none();
+        }
+        tab.stage_update = Some(StageUpdate::Running);
+        self.op_recorded(label, OpKind::Stage, record, f)
+    }
+
     /// Network operation with live progress and cancel (Esc).
     pub(super) fn sync_op<F, Fut>(
         &mut self,
@@ -526,6 +552,11 @@ impl App {
         result: Result<(), String>,
         recorded: bool,
     ) -> Task<Message> {
+        if matches!(kind, OpKind::Stage | OpKind::Commit)
+            && let Some(tab) = self.tab_mut(id)
+        {
+            tab.stage_update = Some(StageUpdate::Refreshing);
+        }
         if matches!(kind, OpKind::Fetch | OpKind::Push { .. } | OpKind::Pull(_)) {
             self.sync = None;
         }

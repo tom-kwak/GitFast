@@ -2,6 +2,7 @@
 //! of styling raw iced widgets, so the look stays consistent.
 
 pub mod file_search;
+pub mod file_tree;
 pub mod format;
 pub mod graph_canvas;
 pub mod memo;
@@ -238,6 +239,29 @@ pub fn accent_panel<'a, M: 'a>(
     .into()
 }
 
+/// Accent panel with a compact control beside the title.
+pub fn accent_panel_with_action<'a, M: 'a>(
+    t: &'a Tokens,
+    title: String,
+    accent: Color,
+    action: Element<'a, M>,
+    content: Element<'a, M>,
+) -> Element<'a, M> {
+    let header = row![
+        colored(t, format!("━ {title} "), accent)
+            .size(t.small())
+            .width(Length::Fill),
+        action,
+    ]
+    .align_y(iced::Alignment::Center);
+    container(column![header, content].spacing(4))
+        .padding(Padding::from([4, 6]))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::accent_panel(t, accent))
+        .into()
+}
+
 /// Thin full-height strip standing in for a closed side panel: an arrow
 /// and the panel name written vertically; clicking it reopens the panel.
 pub fn collapsed_strip<'a, M: Clone + 'a>(
@@ -356,11 +380,23 @@ pub fn file_entry<'a, M: 'a>(
     path: &std::path::Path,
     counts: EntryCounts,
 ) -> iced::widget::Row<'a, M> {
-    use iced::widget::text::Wrapping;
     let name = path.file_name().map_or_else(
         || path.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
+    file_entry_named(t, code, code_color, name, path.parent(), counts)
+}
+
+/// File row with a custom name, useful for showing a rename in a tree.
+pub fn file_entry_named<'a, M: 'a>(
+    t: &Tokens,
+    code: &str,
+    code_color: Color,
+    name: String,
+    directory: Option<&std::path::Path>,
+    counts: EntryCounts,
+) -> iced::widget::Row<'a, M> {
+    use iced::widget::text::Wrapping;
     let mut line = row![
         colored(t, code.to_owned(), code_color),
         mono(t, name).wrapping(Wrapping::None),
@@ -382,7 +418,7 @@ pub fn file_entry<'a, M: 'a>(
         }
         None => {}
     }
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+    if let Some(dir) = directory.filter(|d| !d.as_os_str().is_empty()) {
         line = line.push(dim(t, dir.display().to_string()).wrapping(Wrapping::None));
     }
     line

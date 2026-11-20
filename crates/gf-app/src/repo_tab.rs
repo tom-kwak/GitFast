@@ -259,6 +259,8 @@ pub fn push_remote(upstream: Option<&str>, remotes: &[Remote]) -> Option<String>
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub status: StatusReport,
+    /// Indices into status entries and their directory layout.
+    pub change_files: Arc<crate::features::changes::FileLists>,
     /// Whether the loaded status has changes other than ignored files.
     pub has_changes: bool,
     pub branches: Arc<[Branch]>,
@@ -481,6 +483,7 @@ impl Snapshot {
         if let Some(status) = status {
             let status = status.map_err(err)?;
             head_changed = status.head != snap.status.head;
+            snap.change_files = Arc::new(crate::features::changes::FileLists::new(&status.entries));
             snap.status = status;
             snap.has_changes = snap
                 .status
@@ -698,6 +701,12 @@ fn count_files(
     (counts, stamps)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageUpdate {
+    Running,
+    Refreshing,
+}
+
 #[derive(Debug)]
 pub struct RepoTab {
     pub repo: Repository,
@@ -732,6 +741,7 @@ pub struct RepoTab {
     /// matching diff (commit changes / local changes).
     pub code_view: diff_view::Role,
     pub commit: commit_box::State,
+    pub stage_update: Option<StageUpdate>,
     /// Blame shown instead of the commit changes while open.
     pub blame_request: u64,
     pub history_request: u64,
@@ -792,6 +802,7 @@ impl RepoTab {
             graph_checked: false,
             remote_tags_listed: std::collections::HashSet::new(),
             commit: commit_box::State::default(),
+            stage_update: None,
         }
     }
 

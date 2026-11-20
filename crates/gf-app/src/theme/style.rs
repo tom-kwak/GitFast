@@ -3,7 +3,7 @@
 //! pressed states so every clickable thing visibly reacts (PLAN.md §4-2).
 
 use gf_core::model::LineKind;
-use iced::widget::{button, container, text_editor, text_input};
+use iced::widget::{button, checkbox, container, text_editor, text_input};
 use iced::{Background, Border, Color, Theme};
 
 use super::Tokens;
@@ -13,6 +13,24 @@ fn square(color: Color, width: f32) -> Border {
         color,
         width,
         radius: 0.0.into(),
+    }
+}
+
+/// The staged checkbox uses the same accent colors as the change list.
+pub fn staged_checkbox(t: &Tokens) -> impl Fn(&Theme, checkbox::Status) -> checkbox::Style + '_ {
+    move |_, status| {
+        let color = match status {
+            checkbox::Status::Active { is_checked: true } => t.added(),
+            checkbox::Status::Hovered { .. } => t.accent(),
+            checkbox::Status::Disabled { .. } => t.border,
+            checkbox::Status::Active { is_checked: false } => t.dim,
+        };
+        checkbox::Style {
+            background: Background::Color(t.bg),
+            icon_color: color,
+            border: square(color, 1.0),
+            text_color: None,
+        }
     }
 }
 
