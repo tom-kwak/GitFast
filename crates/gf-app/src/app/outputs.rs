@@ -1316,7 +1316,7 @@ impl App {
                 );
                 lines.push("refs: ⌘-click marks branches · ⇧-click or ⇧↑/↓ selects a range · . then d reviews deletion".into());
                 lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());
-                lines.push("file viewer ⌘F find · Enter / ⌘G next · ⇧Enter / ⌘⇧G previous · Esc closes search".into());
+                lines.push("file viewer / blame ⌘F find · Enter / ⌘G next · ⇧Enter / ⌘⇧G previous · Esc closes search".into());
                 lines.push(
                     "click a ref for its history · click diff lines to stage just those".into(),
                 );

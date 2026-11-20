@@ -11,14 +11,19 @@ curl -fsSL https://raw.githubusercontent.com/tom-kwak/GitFast/main/scripts/insta
 ```
 
 It installs the latest release as `/Applications/gf.app` (or `~/Applications`) and
-opens without a Gatekeeper prompt. Run it again to update. gf needs `git`
-(Xcode Command Line Tools or Homebrew).
+opens without a Gatekeeper prompt. Run it again to update.
+
+gf requires **Git 2.43.1 or later**. Check your version with `git --version`.
+Git is available through Xcode Command Line Tools or Homebrew.
 
 ## What's new in 0.0.4
 
-- Press **⌘F** to find text in file previews and full-file comparisons. Matches
-  are highlighted in inline and side-by-side views. Use **⌘G** or **⌘⇧G** to
-  jump between matches.
+- Press **⌘F** to find text in file previews, full-file comparisons, and Blame.
+  Matches are highlighted and scrolled into view. Use **⌘G** or **⌘⇧G** to jump
+  between matches.
+- File previews scroll more smoothly through long lines, including in side-by-side
+  mode. The preview grows with the app window, and the search field has its own
+  row below the filename.
 - The welcome screen has a text-art gf logo that follows the active theme.
   The crab moves from side to side.
 - The macOS app has a new icon in Finder and the Dock.
