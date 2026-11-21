@@ -555,6 +555,7 @@ fn commit_row<'a>(
     graph_px: f32,
     summary_cols: usize,
     badges: Option<&Vec<Badge>>,
+    unpushed: bool,
     selected: bool,
 ) -> Element<'a, Message> {
     let mut line = Row::new()
@@ -566,6 +567,25 @@ fn commit_row<'a>(
         line = line.push(graph_canvas::row_graph(g, colors, t.bg, graph_px));
     }
     line = line.push(colored(t, c.id.short(), t.warning()).wrapping(Wrapping::None));
+    let marker = container(
+        colored(
+            t,
+            if unpushed { widgets::PUSH_ARROW } else { " " },
+            t.success(),
+        )
+        .wrapping(Wrapping::None),
+    )
+    .width(Length::Fixed(t.cols(1)));
+    line = line.push(if unpushed {
+        widgets::tip(
+            t,
+            marker,
+            "Reachable from the checked-out branch, but not from any local remote-tracking branch."
+                .into(),
+        )
+    } else {
+        marker.into()
+    });
 
     let line_text = summary_line(c, badges, summary_cols);
     let hint = row_hint(c, badges, line_text.cut);
@@ -993,10 +1013,11 @@ impl Feature for State {
             (lanes, widest)
         });
         let graph_px = graph_canvas::width_for(lanes);
-        // graph, hash, author, date + gaps and padding: all but the summary.
-        let fixed_px = graph_px + t.cols(7 + AUTHOR_COLS + DATE_COLS) + 4.0 * 6.0 + 12.0;
+        // graph, hash, marker, author, date + gaps and padding: all but the summary.
+        let fixed_px = graph_px + t.cols(8 + AUTHOR_COLS + DATE_COLS) + 5.0 * 6.0 + 12.0;
         let selected = self.selected.as_ref();
         let marked = &self.marked;
+        let unpushed = &snap.unpushed_commits;
         let is_selected = move |id: &Oid| {
             if marked.is_empty() {
                 selected == Some(id)
@@ -1027,6 +1048,7 @@ impl Feature for State {
                         graph_px,
                         summary_cols,
                         decor.get(&c.id),
+                        unpushed.contains(&c.id),
                         is_selected(&c.id),
                     )
                 },

@@ -165,6 +165,47 @@ async fn sync_push_runs_quietly_for_a_fast_forward() {
 }
 
 #[tokio::test]
+async fn history_marks_unpushed_commits_until_push() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["commit", "--allow-empty", "-m", "outgoing"]);
+    })
+    .await;
+    let outgoing: gf_core::model::Oid = ui.fixture.repo.head().parse().expect("oid");
+    let arrows: Vec<_> = ui
+        .targets()
+        .into_iter()
+        .filter(|target| target.label == "⇡")
+        .collect();
+    assert_eq!(arrows.len(), 1, "only the unpublished commit is marked");
+
+    let _ = ui.click_at(&arrows[0], mouse::Button::Left).await;
+    assert_eq!(
+        ui.app.active_tab().expect("tab").history.selected(),
+        Some(&outgoing),
+        "the row remains selectable through the marker"
+    );
+
+    let _ = ui.send(Message::Toolbar(toolbar::Message::Push)).await;
+    let tab = ui.app.active_tab().expect("tab");
+    assert!(
+        tab.snapshot
+            .as_ref()
+            .expect("snapshot")
+            .unpushed_commits
+            .is_empty()
+    );
+    assert_eq!(
+        tab.history.selected(),
+        Some(&outgoing),
+        "push keeps selection"
+    );
+    assert!(
+        !ui.targets().iter().any(|target| target.label == "⇡"),
+        "the marker disappears after push"
+    );
+}
+
+#[tokio::test]
 async fn sync_push_confirms_a_force_rule_before_contacting_the_remote() {
     let mut ui = Ui::open_with(|repo| {
         repo.git(&["commit", "--allow-empty", "-m", "outgoing"]);

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gf_core::model::{Branch, Commit, Oid, Remote, StashEntry, StatusEntry, StatusReport, Tag};
@@ -276,6 +276,9 @@ pub struct Snapshot {
     /// For a branch without upstream: commits no remote has yet (what a
     /// first push would publish). `None` when the branch has an upstream.
     pub unpublished: Option<u32>,
+    /// Commits reachable from the current branch that no remote-tracking
+    /// branch contains.
+    pub unpushed_commits: Arc<HashSet<Oid>>,
     /// Local tags the push remote does not have (see [`PendingTags`]);
     /// `None` when gf does not know that remote's tags yet.
     pub pending_tags: Option<PendingTags>,
@@ -541,6 +544,19 @@ impl Snapshot {
                 // watch their private git dir, so a shared remote ref can
                 // move without a refs event in this tab.
                 snap.unpublished = repo.unpushed_count().await.ok();
+            }
+        }
+        if refs_part || head_changed || repo.handle().git_dir != repo.cwd().join(".git") {
+            if snap.status.head.branch.is_some() && snap.status.head.oid.is_some() {
+                snap.unpushed_commits = match repo.unpushed(None).await {
+                    Ok(commits) => Arc::new(commits.into_iter().collect()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not load unpushed commits");
+                        Arc::default()
+                    }
+                };
+            } else {
+                snap.unpushed_commits = Arc::default();
             }
         }
 
@@ -1020,6 +1036,10 @@ mod tests {
             Arc::ptr_eq(&saved.history, &first.history),
             "history reused"
         );
+        assert!(
+            Arc::ptr_eq(&saved.unpushed_commits, &first.unpushed_commits),
+            "unpushed commits reused"
+        );
         assert!(!saved.loaded.history);
         assert!(Arc::ptr_eq(&saved.badges, &first.badges));
         assert!(Arc::ptr_eq(&saved.branches, &first.branches));
@@ -1047,6 +1067,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unpushed_commits_refresh_when_refs_or_head_change() {
+        let repo = gf_test_support::TestRepo::new();
+        repo.write("base.txt", "base\n");
+        let base = repo.commit_all("base");
+        let current_branch = repo.git(&["branch", "--show-current"]);
+        repo.git(&["branch", "side"]);
+        repo.git(&["switch", "side"]);
+        repo.write("side.txt", "side\n");
+        let side = repo.commit_all("side");
+        repo.git(&["switch", current_branch.as_str()]);
+        repo.write("main.txt", "main\n");
+        let current = repo.commit_all("current");
+
+        let runner = gf_git::GitRunner::new()
+            .with_cleared_env()
+            .with_env(repo.env());
+        let r = Repository::open(repo.path(), runner).await.expect("open");
+        let load = |prev, parts| Snapshot::load(r.clone(), prev, parts, false, 100);
+        let oid = |id: &str| id.parse::<Oid>().expect("oid");
+
+        let first = load(None, Parts::RELOAD).await.expect("first load");
+        assert_eq!(first.unpushed_commits.len(), 2);
+        assert!(first.unpushed_commits.contains(&oid(&base)));
+        assert!(first.unpushed_commits.contains(&oid(&current)));
+        assert!(
+            !first.unpushed_commits.contains(&oid(&side)),
+            "commits only on another local branch are not included"
+        );
+
+        repo.git(&["update-ref", "refs/remotes/origin/main", base.as_str()]);
+        repo.git(&[
+            "update-ref",
+            "refs/remotes/upstream/shared",
+            current.as_str(),
+        ]);
+        let all_remote_refs = load(Some(first), Parts::ALL)
+            .await
+            .expect("remote refs added");
+        assert!(
+            all_remote_refs.unpushed_commits.is_empty(),
+            "commits on any remote-tracking branch are excluded"
+        );
+
+        repo.git(&["update-ref", "refs/remotes/upstream/shared", base.as_str()]);
+        let moved_remote_ref = load(Some(all_remote_refs), Parts::ALL)
+            .await
+            .expect("remote ref moved");
+        assert_eq!(moved_remote_ref.status.head.oid, Some(oid(&current)));
+        assert_eq!(moved_remote_ref.unpushed_commits.len(), 1);
+        assert!(moved_remote_ref.unpushed_commits.contains(&oid(&current)));
+
+        repo.git(&["switch", "side"]);
+        let switched_branch = load(Some(moved_remote_ref), Parts::STATUS)
+            .await
+            .expect("branch switched");
+        assert_eq!(switched_branch.unpushed_commits.len(), 1);
+        assert!(switched_branch.unpushed_commits.contains(&oid(&side)));
+        assert!(!switched_branch.unpushed_commits.contains(&oid(&current)));
+
+        repo.git(&["switch", "--detach", base.as_str()]);
+        let detached = load(Some(switched_branch), Parts::STATUS)
+            .await
+            .expect("detached HEAD");
+        assert!(detached.status.head.branch.is_none());
+        assert!(detached.unpushed_commits.is_empty());
+
+        repo.git(&["switch", "--orphan", "empty"]);
+        let unborn = load(Some(detached), Parts::STATUS)
+            .await
+            .expect("unborn branch");
+        assert!(unborn.status.head.oid.is_none());
+        assert!(unborn.unpushed_commits.is_empty());
+    }
+
+    #[tokio::test]
     async fn linked_worktree_sees_shared_remote_refs_on_a_status_refresh() {
         let main = gf_test_support::TestRepo::new();
         main.write("a", "first");
@@ -1068,11 +1163,13 @@ mod tests {
             .await
             .expect("initial load");
         assert_eq!(first.unpublished, Some(1));
+        assert_eq!(first.unpushed_commits.len(), 1);
         main.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
         let next = Snapshot::load(repo, Some(first), Parts::STATUS, false, 100)
             .await
             .expect("status");
         assert_eq!(next.unpublished, Some(0));
+        assert!(next.unpushed_commits.is_empty());
     }
 
     #[tokio::test]

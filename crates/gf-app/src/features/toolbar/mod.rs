@@ -9,7 +9,7 @@ use iced::{Element, Length, Padding};
 
 use crate::repo_tab::{RepoTab, Snapshot};
 use crate::theme::{Tokens, style};
-use crate::widgets::{self, colored, dim};
+use crate::widgets::{self, PUSH_ARROW, colored, dim};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -44,7 +44,7 @@ impl Default for SyncCounts {
         Self {
             pull_label: "⇣ pull".into(),
             pull_hint: "fetch and integrate the upstream branch".into(),
-            push_label: "⇡ push".into(),
+            push_label: format!("{PUSH_ARROW} push"),
             push_hint: "upload your commits to the upstream branch".into(),
         }
     }
@@ -72,10 +72,10 @@ pub fn sync_counts(
             n => Some(format!("{n} tags")),
         };
         match (commits, tags) {
-            (None, None) => "⇡ push".to_owned(),
-            (Some(c), None) => format!("⇡ push ({c})"),
-            (None, Some(t)) => format!("⇡ push ({t})"),
-            (Some(c), Some(t)) => format!("⇡ push ({c} +{t})"),
+            (None, None) => format!("{PUSH_ARROW} push"),
+            (Some(c), None) => format!("{PUSH_ARROW} push ({c})"),
+            (None, Some(t)) => format!("{PUSH_ARROW} push ({t})"),
+            (Some(c), Some(t)) => format!("{PUSH_ARROW} push ({c} +{t})"),
         }
     };
     let tag_hint = if tags == 0 {
@@ -105,7 +105,7 @@ pub fn sync_counts(
         (None, None) => SyncCounts {
             pull_label: "⇣ pull (—)".into(),
             pull_hint: "HEAD is detached — check out a branch to pull".into(),
-            push_label: "⇡ push (—)".into(),
+            push_label: format!("{PUSH_ARROW} push (—)"),
             push_hint: "HEAD is detached — create a branch to push".into(),
         },
     }

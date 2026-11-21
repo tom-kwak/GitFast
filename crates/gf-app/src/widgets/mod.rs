@@ -16,6 +16,8 @@ use iced::{Color, Element, Length, Padding};
 
 use crate::theme::{Tokens, style};
 
+pub(crate) const PUSH_ARROW: &str = "⇡";
+
 /// Monospace text at the base size.
 pub fn mono<'a>(t: &Tokens, s: impl text::IntoFragment<'a>) -> Text<'a> {
     text(s).size(t.font_size)
