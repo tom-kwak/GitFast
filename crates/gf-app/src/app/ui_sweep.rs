@@ -978,15 +978,13 @@ async fn working_tree_defaults_to_list_and_tree_folds_all_files_in_a_folder() {
     assert!(ui.shows("[ Tree ]"));
     assert!(!ui.shows("STAGED ("));
     let _ = ui.click("[ Tree ]").await;
-    assert!(ui.shows("/staged.txt"));
-    assert!(ui.shows("/lib.rs"));
-    assert!(
-        (file_status_x(&ui, "/b.txt", "A") - file_status_x(&ui, "/staged.txt", "A")).abs() < 1.0
-    );
+    assert!(ui.shows("staged.txt"));
+    assert!(ui.shows("lib.rs"));
+    assert!((file_status_x(&ui, "b.txt", "A") - file_status_x(&ui, "staged.txt", "A")).abs() < 1.0);
     let _ = ui.click("src").await;
-    assert!(!ui.shows("/staged.txt"));
-    assert!(!ui.shows("/lib.rs"));
-    assert!(ui.shows("/b.txt"));
+    assert!(!ui.shows("staged.txt"));
+    assert!(!ui.shows("lib.rs"));
+    assert!(ui.shows("b.txt"));
     let moved = ui
         .app
         .active_tab()
@@ -1035,9 +1033,9 @@ async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() 
             .iter()
             .any(|label| label == "moved" || label == "src")
     );
-    assert!(ui.shows("/lib.rs → lib_new.rs"));
+    assert!(ui.shows("lib.rs → lib_new.rs"));
     assert!(
-        (file_status_x(&ui, "/b.txt", "A") - file_status_x(&ui, "/lib.rs → lib_new.rs", "R")).abs()
+        (file_status_x(&ui, "b.txt", "A") - file_status_x(&ui, "lib.rs → lib_new.rs", "R")).abs()
             < 1.0
     );
     let _ = ui.click("lib.rs → lib_new.rs").await;
@@ -1426,7 +1424,7 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     let mut ui = Ui::open().await;
     let revision = ui.fixture.repo.git(&["rev-parse", "HEAD~2"]);
     let _ = ui.click("first").await;
-    let clicked = ui.right_click("/lib.rs").await;
+    let clicked = ui.right_click("lib.rs").await;
     assert!(!clicked.repo_changed);
     assert!(ui.shows("file history"));
     assert!(ui.shows("blame"));
@@ -1435,7 +1433,7 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     assert_eq!(copied.clipboard, 1);
     assert_eq!(ui.flash(), "copied src/lib.rs");
 
-    let _ = ui.right_click("/lib.rs").await;
+    let _ = ui.right_click("lib.rs").await;
     let opened = ui.click("view file").await;
     assert!(!opened.repo_changed);
     assert!(ui.app.code_dialog.is_some());
@@ -1449,7 +1447,7 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     let close = code_close_target(&ui);
     let _ = ui.click_at(&close, mouse::Button::Left).await;
     assert!(ui.app.code_dialog.is_none());
-    let _ = ui.right_click("/lib.rs").await;
+    let _ = ui.right_click("lib.rs").await;
     let _ = ui.click("file history").await;
     assert!(ui.shows("first"));
     assert!(!ui.shows("third"));
@@ -1495,7 +1493,7 @@ async fn history_files_preview_uses_the_parent_for_a_deleted_file() {
     })
     .await;
     let _ = ui.click("remove gone").await;
-    let _ = ui.right_click("/gone.txt").await;
+    let _ = ui.right_click("gone.txt").await;
     let _ = ui.click("view file").await;
     assert!(ui.app.code_dialog.is_some());
     assert!(ui.shows("FILE CONTENTS"));
@@ -2448,7 +2446,7 @@ async fn blame_truncates_a_wide_author_to_the_column_width() {
     let _ = ui.click("wide author").await;
     assert!(!ui.shows("[ file history ]"));
     assert!(!ui.shows("[ blame ]"));
-    let _ = ui.right_click("/b.txt").await;
+    let _ = ui.right_click("b.txt").await;
     let _ = ui.click("blame").await;
     assert!(ui.targets().iter().any(|t| t.label == "가나다라마…"));
 }

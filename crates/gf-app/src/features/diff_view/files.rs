@@ -99,15 +99,12 @@ impl State {
         let color = widgets::change_color(t, code.chars().next().unwrap_or(' '));
         let counts = self.diff.entry_counts[i];
         let line = if let Some(depth) = depth {
-            let name = path
-                .file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy();
+            let name = widgets::file_name_label(path);
             let name = original_name(file).map_or_else(
-                || name.to_string(),
+                || name.clone(),
                 |old| format!("{} → {name}", old.to_string_lossy()),
             );
-            let entry = widgets::file_entry_details(t, format!("/{name}"), None, counts);
+            let entry = widgets::file_entry_details(t, name, None, counts);
             row![
                 colored(t, code, color),
                 iced::widget::space().width(file_tree::indent(t, depth)),

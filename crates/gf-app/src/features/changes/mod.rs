@@ -429,13 +429,10 @@ impl State {
         let path = e.path();
         let counts = entry_counts(lines, path, group);
         let mut line = if let Some(depth) = depth {
-            let name = path
-                .file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy();
+            let name = widgets::file_name_label(path);
             row![
                 space().width(file_tree::indent(t, depth)),
-                widgets::file_entry_details(t, format!("/{name}"), None, counts),
+                widgets::file_entry_details(t, name, None, counts),
             ]
             .align_y(iced::Alignment::Center)
         } else {

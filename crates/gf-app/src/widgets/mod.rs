@@ -373,6 +373,13 @@ pub fn change_color(t: &Tokens, code: char) -> Color {
     }
 }
 
+pub(crate) fn file_name_label(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
 pub fn file_entry<'a, M: 'a>(
     t: &Tokens,
     code: &str,
@@ -380,13 +387,9 @@ pub fn file_entry<'a, M: 'a>(
     path: &std::path::Path,
     counts: EntryCounts,
 ) -> iced::widget::Row<'a, M> {
-    let name = path.file_name().map_or_else(
-        || path.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
     row![
         colored(t, code.to_owned(), code_color),
-        file_entry_details(t, name, path.parent(), counts),
+        file_entry_details(t, file_name_label(path), path.parent(), counts),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center)
@@ -459,6 +462,20 @@ pub fn highlighted_line<'a, M: 'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_name_label_uses_last_path_component() {
+        assert_eq!(file_name_label(std::path::Path::new("lib.rs")), "lib.rs");
+        assert_eq!(
+            file_name_label(std::path::Path::new("src/lib.rs")),
+            "lib.rs"
+        );
+    }
+
+    #[test]
+    fn file_name_label_falls_back_to_path_without_last_component() {
+        assert_eq!(file_name_label(std::path::Path::new("/")), "/");
+    }
 
     #[test]
     fn entry_counts_text() {
