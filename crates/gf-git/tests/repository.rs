@@ -40,6 +40,51 @@ async fn opens_from_root_and_subdirectory() {
 }
 
 #[tokio::test]
+async fn commit_file_paths_use_the_requested_tree_and_ignore_worktree_files() {
+    let repo = TestRepo::new();
+    repo.write("shared.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["switch", "-q", "-c", "feature"]);
+    repo.write("line\nbreak.txt", "newline path\n");
+    let feature = repo.commit_all("feature paths");
+
+    repo.git(&["switch", "-q", "main"]);
+    repo.git(&["rm", "-q", "shared.txt"]);
+    repo.write("main-only.txt", "main\n");
+    let main = repo.commit_all("main paths");
+    repo.write("untracked.txt", "not committed\n");
+
+    let git = open(&repo).await;
+    let feature_oid = feature.parse().unwrap();
+    let feature_paths = git.commit_file_paths(&feature_oid).await.unwrap();
+    assert!(feature_paths.contains(&PathBuf::from("shared.txt")));
+    assert!(feature_paths.contains(&PathBuf::from("line\nbreak.txt")));
+    assert!(!feature_paths.contains(&PathBuf::from("main-only.txt")));
+    assert!(!feature_paths.contains(&PathBuf::from("untracked.txt")));
+
+    let main_paths = git.commit_file_paths(&main.parse().unwrap()).await.unwrap();
+    assert!(main_paths.contains(&PathBuf::from("main-only.txt")));
+    assert!(!main_paths.contains(&PathBuf::from("shared.txt")));
+    assert!(!main_paths.contains(&PathBuf::from("line\nbreak.txt")));
+}
+
+#[tokio::test]
+async fn commit_file_paths_handle_empty_trees_and_invalid_commits() {
+    let repo = TestRepo::new();
+    let empty = repo.commit_all("empty");
+    let git = open(&repo).await;
+
+    assert!(
+        git.commit_file_paths(&empty.parse().unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let missing = "0000000000000000000000000000000000000000".parse().unwrap();
+    assert!(git.commit_file_paths(&missing).await.is_err());
+}
+
+#[tokio::test]
 async fn opens_bare_repository() {
     let bare = TestRepo::new_bare();
     let repo = open(&bare).await;

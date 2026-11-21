@@ -56,6 +56,11 @@ macro_rules! gix_then_cli {
 
 impl Repository {
     // ---- LogOps (gix first)
+    /// Paths present in the tree of `commit`.
+    pub async fn commit_file_paths(&self, commit: &Oid) -> Result<Vec<PathBuf>> {
+        self.cli.commit_file_paths(commit).await
+    }
+
     /// Commit history.
     pub async fn log(&self, query: &LogQuery) -> Result<Vec<Commit>> {
         gix_then_cli!(self, LogOps::log(query))

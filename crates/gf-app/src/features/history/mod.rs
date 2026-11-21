@@ -10,6 +10,10 @@
 //! to the end, or moving the selection onto the last row, asks the app for
 //! the next page ([`Output::LoadMore`]).
 
+pub mod file_search;
+mod find_file;
+pub mod search;
+
 use std::sync::Arc;
 
 use gf_core::model::{Commit, Oid};
@@ -42,6 +46,8 @@ pub struct State {
     /// Revision being shown; `None` = the snapshot's history.
     revision: Option<String>,
     pub file_revision: Option<(std::path::PathBuf, Option<Oid>)>,
+    /// Previous History revision when a file was picked from Find File.
+    file_history_origin: Option<Option<String>>,
     /// History for `revision`, loaded by the app.
     data: Option<Arc<History>>,
     /// The commit checked out, as of the last update (menus).
@@ -68,6 +74,8 @@ pub struct State {
     widths: Memo<(memo::Id, memo::Id), (usize, usize)>,
     /// A commit to select and scroll to once a longer history arrives.
     reveal_pending: Option<Oid>,
+    search: Option<search::State>,
+    file_search: file_search::State,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +89,7 @@ pub enum Message {
     Checkout,
     CopyId,
     BackToHead,
+    RestoreFileHistory,
     ToggleDetails,
     Act(CommitAction),
     /// Shift-click: everything between the anchor and this commit.
@@ -95,6 +104,9 @@ pub enum Message {
     OpenActions,
     /// Load the next page of history.
     LoadMore,
+    /// Open the file search from the history toolbar.
+    FindFile,
+    Search(search::Message),
 }
 
 /// Operations on several selected commits.
@@ -136,6 +148,7 @@ pub enum Output {
     CheckoutDetached(Oid),
     CopyId(Oid),
     BackToHead,
+    RestoreFileHistory,
     Act(CommitAction, Oid),
     /// Several commits selected: show their combined changes. Newest first.
     ShowRange(Vec<Commit>),
@@ -154,6 +167,8 @@ pub enum Output {
 impl State {
     /// Starts showing `revision`; the app loads it and calls [`Self::loaded`].
     pub fn set_revision(&mut self, revision: Option<String>) {
+        self.close_file_search();
+        self.file_history_origin = None;
         self.loading = revision.is_some();
         self.revision = revision;
         self.file_revision = None;
@@ -172,6 +187,23 @@ impl State {
         self.set_revision(Some(label.clone()));
         self.file_revision = Some((path, start));
         label
+    }
+
+    pub fn set_file_revision_from_search(
+        &mut self,
+        path: std::path::PathBuf,
+        start: Oid,
+        origin: Option<String>,
+    ) -> String {
+        let label = self.set_file_revision(path, Some(start));
+        self.file_history_origin = Some(origin);
+        label
+    }
+
+    pub fn restore_file_history(&mut self) -> Option<Option<String>> {
+        let origin = self.file_history_origin.take()?;
+        self.set_revision(origin.clone());
+        Some(origin)
     }
 
     /// How many commits to load for the snapshot's history.
@@ -444,6 +476,7 @@ impl State {
         self.revision.as_deref()
     }
 
+    /// The commit whose tree should supply file-search candidates.
     pub fn loaded(&mut self, revision: &str, data: Arc<History>) {
         // Ignore results for a revision the user already navigated away from.
         if self.revision.as_deref() == Some(revision) {
@@ -462,6 +495,7 @@ impl State {
         self.loading = false;
         self.revision = None;
         self.file_revision = None;
+        self.file_history_origin = None;
     }
 
     fn history<'a>(&'a self, snap: &'a Snapshot) -> Option<&'a History> {
@@ -921,11 +955,19 @@ impl Feature for State {
                 selected.map_or_else(Update::none, |o| Update::output(Output::CopyId(o)))
             }
             Message::BackToHead => Update::output(Output::BackToHead),
+            Message::RestoreFileHistory => Update::output(Output::RestoreFileHistory),
             Message::Act(action) => {
                 selected.map_or_else(Update::none, |o| Update::output(Output::Act(action, o)))
             }
             Message::ToggleDetails => {
                 self.show_details = !self.show_details;
+                Update::none()
+            }
+            Message::FindFile => Update::none(),
+            Message::Search(message) => {
+                if let Some(search) = self.search.as_mut() {
+                    search.update(message);
+                }
                 Update::none()
             }
         }
@@ -934,15 +976,33 @@ impl Feature for State {
     fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
         let t = cx.tokens;
         let all = cx.all_branches;
-        let scope = match &self.revision {
-            Some(r) => r.rsplit('/').next().unwrap_or(r).to_owned(),
-            None if all => "all branches".into(),
-            None => "HEAD".into(),
+        let scope = if let (Some((path, _)), Some(origin)) =
+            (&self.file_revision, &self.file_history_origin)
+        {
+            let base = origin
+                .as_deref()
+                .map(|r| r.rsplit('/').next().unwrap_or(r))
+                .unwrap_or("HEAD");
+            format!("{base} · {}", path.display())
+        } else {
+            match &self.revision {
+                Some(r) => r.rsplit('/').next().unwrap_or(r).to_owned(),
+                None if all => "all branches".into(),
+                None => "HEAD".into(),
+            }
         };
         let mut toolbar = row![dim(t, format!("showing: {scope}")).width(Length::Fill)]
             .spacing(4)
             .align_y(iced::Alignment::Center);
-        if self.revision.is_some() {
+        if self.file_history_origin.is_some() {
+            toolbar = toolbar.push(widgets::icon_button(
+                t,
+                "×",
+                t.dim,
+                "return to previous history",
+                Message::RestoreFileHistory,
+            ));
+        } else if self.revision.is_some() {
             toolbar = toolbar.push(widgets::text_button(
                 t,
                 "back to all",
@@ -961,6 +1021,14 @@ impl Feature for State {
                 Some(Message::ToggleAllBranches),
             ));
         }
+        if self.search.is_none() && self.file_revision.is_none() {
+            toolbar = toolbar.push(widgets::tip(
+                t,
+                widgets::text_button(t, "Find", Some("⌘F"), Some(Message::FindFile)),
+                "⌘F: search the files in this history's latest commit, then show the commits that changed one"
+                    .into(),
+            ));
+        }
 
         let panel = |title: String, content: Element<'a, Message>| {
             widgets::panel_with_action(
@@ -973,6 +1041,14 @@ impl Feature for State {
         let Some(snap) = cx.snapshot else {
             return panel("HISTORY".into(), widgets::empty_hint(t, "loading…"));
         };
+        // The search owns the panel even while a branch history loads: its
+        // field has the keyboard.
+        if self.search.is_some() {
+            return panel(
+                "HISTORY".into(),
+                column![toolbar, self.file_search_view(t)].into(),
+            );
+        }
         if self.loading {
             return panel(
                 "HISTORY".into(),

@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
 use gf_core::Result;
-use gf_core::model::Commit;
+use gf_core::model::{Commit, Oid};
 
 use crate::backend::{CliBackend, LogOps};
 use crate::cli::parse::log::{LOG_ARGS, parse_log};
+use crate::cli::parse::{bytes_to_path, split_records};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LogOrder {
@@ -132,7 +133,19 @@ impl LogQuery {
     }
 }
 
+fn parse_tree_paths(out: &[u8]) -> Vec<PathBuf> {
+    split_records(out, 0).map(bytes_to_path).collect()
+}
+
 impl CliBackend {
+    /// Paths present in the tree of `commit`, preserving native path bytes.
+    pub(crate) async fn commit_file_paths(&self, commit: &Oid) -> Result<Vec<PathBuf>> {
+        let out = self
+            .read(self.command(["ls-tree", "-r", "-z", "--name-only", commit.as_str()]))
+            .await?;
+        Ok(parse_tree_paths(&out))
+    }
+
     /// Row of `oid` in `query`'s history (0 = first), reading ids only and
     /// stopping at it; `None` when the walk never reaches it. The query's
     /// limit, skip and filters are ignored: plain histories only.
@@ -196,6 +209,20 @@ impl LogOps for CliBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn tree_path_records_preserve_non_utf8_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let paths = parse_tree_paths(b"line\nbreak.txt\0non-utf8-\xff.txt\0");
+        assert_eq!(paths[0], PathBuf::from("line\nbreak.txt"));
+        assert_eq!(
+            paths[1],
+            PathBuf::from(OsStr::from_bytes(b"non-utf8-\xff.txt"))
+        );
+    }
 
     #[test]
     fn builds_filtered_args() {

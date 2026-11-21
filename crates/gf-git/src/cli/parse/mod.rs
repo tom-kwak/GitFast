@@ -13,4 +13,5 @@ pub mod remote;
 pub mod status;
 mod util;
 
+pub(crate) use util::split_records;
 pub use util::{bytes_to_path, unquote_c_path};

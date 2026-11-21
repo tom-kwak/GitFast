@@ -206,6 +206,436 @@ async fn history_marks_unpushed_commits_until_push() {
 }
 
 #[tokio::test]
+async fn history_file_search_uses_the_head_or_selected_branch_tree() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.write("branch-only.txt", "branch version\n");
+        repo.commit_all("branch file");
+        repo.git(&["branch", "search-branch"]);
+        repo.write("head-only.txt", "head version\n");
+        repo.commit_all("head file");
+    })
+    .await;
+
+    let _ = ui.click("Find ⌘F").await;
+    let _ = ui
+        .send(Message::History(history::Message::Search(
+            history::search::Message::QueryChanged("head-only".into()),
+        )))
+        .await;
+    let history = &ui.app.active_tab().expect("tab").history;
+    assert_eq!(
+        history.file_search_state().label_for_hit(0),
+        Some("head-only.txt")
+    );
+    assert_eq!(history.file_search_state().label_for_hit(1), None);
+    let _ = ui
+        .send(Message::History(history::Message::Search(
+            history::search::Message::Dismiss,
+        )))
+        .await;
+
+    let _ = ui
+        .send(Message::Sidebar(crate::features::sidebar::Message::Select(
+            crate::features::sidebar::Selection::Ref("refs/heads/search-branch".into()),
+        )))
+        .await;
+    assert_eq!(
+        ui.app.active_tab().expect("tab").history.revision(),
+        Some("refs/heads/search-branch")
+    );
+    let _ = ui.click("Find ⌘F").await;
+    let _ = ui
+        .send(Message::History(history::Message::Search(
+            history::search::Message::QueryChanged("head-only".into()),
+        )))
+        .await;
+    let history = &ui.app.active_tab().expect("tab").history;
+    assert_eq!(history.file_search_state().label_for_hit(0), None);
+    assert_eq!(
+        history.file_search_state().status_text(),
+        None,
+        "an empty filtered result is ready, not a loading state"
+    );
+    assert_eq!(history.search_state().expect("search").selected(), None);
+
+    let _ = ui
+        .send(Message::History(history::Message::Search(
+            history::search::Message::QueryChanged("branch-only".into()),
+        )))
+        .await;
+    assert_eq!(
+        ui.app
+            .active_tab()
+            .expect("tab")
+            .history
+            .file_search_state()
+            .label_for_hit(0),
+        Some("branch-only.txt")
+    );
+    let _ = ui.send(esc()).await;
+    assert!(
+        !ui.app
+            .active_tab()
+            .expect("tab")
+            .history
+            .file_search_is_open()
+    );
+    assert_eq!(
+        ui.app.active_tab().expect("tab").history.revision(),
+        Some("refs/heads/search-branch"),
+        "esc only closes the search"
+    );
+}
+
+fn esc() -> Message {
+    Message::KeyInput(focus::KeyInput {
+        shortcut: Some(Shortcut::Escape),
+        menu: None,
+        nav: None,
+    })
+}
+
+fn enter() -> Message {
+    Message::KeyInput(focus::KeyInput {
+        shortcut: Some(Shortcut::Enter),
+        menu: None,
+        nav: Some(crate::nav::Nav::plain(crate::nav::Key::Enter)),
+    })
+}
+
+fn search_query(query: &str) -> Message {
+    Message::History(history::Message::Search(
+        history::search::Message::QueryChanged(query.into()),
+    ))
+}
+
+fn loaded_summaries(ui: &Ui) -> Vec<String> {
+    ui.app
+        .active_tab()
+        .expect("tab")
+        .history
+        .loaded_commits()
+        .expect("file history loaded")
+        .iter()
+        .map(|c| c.summary.clone())
+        .collect()
+}
+
+fn renamed_file_repo(repo: &TestRepo) {
+    repo.write("src/old.rs", "fn old() {}\n");
+    repo.commit_all("add old");
+    repo.git(&["mv", "src/old.rs", "src/core.rs"]);
+    repo.commit_all("rename core");
+    repo.write("src/core.rs", "fn core() {}\n");
+    repo.write("docs/notes.md", "notes\n");
+    repo.commit_all("edit core and docs");
+    repo.write("tests/core.rs", "#[test] fn t() {}\n");
+    repo.commit_all("tests core");
+    repo.write("unrelated.txt", "x\n");
+    repo.commit_all("unrelated");
+}
+
+#[tokio::test]
+async fn history_file_search_opens_the_picked_files_history_and_restores_the_scope() {
+    let mut ui = Ui::open_with(renamed_file_repo).await;
+    let head = ui.fixture.repo.head();
+
+    let _ = ui.click("Find ⌘F").await;
+    let _ = ui.send(search_query("src/core")).await;
+    let state = ui
+        .app
+        .active_tab()
+        .expect("tab")
+        .history
+        .file_search_state();
+    assert_eq!(state.label_for_hit(0), Some("src/core.rs"));
+    let _ = ui.send(enter()).await;
+
+    let tab = ui.app.active_tab().expect("tab");
+    assert!(!tab.history.file_search_is_open());
+    assert_eq!(
+        tab.history.searched_file(),
+        Some(std::path::Path::new("src/core.rs"))
+    );
+    let (_, start) = tab.history.file_revision.clone().expect("file history");
+    assert_eq!(start.map(|o| o.to_string()), Some(head));
+    assert!(ui.shows("showing: HEAD · src/core.rs"));
+    assert_eq!(
+        loaded_summaries(&ui),
+        ["edit core and docs", "rename core", "add old"],
+        "only commits that changed the file, following its rename"
+    );
+
+    // docs/notes.md sorts first in the diff; the searched file opens.
+    let edit = ui
+        .app
+        .active_tab()
+        .expect("tab")
+        .history
+        .loaded_commits()
+        .expect("loaded")[0]
+        .id
+        .clone();
+    let _ = ui
+        .send(Message::History(history::Message::Select(edit.clone())))
+        .await;
+    let diff = ui
+        .app
+        .active_tab()
+        .expect("tab")
+        .diff(diff_view::Role::Commit);
+    assert_eq!(diff.current_path(), Some(PathBuf::from("src/core.rs")));
+
+    // Already open: picks the file again without reloading.
+    let _ = ui
+        .send(Message::CommitDiff(diff_view::Message::SelectFile(0)))
+        .await;
+    let _ = ui
+        .send(Message::History(history::Message::Select(edit)))
+        .await;
+    let diff = ui
+        .app
+        .active_tab()
+        .expect("tab")
+        .diff(diff_view::Role::Commit);
+    assert_eq!(diff.current_path(), Some(PathBuf::from("src/core.rs")));
+
+    let stale = ui.app.active_tab().expect("tab").history_request;
+    let label = ui
+        .app
+        .active_tab()
+        .expect("tab")
+        .history
+        .revision()
+        .expect("file label")
+        .to_owned();
+    let _ = ui
+        .send(Message::History(history::Message::RestoreFileHistory))
+        .await;
+    let tab = ui.app.active_tab().expect("tab");
+    assert_eq!(tab.history.revision(), None);
+    assert_eq!(tab.history.searched_file(), None);
+    let id = tab.repo.id();
+    let _ = ui
+        .send(Message::HistoryLoaded(id, stale, label, Err("late".into())))
+        .await;
+    assert_eq!(ui.app.active_tab().expect("tab").history.revision(), None);
+    assert!(ui.shows("Find ⌘F"));
+}
+
+#[tokio::test]
+async fn history_file_search_scrolls_the_files_list_to_the_picked_file_once() {
+    let mut ui = Ui::open_with(|repo| {
+        for i in 0..40 {
+            repo.write(format!("dir{}/file{i:02}.txt", i % 4), "x\n");
+        }
+        repo.commit_all("many files");
+        repo.write("dir3/file39.txt", "y\n");
+        repo.commit_all("touch the last file");
+    })
+    .await;
+    let _ = ui.click("Find ⌘F").await;
+    let _ = ui.send(search_query("dir3/file39")).await;
+    let _ = ui.send(enter()).await;
+    let first = ui.app.active_tab().expect("tab").history.loaded_commits();
+    assert_eq!(first.expect("loaded").len(), 2);
+    let commit = first.expect("loaded")[1].id.clone();
+
+    // Opening the older commit loads its diff: the picked file is chosen
+    // and the list is scrolled to it exactly once.
+    let _ = ui
+        .send(Message::History(history::Message::Select(commit.clone())))
+        .await;
+    let diff = ui
+        .app
+        .active_tab()
+        .expect("tab")
+        .diff(diff_view::Role::Commit);
+    assert_eq!(diff.current_path(), Some(PathBuf::from("dir3/file39.txt")));
+    let diff = ui
+        .app
+        .active_tab_mut()
+        .expect("tab")
+        .diff_mut(diff_view::Role::Commit);
+    assert!(!diff.take_reveal(), "the scroll request was consumed");
+
+    // Already open: picking it again scrolls again, without a reload.
+    let _ = ui
+        .send(Message::History(history::Message::Select(commit)))
+        .await;
+    let diff = ui
+        .app
+        .active_tab_mut()
+        .expect("tab")
+        .diff_mut(diff_view::Role::Commit);
+    assert!(!diff.take_reveal(), "nothing is left pending");
+}
+
+#[tokio::test]
+async fn history_file_search_on_a_branch_keeps_its_tip_and_returns_to_it() {
+    let mut ui = Ui::open_with(|repo| {
+        renamed_file_repo(repo);
+        repo.git(&["branch", "pinned"]);
+    })
+    .await;
+    let branch_tip = ui.fixture.repo.head();
+    let _ = ui
+        .send(Message::Sidebar(crate::features::sidebar::Message::Select(
+            crate::features::sidebar::Selection::Ref("refs/heads/pinned".into()),
+        )))
+        .await;
+    let _ = ui.click("Find ⌘F").await;
+    let _ = ui.send(search_query("src/core")).await;
+    let _ = ui
+        .send(Message::History(history::Message::Search(
+            history::search::Message::Activate(0),
+        )))
+        .await;
+    assert!(ui.shows("showing: pinned · src/core.rs"));
+    let (_, start) = ui
+        .app
+        .active_tab()
+        .expect("tab")
+        .history
+        .file_revision
+        .clone()
+        .expect("file history");
+    assert_eq!(start.map(|o| o.to_string()), Some(branch_tip));
+
+    let _ = ui
+        .send(Message::History(history::Message::RestoreFileHistory))
+        .await;
+    let tab = ui.app.active_tab().expect("tab");
+    assert_eq!(tab.history.revision(), Some("refs/heads/pinned"));
+    assert!(
+        tab.history.loaded_commits().is_some(),
+        "branch history reloaded"
+    );
+}
+
+#[tokio::test]
+async fn history_file_search_dismiss_and_stale_rows_do_not_open_a_file() {
+    let mut ui = Ui::open_with(renamed_file_repo).await;
+    let _ = ui.click("Find ⌘F").await;
+    let _ = ui.send(search_query("zzz-no-such-file")).await;
+    assert!(ui.shows("no files match"));
+    let _ = ui.send(enter()).await;
+    let _ = ui
+        .send(Message::History(history::Message::Search(
+            history::search::Message::Activate(0),
+        )))
+        .await;
+    let tab = ui.app.active_tab().expect("tab");
+    assert!(tab.history.file_search_is_open());
+    assert_eq!(tab.history.revision(), None);
+    let _ = ui.send(esc()).await;
+    assert!(
+        !ui.app
+            .active_tab()
+            .expect("tab")
+            .history
+            .file_search_is_open()
+    );
+    assert_eq!(ui.app.active_tab().expect("tab").history.revision(), None);
+}
+
+fn command_f() -> Message {
+    Message::KeyInput(focus::KeyInput {
+        shortcut: Some(Shortcut::FindInFile),
+        menu: None,
+        nav: None,
+    })
+}
+
+#[tokio::test]
+async fn command_f_opens_the_history_find_from_anywhere_in_the_main_window() {
+    let mut ui = Ui::open_with(renamed_file_repo).await;
+    assert!(ui.shows("Find ⌘F"));
+
+    // From the working tree: History comes to the front, hidden or not.
+    ui.app.settings.appearance.show_history = false;
+    let _ = ui.send(Message::CodeView(diff_view::Role::Local)).await;
+    let _ = ui.send(command_f()).await;
+    let tab = ui.app.active_tab().expect("tab");
+    assert!(tab.history.file_search_is_open());
+    assert_eq!(tab.code_view, diff_view::Role::Commit);
+    assert!(ui.app.settings.appearance.show_history);
+
+    // Already open: ⌘F keeps what was typed.
+    let _ = ui.send(search_query("src/core")).await;
+    let _ = ui.send(command_f()).await;
+    let history = &ui.app.active_tab().expect("tab").history;
+    assert!(history.file_search_is_open());
+    assert_eq!(
+        history.file_search_state().label_for_hit(0),
+        Some("src/core.rs")
+    );
+
+    // Esc closes it, ⌘F opens it again.
+    let _ = ui.send(esc()).await;
+    assert!(
+        !ui.app
+            .active_tab()
+            .expect("tab")
+            .history
+            .file_search_is_open()
+    );
+    let _ = ui.send(command_f()).await;
+    assert!(
+        ui.app
+            .active_tab()
+            .expect("tab")
+            .history
+            .file_search_is_open()
+    );
+}
+
+#[tokio::test]
+async fn command_f_in_a_file_history_explains_how_to_search_again() {
+    let mut ui = Ui::open_with(renamed_file_repo).await;
+    let _ = ui.send(command_f()).await;
+    let _ = ui.send(search_query("src/core")).await;
+    let _ = ui.send(enter()).await;
+    assert!(ui.shows("showing: HEAD · src/core.rs"));
+
+    let _ = ui.send(command_f()).await;
+    assert!(
+        !ui.app
+            .active_tab()
+            .expect("tab")
+            .history
+            .file_search_is_open()
+    );
+    assert!(ui.flash().contains("close this file history"));
+}
+
+#[tokio::test]
+async fn history_file_search_closes_when_switching_tabs() {
+    let mut ui = Ui::open().await;
+    let _ = ui.click("Find ⌘F").await;
+    assert!(
+        ui.app
+            .active_tab()
+            .expect("first tab")
+            .history
+            .file_search_is_open()
+    );
+
+    let other = Fixture::new();
+    let path = other.repo.path().to_path_buf();
+    ui.others.push(other);
+    let _ = ui.send(Message::Open(path)).await;
+    assert_eq!(ui.app.active, 1);
+    assert!(!ui.app.tabs[0].history.file_search_is_open());
+
+    let _ = ui.click("Find ⌘F").await;
+    assert!(ui.app.tabs[1].history.file_search_is_open());
+    let _ = ui.send(Message::Tabs(tabs::Message::Select(0))).await;
+    assert_eq!(ui.app.active, 0);
+    assert!(!ui.app.tabs[1].history.file_search_is_open());
+}
+
+#[tokio::test]
 async fn sync_push_confirms_a_force_rule_before_contacting_the_remote() {
     let mut ui = Ui::open_with(|repo| {
         repo.git(&["commit", "--allow-empty", "-m", "outgoing"]);

@@ -1041,13 +1041,42 @@ impl App {
         path: std::path::PathBuf,
         revision: Option<Oid>,
     ) -> Task<Message> {
+        self.open_file_history_with_origin(path, revision, None)
+    }
+
+    pub(super) fn open_file_history_from_search(
+        &mut self,
+        path: std::path::PathBuf,
+        revision: Oid,
+        origin: Option<String>,
+    ) -> Task<Message> {
+        self.open_file_history_with_origin(path, Some(revision), Some(origin))
+    }
+
+    fn open_file_history_with_origin(
+        &mut self,
+        path: std::path::PathBuf,
+        revision: Option<Oid>,
+        origin: Option<Option<String>>,
+    ) -> Task<Message> {
         self.expand_history();
         let Some(tab) = self.active_tab_mut() else {
             return Task::none();
         };
         tab.code_view = Role::Commit;
-        tab.sidebar.clear_selection();
-        let key = tab.history.set_file_revision(path, revision);
+        // Find File keeps the branch selected: `×` goes back to it.
+        if origin.is_none() {
+            tab.sidebar.clear_selection();
+        }
+        let key = if let Some(origin) = origin {
+            let Some(start) = revision else {
+                return Task::none();
+            };
+            tab.history
+                .set_file_revision_from_search(path, start, origin)
+        } else {
+            tab.history.set_file_revision(path, revision)
+        };
         super::ops::load_history(tab, key)
     }
 }

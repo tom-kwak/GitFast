@@ -14,6 +14,7 @@ use iced::{Border, Element, Task};
 use super::{App, Message, Shortcut};
 use crate::features::context_menu;
 use crate::features::diff_view::Role;
+use crate::features::history::{self, search};
 use crate::features::prompt::PROMPT_ID;
 use crate::features::sidebar::REFS_FILTER_ID;
 use crate::features::{repo_picker, tab_list};
@@ -100,6 +101,12 @@ impl App {
         if self.picker.is_some() {
             return operation::focus(repo_picker::FILTER_ID);
         }
+        if self
+            .active_tab()
+            .is_some_and(|tab| tab.history.file_search_is_open())
+        {
+            return operation::focus(search::INPUT_ID);
+        }
         if self.tab_list.is_some() {
             return operation::focus(tab_list::FILTER_ID);
         }
@@ -181,6 +188,13 @@ impl App {
         }
         if self.dialog.is_none() && self.picker.is_some() {
             return self.picker_key(k);
+        }
+        if self.dialog.is_none()
+            && self
+                .active_tab()
+                .is_some_and(|tab| tab.history.file_search_is_open())
+        {
+            return self.history_file_search_key(k);
         }
         if self.dialog.is_none() && self.tab_list.is_some() {
             return self.tab_list_key(k);
@@ -373,6 +387,53 @@ impl App {
                 self.update(Message::TabList(tab_list::Message::Pick(i)))
             }
             Some(s @ (Shortcut::TabList | Shortcut::Open | Shortcut::Quit)) => self.on_shortcut(s),
+            _ => Task::none(),
+        }
+    }
+
+    fn history_file_search_key(&mut self, k: KeyInput) -> Task<Message> {
+        let row_height = search::row_height(&self.tokens);
+        if let Some(nav) = k.nav {
+            return match nav.key {
+                Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
+                    let Some(tab) = self.tabs.get_mut(self.active) else {
+                        return Task::none();
+                    };
+                    let Some(state) = tab.history.search_state_mut() else {
+                        return Task::none();
+                    };
+                    if state.move_to(nav.key, row_height) {
+                        state.scroll_to_selected(row_height)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Key::Enter => {
+                    let selected = self
+                        .active_tab()
+                        .and_then(|tab| tab.history.search_state())
+                        .and_then(search::State::selected);
+                    selected.map_or_else(Task::none, |row| {
+                        self.update(Message::History(history::Message::Search(
+                            search::Message::Activate(row),
+                        )))
+                    })
+                }
+                _ => Task::none(),
+            };
+        }
+        match k.shortcut {
+            Some(Shortcut::Escape) => self.update(Message::History(history::Message::Search(
+                search::Message::Dismiss,
+            ))),
+            Some(
+                s @ (Shortcut::CloseTab | Shortcut::TabList | Shortcut::Open | Shortcut::Quit),
+            ) => {
+                let dismiss = self.update(Message::History(history::Message::Search(
+                    search::Message::Dismiss,
+                )));
+                Task::batch([dismiss, self.on_shortcut(s)])
+            }
             _ => Task::none(),
         }
     }

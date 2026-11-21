@@ -6,7 +6,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gf_core::model::RepoId;
+use gf_core::model::{Oid, RepoId};
 use gf_git::{CancellationToken, GitCommand, PullMode, Repository, RunOptions};
 use iced::Task;
 use iced::futures::SinkExt;
@@ -16,6 +16,8 @@ use super::{App, Checkout, CheckoutPhase, Message, OpKind};
 use crate::features::command_log::NoteKind;
 use crate::features::dialog::Dialog;
 use crate::features::diff_view::DiffSource;
+use crate::features::history::file_search::{self, FilterJob, Work};
+use crate::features::history::search;
 use crate::features::toolbar;
 use crate::git_actions;
 use crate::repo_tab::{History, Parts, RepoTab, Snapshot, StageUpdate, Touched};
@@ -101,6 +103,162 @@ fn write_commit_graph(repo: Repository) -> Task<Message> {
         }
     })
     .discard()
+}
+
+fn file_search_work(id: RepoId, repo: Repository, work: Work) -> Task<Message> {
+    match work {
+        Work::Load(request) => {
+            let oid = request.oid;
+            let request = request.request;
+            let result_oid = oid.clone();
+            Task::perform(
+                async move {
+                    let paths = repo
+                        .commit_file_paths(&oid)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    tokio::task::spawn_blocking(move || {
+                        Arc::new(file_search::Index::prepare(paths))
+                    })
+                    .await
+                    .map_err(|error| error.to_string())
+                },
+                move |result| {
+                    Message::FileSearchPathsLoaded(id, request, result_oid.clone(), result)
+                },
+            )
+        }
+        Work::Filter(job) => file_search_filter(id, job),
+    }
+}
+
+fn file_search_filter(id: RepoId, job: FilterJob) -> Task<Message> {
+    let request = job.request;
+    let generation = job.generation;
+    let oid = job.oid.clone();
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || job.index.filter(&job.query))
+                .await
+                .unwrap_or_default()
+        },
+        move |hits| Message::FileSearchFiltered(id, request, generation, oid.clone(), hits),
+    )
+}
+
+impl App {
+    pub(super) fn open_file_search(&mut self) -> Task<Message> {
+        let Some(tab) = self.active_tab_mut() else {
+            return Task::none();
+        };
+        let oid = tab
+            .snapshot
+            .as_ref()
+            .and_then(|snap| tab.history.file_search_base(snap));
+        let repo = tab.repo.clone();
+        let id = repo.id();
+        let work = tab.history.open_file_search(oid);
+        let task = work.map_or_else(Task::none, |work| file_search_work(id, repo, work));
+        Task::batch([task, iced::widget::operation::focus(search::INPUT_ID)])
+    }
+
+    /// ⌘F in the main window: the History panel's Find. Brings History to
+    /// the front; with the search already open it only takes the keyboard.
+    pub(super) fn find_file_shortcut(&mut self) -> Task<Message> {
+        let Some(tab) = self.active_tab() else {
+            return Task::none();
+        };
+        if tab.history.file_search_is_open() {
+            return iced::widget::operation::focus(search::INPUT_ID);
+        }
+        // A file history has no tree of its own to search: `×` goes back first.
+        if tab.history.file_revision.is_some() {
+            self.flash(
+                NoteKind::Info,
+                "close this file history (×) to find another file",
+            );
+            return Task::none();
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.code_view = crate::features::diff_view::Role::Commit;
+        }
+        self.expand_history();
+        self.open_file_search()
+    }
+
+    pub(super) fn query_file_search(&mut self, query: String) -> Task<Message> {
+        let Some(tab) = self.active_tab_mut() else {
+            return Task::none();
+        };
+        let id = tab.repo.id();
+        tab.history
+            .file_search_query(query)
+            .map_or_else(Task::none, |job| file_search_filter(id, job))
+    }
+
+    pub(super) fn close_file_search(&mut self) -> Task<Message> {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.history.close_file_search();
+        }
+        self.restore_focus()
+    }
+
+    /// Mouse and ⏎ both land here: opens the picked file's history from
+    /// the commit its candidates were read from.
+    pub(super) fn activate_file_search(&mut self, row: usize) -> Task<Message> {
+        let Some(tab) = self.active_tab_mut() else {
+            return Task::none();
+        };
+        let Some((path, oid)) = tab.history.file_search_selection(row) else {
+            return Task::none();
+        };
+        let origin = tab.history.revision().map(str::to_owned);
+        let open = self.open_file_history_from_search(path, oid, origin);
+        Task::batch([open, self.restore_focus()])
+    }
+
+    pub(super) fn file_search_paths_loaded(
+        &mut self,
+        id: RepoId,
+        request: u64,
+        oid: Oid,
+        result: Result<Arc<file_search::Index>, String>,
+    ) -> Task<Message> {
+        if self.active_tab().map(|tab| tab.repo.id()) != Some(id) {
+            return Task::none();
+        }
+        let Some(tab) = self.tab_mut(id) else {
+            return Task::none();
+        };
+        let Some(job) = tab.history.file_search_paths_loaded(request, &oid, result) else {
+            return Task::none();
+        };
+        file_search_filter(id, job)
+    }
+
+    pub(super) fn file_search_filtered(
+        &mut self,
+        id: RepoId,
+        request: u64,
+        generation: u64,
+        oid: Oid,
+        hits: Vec<file_search::Hit>,
+    ) -> Task<Message> {
+        let Some(tab) = self.tab_mut(id) else {
+            return Task::none();
+        };
+        let completion = tab
+            .history
+            .file_search_filter_finished(request, generation, &oid, hits);
+        let next = completion
+            .next
+            .map_or_else(Task::none, |job| file_search_filter(id, job));
+        if completion.accepted {
+            // New rows start at the top, like the highlight.
+            return Task::batch([next, search::State::scroll_to_top()]);
+        }
+        next
+    }
 }
 
 pub fn load_history(tab: &mut RepoTab, revision: String) -> Task<Message> {

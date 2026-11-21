@@ -1,7 +1,7 @@
 //! Reactions to feature outputs: each feature asks, the app decides what
 //! git work to run (directly, or after a confirmation dialog).
 
-use gf_core::model::{Branch, RefKind};
+use gf_core::model::{Branch, Oid, RefKind};
 use gf_git::{CommitOptions, FileVersion, PullMode, StashOptions};
 use iced::Task;
 use iced::widget::operation;
@@ -33,6 +33,53 @@ impl App {
             return Task::none();
         }
         load_diff(tab, source)
+    }
+
+    /// A commit picked in History. In a file history opened from Find
+    /// File, the diff shows that file first when the commit touches it
+    /// under the same path (old or new side).
+    pub(super) fn show_history_commit(&mut self, oid: Oid) -> Task<Message> {
+        let preferred = self
+            .active_tab()
+            .and_then(|tab| tab.history.searched_file())
+            .map(std::path::Path::to_path_buf);
+        let source = DiffSource::Commit(oid);
+        let Some(preferred) = preferred else {
+            return self.show_diff(source);
+        };
+        let load = self.show_diff(source);
+        let Some(tab) = self.active_tab_mut() else {
+            return load;
+        };
+        let id = tab.repo.id();
+        let role = diff_view::Role::Commit;
+        let pick = tab
+            .diff_mut(role)
+            .prefer_file(preferred)
+            .map(move |done| Message::DiffFinished(id, role, done));
+        // Already open: no load will finish, so scroll now.
+        let reveal = self.reveal_picked_file(id, role);
+        Task::batch([load, pick, reveal])
+    }
+
+    /// Scrolls the FILES list to the file Find File picked, once.
+    pub(super) fn reveal_picked_file(
+        &mut self,
+        id: gf_core::model::RepoId,
+        role: diff_view::Role,
+    ) -> Task<Message> {
+        let wanted = role == diff_view::Role::Commit
+            && self
+                .tab_mut(id)
+                .is_some_and(|tab| tab.diff_mut(role).take_reveal());
+        if !wanted {
+            return Task::none();
+        }
+        let tree = self.settings.appearance.history_file_dirs;
+        let tokens = self.tokens.clone();
+        self.tab_mut(id).map_or_else(Task::none, |tab| {
+            tab.diff_mut(role).reveal_selected(&tokens, tree)
+        })
     }
 
     pub(super) fn open_code_view(
@@ -453,7 +500,7 @@ impl App {
     pub(super) fn on_history(&mut self, out: history::Output) -> Task<Message> {
         match out {
             history::Output::Collapse => self.on_shortcut(Shortcut::ToggleHistory),
-            history::Output::ShowCommit(oid) => self.show_diff(DiffSource::Commit(oid)),
+            history::Output::ShowCommit(oid) => self.show_history_commit(oid),
             history::Output::ToggleAllBranches => {
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
@@ -473,6 +520,17 @@ impl App {
                         let id = tab.repo.id();
                         self.request_parts(id, Parts::HISTORY)
                     }
+                }
+            }
+            history::Output::RestoreFileHistory => {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                // A file-history page still on its way must not land.
+                tab.history_request = tab.history_request.wrapping_add(1);
+                match tab.history.restore_file_history() {
+                    Some(Some(revision)) => load_history(tab, revision),
+                    _ => Task::none(),
                 }
             }
             history::Output::BackToHead => {
@@ -505,8 +563,7 @@ impl App {
             history::Output::Act(action, oid) => self.on_commit_action(action, oid),
             history::Output::ShowRange(commits) => self.show_range(commits),
             history::Output::Menu { show, menu } => {
-                let show =
-                    show.map_or_else(Task::none, |oid| self.show_diff(DiffSource::Commit(oid)));
+                let show = show.map_or_else(Task::none, |oid| self.show_history_commit(oid));
                 let open = self.open_menu(menu.map(Message::History));
                 Task::batch([show, open])
             }
@@ -1342,6 +1399,7 @@ impl App {
                 lines.push(
                     "file lists: T switches list / tree · Enter toggles a focused folder".into(),
                 );
+                lines.push("history ⌘F finds a file · ↑/↓ move · Enter shows the commits that changed it · Esc closes".into());
                 lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());
                 lines.push("file viewer / blame ⌘F find · Enter / ⌘G next · ⇧Enter / ⌘⇧G previous · Esc closes search".into());
                 lines.push(

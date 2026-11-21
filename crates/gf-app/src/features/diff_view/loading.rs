@@ -1,5 +1,6 @@
 //! A panel owns the order of its reads. Highlights belong to the exact
 //! displayed diff, including while its replacement is still loading.
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gf_git::{DiffOptions, Repository};
@@ -45,8 +46,46 @@ impl State {
         Task::none()
     }
 
+    /// Shows the file whose old or new path is exactly `path`: now when the
+    /// diff is already here (no git call), else once the loading one
+    /// arrives. No such file keeps the default.
+    pub fn prefer_file(&mut self, path: PathBuf) -> Task<Completion> {
+        if self.loading {
+            self.preferred = Some(path);
+            return Task::none();
+        }
+        self.preferred = None;
+        match self.file_at(&path) {
+            Some(file) => self.pick_file(file),
+            None => Task::none(),
+        }
+    }
+
+    fn file_at(&self, path: &Path) -> Option<usize> {
+        self.diff.files.iter().position(|f| {
+            f.new_path.as_deref() == Some(path) || f.old_path.as_deref() == Some(path)
+        })
+    }
+
+    fn pick_file(&mut self, file: usize) -> Task<Completion> {
+        self.reveal_pending = true;
+        if file == self.file {
+            return Task::none();
+        }
+        self.file = file;
+        self.clear_selection();
+        self.scroll = ScrollPos::default();
+        self.folders.focused = None;
+        if self.spans.contains_key(&file) {
+            Task::none()
+        } else {
+            self.highlight_file(file)
+        }
+    }
+
     /// Starts showing `source`; the app loads it and calls [`Self::loaded`].
     pub(super) fn show(&mut self, source: DiffSource) -> u64 {
+        self.preferred = None;
         if self.source.as_ref() != Some(&source) {
             self.clear_selection();
             self.diff = Arc::default();
@@ -107,11 +146,17 @@ impl State {
                 }
                 self.diff = diff;
                 self.error = None;
+                if let Some(file) = self.preferred.take().and_then(|p| self.file_at(&p)) {
+                    return self.pick_file(file);
+                }
                 if self.file != 0 {
                     return self.highlight_file(self.file);
                 }
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => {
+                self.preferred = None;
+                self.error = Some(e);
+            }
         }
         Task::none()
     }

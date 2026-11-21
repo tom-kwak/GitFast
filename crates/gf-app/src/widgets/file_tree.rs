@@ -94,6 +94,23 @@ impl Tree {
         Self(rows)
     }
 
+    /// Row of file `index` and the folder paths above it, outermost first.
+    pub fn locate(&self, index: usize) -> Option<(usize, Vec<&Path>)> {
+        let at = self
+            .0
+            .iter()
+            .position(|row| matches!(row, Row::File { index: i, .. } if *i == index))?;
+        let folders = self.0[..at]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| match row {
+                Row::Folder { path, end, .. } if i < at && at < *end => Some(path.as_path()),
+                _ => None,
+            })
+            .collect();
+        Some((at, folders))
+    }
+
     pub fn row(&self, index: usize) -> &Row {
         &self.0[index]
     }
@@ -136,6 +153,18 @@ impl<G: Copy + Eq + Hash> Folders<G> {
             .collapsed
             .get(&group)
             .is_some_and(|paths| paths.contains(path))
+    }
+
+    /// Unfolds `path` (no focus change). Returns whether it was folded.
+    pub fn expand(&mut self, group: G, path: &Path) -> bool {
+        let removed = self
+            .collapsed
+            .get_mut(&group)
+            .is_some_and(|paths| paths.remove(path));
+        if removed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        removed
     }
 
     pub fn toggle(&mut self, group: G, path: PathBuf) {
@@ -248,5 +277,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 4, 5, 6, 7, 8]
         );
+    }
+
+    #[test]
+    fn locate_lists_the_folders_above_a_file_and_expand_unfolds_them() {
+        let paths = ["a/b/c/hello.world", "a/b/c/sub/other.txt", "z/last.txt"];
+        let tree = Tree::new(paths.into_iter().map(Path::new).enumerate());
+        let (row, folders) = tree.locate(1).expect("file 1");
+        assert!(matches!(tree.row(row), Row::File { index: 1, .. }));
+        assert_eq!(folders, [Path::new("a"), Path::new("a/b/c/sub")]);
+        assert_eq!(tree.locate(2).expect("file 2").1, [Path::new("z")]);
+        assert!(tree.locate(9).is_none());
+
+        let mut open: Folders<()> = Folders::default();
+        open.toggle((), PathBuf::from("a"));
+        assert!(!open.open((), Path::new("a")));
+        let before = open.revision;
+        assert!(open.expand((), Path::new("a")));
+        assert!(open.open((), Path::new("a")));
+        assert_ne!(open.revision, before, "the visible rows are recomputed");
+        assert!(!open.expand((), Path::new("a")), "already open");
     }
 }

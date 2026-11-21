@@ -209,6 +209,19 @@ pub enum Message {
     Picked(Option<PathBuf>),
     Loaded(RepoId, Result<Arc<Snapshot>, String>),
     HistoryLoaded(RepoId, u64, String, Result<Arc<History>, String>),
+    FileSearchPathsLoaded(
+        RepoId,
+        u64,
+        gf_core::model::Oid,
+        Result<Arc<history::file_search::Index>, String>,
+    ),
+    FileSearchFiltered(
+        RepoId,
+        u64,
+        u64,
+        gf_core::model::Oid,
+        Vec<history::file_search::Hit>,
+    ),
     DiffFinished(RepoId, diff_view::Role, diff_view::Completion),
     AmendTextLoaded(RepoId, Option<String>),
     SyncProgress(Progress),
@@ -682,6 +695,16 @@ impl App {
                     None => task,
                 }
             }
+            Message::History(history::Message::FindFile) => self.open_file_search(),
+            Message::History(history::Message::Search(history::search::Message::QueryChanged(
+                query,
+            ))) => self.query_file_search(query),
+            Message::History(history::Message::Search(history::search::Message::Dismiss)) => {
+                self.close_file_search()
+            }
+            Message::History(history::Message::Search(history::search::Message::Activate(row))) => {
+                self.activate_file_search(row)
+            }
             Message::History(m) => {
                 // Shift-click selects a range, ⌘-click adds/removes one.
                 let m = match m {
@@ -916,14 +939,21 @@ impl App {
                 }
                 Task::none()
             }
+            Message::FileSearchPathsLoaded(id, request, oid, result) => {
+                self.file_search_paths_loaded(id, request, oid, result)
+            }
+            Message::FileSearchFiltered(id, request, generation, oid, hits) => {
+                self.file_search_filtered(id, request, generation, oid, hits)
+            }
             Message::DiffFinished(id, role, done) => {
-                if let Some(tab) = self.tab_mut(id) {
-                    return tab
-                        .diff_mut(role)
-                        .finish(done)
-                        .map(move |next| Message::DiffFinished(id, role, next));
-                }
-                Task::none()
+                let Some(tab) = self.tab_mut(id) else {
+                    return Task::none();
+                };
+                let next = tab
+                    .diff_mut(role)
+                    .finish(done)
+                    .map(move |next| Message::DiffFinished(id, role, next));
+                Task::batch([next, self.reveal_picked_file(id, role)])
             }
             Message::AmendTextLoaded(id, message) => {
                 if let Some(tab) = self.tab_mut(id) {
@@ -1138,6 +1168,9 @@ impl App {
         let repo = repo.with_gix_fetch(self.settings.git.gix_fetch);
         // A new tab queues its first load; `load_due` starts it once it is
         // the tab's turn (after every message).
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.history.close_file_search();
+        }
         self.dismiss_repo_overlays();
         let git_dir = repo.handle().git_dir.clone();
         let mut tab = RepoTab::new(repo, watcher);
@@ -1166,6 +1199,7 @@ impl App {
 
     fn select_tab(&mut self, i: usize) -> Task<Message> {
         if i < self.tabs.len() && i != self.active {
+            self.tabs[self.active].history.close_file_search();
             self.dismiss_repo_overlays();
             self.active = i;
             self.note_active();
@@ -1516,7 +1550,10 @@ impl App {
                 }
                 Task::none()
             }
-            Shortcut::Enter | Shortcut::FindInFile | Shortcut::FindMatch { .. } => Task::none(),
+            // The file viewer and blame take ⌘F themselves (see `focus`); in the
+            // main window it searches the history's files.
+            Shortcut::FindInFile => self.find_file_shortcut(),
+            Shortcut::Enter | Shortcut::FindMatch { .. } => Task::none(),
             Shortcut::CodeView(role) => self.update(Message::CodeView(role)),
             Shortcut::Copy => self.copy_diff_selection(),
             Shortcut::SelectAll => {
@@ -2171,6 +2208,21 @@ mod tests {
                 event::Status::Captured
             ),
             Some(Shortcut::ToggleHistory)
+        );
+    }
+
+    #[test]
+    fn command_f_is_find_with_any_input_method() {
+        let cmd = keyboard::Modifiers::COMMAND;
+        // Korean input: the key reports 'ㄹ', the physical key is F.
+        assert_eq!(
+            press(
+                Key::Character("ㄹ".into()),
+                Code::KeyF,
+                cmd,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::FindInFile)
         );
     }
 

@@ -33,6 +33,40 @@ impl State {
         })
     }
 
+    /// Whether a file picked by Find File still waits to be scrolled to.
+    pub fn take_reveal(&mut self) -> bool {
+        std::mem::take(&mut self.reveal_pending)
+    }
+
+    /// Scrolls the files list to the selected file, unfolding the folders
+    /// that hide it. The list height is unknown until its first scroll, so
+    /// the row goes near the top then.
+    pub fn reveal_selected<M: Send + 'static>(&mut self, t: &Tokens, tree: bool) -> Task<M> {
+        let h = row_height(t);
+        let row = if tree {
+            let Some((at, folders)) = self.diff.file_tree.locate(self.file) else {
+                return Task::none();
+            };
+            let folders: Vec<PathBuf> = folders.into_iter().map(Path::to_path_buf).collect();
+            for folder in folders {
+                self.folders.expand((), &folder);
+            }
+            let visible = self.visible_files();
+            let Some(row) = visible.iter().position(|&r| r == at) else {
+                return Task::none();
+            };
+            row
+        } else {
+            self.file
+        };
+        if self.files_scroll.height > 0.0 {
+            return nav::reveal(FILES_ID, self.files_scroll, row, h);
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let top = row as f32 * h;
+        nav::scroll_y(FILES_ID, top - 2.0 * h)
+    }
+
     /// Move between visible folders and files, or toggle the focused folder.
     pub fn files_nav(&self, n: Nav, t: &Tokens, tree: bool) -> Option<Moved<Message>> {
         if n.key == Key::Char('t') {

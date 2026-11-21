@@ -451,6 +451,10 @@ pub struct State {
     /// Rows of the file shown, per loaded diff and file.
     /// The rows index into the diff's hunks: keyed by the diff itself.
     rows: Memo<(memo::Same<LoadedDiff>, usize), Rc<[DiffRow]>>,
+    /// File to show first once the loading diff arrives (Find File).
+    preferred: Option<std::path::PathBuf>,
+    /// The files list should scroll to the file picked by [`Self::prefer_file`].
+    reveal_pending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -559,6 +563,8 @@ impl State {
             folders: file_tree::Folders::default(),
             visible_files: Memo::default(),
             rows: Memo::default(),
+            preferred: None,
+            reveal_pending: false,
         }
     }
 
