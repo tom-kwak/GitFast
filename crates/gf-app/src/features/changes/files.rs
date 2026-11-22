@@ -9,9 +9,10 @@ use iced::widget::row;
 use super::*;
 use crate::widgets::virtual_list::{columns, virtual_list};
 
-/// Checkbox and up to one auxiliary file action, aligned across groups.
+/// The stage checkbox, or the one-glyph resolve button of a conflict,
+/// aligned across groups.
 pub(super) fn action_width(t: &Tokens) -> f32 {
-    t.font_size + t.cols(1) + 10.0
+    t.font_size.max(t.cols(1) + 10.0)
 }
 
 pub(super) fn groups(entry: &StatusEntry) -> [Option<Group>; 2] {
@@ -95,6 +96,24 @@ impl FileLists {
     }
 }
 
+/// Marked files sorted by what each action would do to them.
+#[derive(Debug, Default)]
+pub(super) struct Marked {
+    pub(super) stage: Vec<PathBuf>,
+    pub(super) unstage: Vec<PathBuf>,
+    pub(super) stash: Vec<PathBuf>,
+    /// Changed files `discard` restores.
+    pub(super) tracked: Vec<PathBuf>,
+    /// New files `discard` deletes.
+    pub(super) untracked: Vec<PathBuf>,
+}
+
+impl Marked {
+    pub(super) fn can_discard(&self) -> bool {
+        !self.tracked.is_empty() || !self.untracked.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Row {
     File(usize, Option<usize>),
@@ -148,6 +167,24 @@ impl State {
                 return Some(Moved::stay());
             }
         }
+        if !self.marks.is_empty() && matches!(n.key, Key::Space | Key::Char('.' | 'd')) {
+            let marked = self.marked(snap);
+            let message = match n.key {
+                Key::Char('.') => Some(Message::OpenActions),
+                Key::Space if !marked.stage.is_empty() => {
+                    Some(Message::Act(Output::Stage(marked.stage)))
+                }
+                Key::Space if !marked.unstage.is_empty() => {
+                    Some(Message::Act(Output::Unstage(marked.unstage)))
+                }
+                Key::Char('d') if marked.can_discard() => Some(Message::Act(Output::Discard {
+                    tracked: marked.tracked,
+                    untracked: marked.untracked,
+                })),
+                _ => None,
+            };
+            return Some(message.map_or_else(Moved::stay, Moved::message));
+        }
         if let Some(Row::File(index, _)) = selected {
             let file = lists.files[index];
             let entry = &entries[file.entry];
@@ -194,8 +231,9 @@ impl State {
                     });
             return Some(moved.unwrap_or_else(Moved::stay));
         }
+        // ⇧ extends the marked range, so it lands on files only.
         let stop = |i: usize| match visible[i] {
-            Row::Folder(index) => lists.tree.is_stop(index, open),
+            Row::Folder(index) => !n.shift && lists.tree.is_stop(index, open),
             Row::File(..) => true,
         };
         let row = nav::step_to(
@@ -211,7 +249,12 @@ impl State {
         let message = match visible[row] {
             Row::File(index, _) => {
                 let entry = &entries[lists.files[index].entry];
-                Message::Select(entry.path().clone(), file_group(entry))
+                let (path, group) = (entry.path().clone(), file_group(entry));
+                if n.shift {
+                    Message::SelectRange(path, group)
+                } else {
+                    Message::Select(path, group)
+                }
             }
             Row::Folder(index) => {
                 let file_tree::Row::Folder { path, .. } = lists.tree.row(index) else {
@@ -221,6 +264,127 @@ impl State {
             }
         };
         Some(Moved::message(message).with_task(nav::reveal(LIST_ID, self.scroll, row, h)))
+    }
+
+    /// What each action would touch among the marked files. Conflicts are
+    /// left out: they are resolved one by one.
+    pub(super) fn marked(&self, snap: &Snapshot) -> Marked {
+        let lists = &snap.change_files;
+        let entries = &snap.status.entries;
+        let mut marked = Marked::default();
+        for path in &self.marks {
+            let Some(file) = lists.find(entries, path) else {
+                continue;
+            };
+            match &entries[file.entry] {
+                StatusEntry::Conflicted { .. } | StatusEntry::Ignored { .. } => {}
+                StatusEntry::Untracked { .. } => {
+                    marked.stage.push(path.clone());
+                    marked.untracked.push(path.clone());
+                }
+                StatusEntry::Changed { .. } => {
+                    if file.unstaged {
+                        marked.stage.push(path.clone());
+                        marked.tracked.push(path.clone());
+                    }
+                    if file.staged {
+                        marked.unstage.push(path.clone());
+                    }
+                    marked.stash.push(path.clone());
+                }
+            }
+        }
+        marked
+    }
+
+    /// Files listed from the anchor (or the selection) to `target`, in the
+    /// order shown.
+    pub(super) fn range(
+        &self,
+        snap: &Snapshot,
+        tree: bool,
+        target: &Path,
+    ) -> std::collections::BTreeSet<PathBuf> {
+        let lists = &snap.change_files;
+        let entries = &snap.status.entries;
+        let shown: Vec<&PathBuf> = self
+            .visible(lists, tree)
+            .iter()
+            .filter_map(|row| match *row {
+                Row::File(index, _) => Some(entries[lists.files[index].entry].path()),
+                Row::Folder(_) => None,
+            })
+            .collect();
+        let anchor = self
+            .mark_anchor
+            .as_deref()
+            .or(self.selected.as_ref().map(|(p, _)| p.as_path()))
+            .unwrap_or(target);
+        let at = |p: &Path| shown.iter().position(|s| s.as_path() == p);
+        let Some(end) = at(target) else {
+            return std::iter::once(target.to_path_buf()).collect();
+        };
+        let start = at(anchor).unwrap_or(end);
+        shown[start.min(end)..=start.max(end)]
+            .iter()
+            .map(|p| (*p).clone())
+            .collect()
+    }
+
+    /// Actions on every marked file at once.
+    pub(super) fn marked_menu(&self, snap: &Snapshot) -> Menu<Message> {
+        let marked = self.marked(snap);
+        let act = |o: Output| Message::Act(o);
+        let mut entries = Vec::new();
+        if !marked.stage.is_empty() {
+            entries.push(Entry::item(
+                's',
+                format!("stage ({})", marked.stage.len()),
+                "git add -- <files>",
+                act(Output::Stage(marked.stage.clone())),
+            ));
+        }
+        if !marked.unstage.is_empty() {
+            entries.push(Entry::item(
+                'u',
+                format!("unstage ({})", marked.unstage.len()),
+                "git restore --staged -- <files>",
+                act(Output::Unstage(marked.unstage.clone())),
+            ));
+        }
+        if !marked.stash.is_empty() {
+            entries.push(Entry::item(
+                'z',
+                format!("stash these files ({})", marked.stash.len()),
+                "git stash push -- <files>",
+                act(Output::StashFiles(marked.stash.clone())),
+            ));
+        }
+        if marked.can_discard() {
+            let n = marked.tracked.len() + marked.untracked.len();
+            entries.push(Entry::caution(
+                'd',
+                format!("discard changes… ({n})"),
+                "restore changed files, delete new ones",
+                act(Output::Discard {
+                    tracked: marked.tracked,
+                    untracked: marked.untracked,
+                }),
+            ));
+        }
+        if !entries.is_empty() {
+            entries.push(Entry::Separator);
+        }
+        entries.push(Entry::item(
+            'c',
+            "clear selection",
+            "unmark the selected files (Esc)",
+            Message::ClearMarks,
+        ));
+        Menu {
+            title: format!("{} files selected", self.marks.len()),
+            entries,
+        }
     }
 
     pub(super) fn files_view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {

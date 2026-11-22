@@ -1557,6 +1557,49 @@ async fn working_tree_arrows_skip_open_folders_and_minus_folds_the_current_one()
 }
 
 #[tokio::test]
+async fn working_tree_shift_click_marks_files_for_one_menu_and_esc_clears_them() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            for name in ["x1.txt", "x2.txt", "x3.txt"] {
+                r.write(name, "new\n");
+            }
+        })
+        .await,
+    )
+    .await;
+    let _ = ui.click("x1.txt").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::SHIFT))
+        .await;
+    let _ = ui.click("x3.txt").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::empty()))
+        .await;
+    let _ = ui.right_click("x2.txt").await;
+    assert!(ui.shows("3 files selected"));
+    assert!(ui.shows("discard changes… (3)"));
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    assert!(!ui.shows("3 files selected"), "Esc closes the menu first");
+
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    let _ = ui.right_click("x2.txt").await;
+    assert!(!ui.shows("files selected"), "Esc cleared the marks");
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+
+    // ⌘-click adds to the current file.
+    let _ = ui.click("x1.txt").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::COMMAND))
+        .await;
+    let _ = ui.click("x3.txt").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::empty()))
+        .await;
+    let _ = ui.right_click("x1.txt").await;
+    assert!(ui.shows("2 files selected"));
+}
+
+#[tokio::test]
 async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() {
     let mut ui = Ui::open_with(|r| {
         r.write("moved/deep/target/keep.txt", "directory\n");

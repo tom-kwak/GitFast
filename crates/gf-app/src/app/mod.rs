@@ -675,20 +675,33 @@ impl App {
                 }
             }
             Message::Changes(m) => {
+                // Shift-click marks a range, ⌘-click adds/removes one file.
+                let m = match m {
+                    changes::Message::Select(path, group) if self.modifiers.shift() => {
+                        changes::Message::SelectRange(path, group)
+                    }
+                    changes::Message::Select(path, group) if self.modifiers.command() => {
+                        changes::Message::ToggleMark(path, group)
+                    }
+                    other => other,
+                };
                 if matches!(
                     m,
                     changes::Message::Select(..)
+                        | changes::Message::ToggleMark(..)
+                        | changes::Message::SelectRange(..)
                         | changes::Message::RightClick(..)
                         | changes::Message::ToggleFolder(..)
                         | changes::Message::SetTree(_)
                 ) {
                     self.focus_pane(Pane::Changes);
                 }
+                let tree = self.settings.appearance.working_tree_dirs;
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
                 let snap = tab.snapshot.clone();
-                let Update { task, output } = tab.changes.update_with(m, snap.as_deref());
+                let Update { task, output } = tab.changes.update_with(m, snap.as_deref(), tree);
                 let task = task.map(Message::Changes);
                 match output {
                     Some(o) => Task::batch([task, self.on_changes(o)]),
@@ -1557,6 +1570,11 @@ impl App {
                             .is_some_and(|t| t.history.searched_file().is_some());
                 if in_file_history {
                     return self.update(Message::History(history::Message::RestoreFileHistory));
+                }
+                let marked_files = self.focus == Pane::Changes
+                    && self.active_tab().is_some_and(|t| t.changes.has_marks());
+                if marked_files {
+                    return self.update(Message::Changes(changes::Message::ClearMarks));
                 }
                 Task::none()
             }
