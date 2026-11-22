@@ -85,6 +85,47 @@ async fn commit_file_paths_handle_empty_trees_and_invalid_commits() {
 }
 
 #[tokio::test]
+async fn file_history_follows_renames_but_not_copies() {
+    let repo = TestRepo::new();
+    repo.write("CLAUDE.md", "guidance\nline two\nline three\n");
+    repo.commit_all("add claude");
+    repo.write("CLAUDE.md", "guidance\nline two changed\nline three\n");
+    repo.commit_all("edit claude");
+    repo.write("AGENTS.md", "guidance\nline two changed\nline three\n");
+    let copy = repo.commit_all("copy to agents");
+    repo.write("old.txt", "renamed content\nmore\nlines\n");
+    repo.commit_all("add old");
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.commit_all("rename");
+    repo.write("new.txt", "renamed content\nmore\nlines\nedit\n");
+    repo.commit_all("edit new");
+
+    let git = open(&repo).await;
+    let history = |path: &str| {
+        let q = LogQuery {
+            paths: vec![path.into()],
+            follow: true,
+            ..LogQuery::default()
+        };
+        let git = &git;
+        async move {
+            git.log(&q)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| c.summary)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(history("AGENTS.md").await, ["copy to agents"], "{copy}");
+    assert_eq!(
+        history("new.txt").await,
+        ["edit new", "rename", "add old"],
+        "renames keep their history"
+    );
+}
+
+#[tokio::test]
 async fn opens_bare_repository() {
     let bare = TestRepo::new_bare();
     let repo = open(&bare).await;

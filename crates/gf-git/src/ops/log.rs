@@ -163,8 +163,81 @@ impl CliBackend {
     }
 }
 
+impl CliBackend {
+    /// The newest commit where `--follow` crossed a *copy* (the file appeared
+    /// as a copy of one that still exists, e.g. `AGENTS.md` next to
+    /// `CLAUDE.md`). Only renames carry a file's history; a copy's source
+    /// history belongs to another file.
+    async fn follow_copy_boundary(&self, query: &LogQuery) -> Result<Option<String>> {
+        let mut args: Vec<String> = vec![
+            "log".into(),
+            "--follow".into(),
+            "--diff-filter=C".into(),
+            "--name-status".into(),
+            "--format=%H".into(),
+        ];
+        if query.first_parent {
+            args.push("--first-parent".into());
+        }
+        args.push("--end-of-options".into());
+        args.extend(query.revisions.iter().cloned());
+        let cmd = self
+            .command(args)
+            .paths(&query.paths)
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .read_only()
+            .allow_failure();
+        let out = self.runner().run(&cmd).await?;
+        if !out.success() {
+            return Ok(None);
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        Ok(text
+            .lines()
+            .find(|l| l.len() >= 40 && l.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(str::to_owned))
+    }
+}
+
 impl LogOps for CliBackend {
     async fn log(&self, query: &LogQuery) -> Result<Vec<Commit>> {
+        if query.follow
+            && query.paths.len() == 1
+            && let Some(boundary) = self.follow_copy_boundary(query).await?
+        {
+            {
+                // Walk everything, cut at the copy, then page.
+                let mut all = LogQuery {
+                    max_count: None,
+                    skip: 0,
+                    ..query.clone()
+                };
+                all.follow = true;
+                let mut commits = self.log_raw(&all).await?;
+                if let Some(i) = commits.iter().position(|c| c.id.as_str() == boundary) {
+                    commits.truncate(i + 1);
+                }
+                let rest = commits.into_iter().skip(query.skip);
+                return Ok(match query.max_count {
+                    Some(n) => rest.take(n).collect(),
+                    None => rest.collect(),
+                });
+            }
+        }
+        self.log_raw(query).await
+    }
+
+    async fn head_exists(&self) -> Result<bool> {
+        let cmd = self
+            .command(["rev-parse", "--verify", "--quiet", "HEAD"])
+            .read_only()
+            .allow_failure();
+        Ok(self.runner().run(&cmd).await?.success())
+    }
+}
+
+impl CliBackend {
+    async fn log_raw(&self, query: &LogQuery) -> Result<Vec<Commit>> {
         let cmd = self
             .command(query.to_args())
             .paths(&query.paths)
@@ -195,14 +268,6 @@ impl LogOps for CliBackend {
             });
         }
         parse_log(&out.stdout)
-    }
-
-    async fn head_exists(&self) -> Result<bool> {
-        let cmd = self
-            .command(["rev-parse", "--verify", "--quiet", "HEAD"])
-            .read_only()
-            .allow_failure();
-        Ok(self.runner().run(&cmd).await?.success())
     }
 }
 
