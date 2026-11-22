@@ -3,7 +3,7 @@
 mod files;
 pub use files::FileLists;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -45,11 +45,22 @@ pub struct State {
     widest: Memo<memo::Id, usize>,
     /// Whether the current menu's file is absent from HEAD.
     menu_new_file: bool,
+    /// Files picked with ⌘-click or ⇧-click, acted on together.
+    marks: BTreeSet<PathBuf>,
+    /// Where a ⇧-click range starts.
+    mark_anchor: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Select(PathBuf, Group),
+    /// ⌘-click: adds the file to the marked files, or takes it out.
+    ToggleMark(PathBuf, Group),
+    /// ⇧-click or ⇧↑/↓: marks the files from the anchor to this one.
+    SelectRange(PathBuf, Group),
+    /// ⌘A: marks every changed file, folded folders included.
+    MarkAll,
+    ClearMarks,
     FocusFolder(PathBuf),
     ToggleFolder(PathBuf),
     SetTree(bool),
@@ -92,8 +103,8 @@ pub enum Output {
     Blame(PathBuf),
     CopyPath(PathBuf),
     Reveal(PathBuf),
-    /// Stash only this file's changes.
-    StashFile(PathBuf),
+    /// Stash only these files' changes.
+    StashFiles(Vec<PathBuf>),
     /// Add a line to `.gitignore`.
     Ignore(String),
     TakeSide(PathBuf, gf_git::Side),
@@ -136,7 +147,7 @@ fn file_menu(path: &Path, group: Group, in_head: bool) -> Menu<Message> {
                 'z',
                 "stash just this file",
                 format!("git stash push -- {p}"),
-                act(Output::StashFile(pb.clone())),
+                act(Output::StashFiles(vec![pb.clone()])),
             ),
             Entry::caution(
                 'd',
@@ -156,7 +167,7 @@ fn file_menu(path: &Path, group: Group, in_head: bool) -> Menu<Message> {
                 'z',
                 "stash just this file",
                 format!("git stash push -- {p}"),
-                act(Output::StashFile(pb.clone())),
+                act(Output::StashFiles(vec![pb.clone()])),
             ),
         ],
         Group::Untracked => {
@@ -336,6 +347,29 @@ impl State {
         self.selected.as_ref().is_some_and(|(p, _)| p == path)
     }
 
+    /// Whether files are marked (Esc clears them).
+    pub fn has_marks(&self) -> bool {
+        !self.marks.is_empty()
+    }
+
+    fn clear_marks(&mut self) {
+        self.marks.clear();
+        self.mark_anchor = None;
+    }
+
+    /// Makes `path` the current file while marking, showing its diff; a
+    /// conflict only becomes current (its resolver opens on a plain click).
+    fn pick(&mut self, path: PathBuf, group: Group) -> Update<Message, Output> {
+        self.folders.focused = None;
+        let changed = !self.is_selected(&path, group);
+        self.selected = Some((path.clone(), group));
+        if changed && group != Group::Conflicts {
+            Update::output(Output::ShowDiff(diff_source(path, group)))
+        } else {
+            Update::none()
+        }
+    }
+
     pub(crate) fn set_pending_stage(&mut self, path: PathBuf, checked: bool) {
         self.pending_stage.insert(path, checked);
     }
@@ -365,6 +399,18 @@ impl State {
     /// its displayed diff when a file was staged/unstaged. Returns the diff
     /// to show if the selection moved.
     pub fn follow(&mut self, entries: &[StatusEntry]) -> Option<DiffSource> {
+        if !self.marks.is_empty() {
+            // Discarded or stashed files leave the list, and the marks with them.
+            let listed: std::collections::HashSet<&Path> = entries
+                .iter()
+                .filter(|e| !matches!(e, StatusEntry::Ignored { .. }))
+                .map(|e| e.path().as_path())
+                .collect();
+            self.marks.retain(|p| listed.contains(p.as_path()));
+            if self.marks.is_empty() {
+                self.mark_anchor = None;
+            }
+        }
         let (path, group) = self.selected.clone()?;
         let has = |group| {
             entries
@@ -441,7 +487,7 @@ impl State {
         if let Some(d) = detail {
             line = line.push(dim(t, d).wrapping(Wrapping::None));
         }
-        let selected = self.is_selected_path(path);
+        let selected = self.is_selected_path(path) || self.marks.contains(path);
         let main = iced::widget::mouse_area(widgets::list_row(
             t,
             line,
@@ -473,40 +519,16 @@ impl State {
         } else {
             control
         };
+        // One text for both states: the tooltip stays under the pointer
+        // while the box is clicked, and a different width would make it jump.
         let toggle = widgets::tip(
             t,
             control,
-            if checked {
-                "remove these changes from the next commit (Space)"
-            } else {
-                "include these changes in the next commit (Space)"
-            }
-            .into(),
+            "stage / unstage for the next commit (Space)".into(),
         );
+        // Discard and delete live in the right-click menu and on `d`.
         let actions: Element<'a, Message> = match group {
-            Group::Staged => toggle,
-            Group::Unstaged => row![
-                toggle,
-                widgets::icon_button(
-                    t,
-                    "↺",
-                    t.dim,
-                    "discard changes…",
-                    Message::Discard(path.clone(), group)
-                ),
-            ]
-            .into(),
-            Group::Untracked => row![
-                toggle,
-                widgets::icon_button(
-                    t,
-                    "✕",
-                    t.dim,
-                    "delete file…",
-                    Message::Discard(path.clone(), group)
-                ),
-            ]
-            .into(),
+            Group::Staged | Group::Unstaged | Group::Untracked => toggle,
             Group::Conflicts => widgets::icon_button_maybe(
                 t,
                 "✓",
@@ -516,16 +538,13 @@ impl State {
             ),
         };
         // Keep action and status columns outside the indented path.
+        let actions = container(actions).width(Length::Fixed(files::action_width(t)));
         let line = if depth.is_some() {
             let status =
                 iced::widget::mouse_area(widgets::colored(t, code_text, color).width(t.cols(1)))
                     .on_press(Message::Select(path.clone(), group))
                     .on_right_press(Message::RightClick(path.clone(), group));
-            row![
-                status,
-                container(actions).width(Length::Fixed(files::action_width(t))),
-                main
-            ]
+            row![status, actions, main]
         } else {
             row![actions, main]
         };
@@ -537,11 +556,51 @@ impl State {
     /// [`Feature::update`] knowing the repository: the file menus leave
     /// out history and blame for files the last commit does not have yet
     /// (added, or the new name of a rename).
+    /// `tree`: the files are shown as a directory tree (ranges follow the
+    /// order on screen).
     pub fn update_with(
         &mut self,
         message: Message,
         snap: Option<&Snapshot>,
+        tree: bool,
     ) -> Update<Message, Output> {
+        if let Some(snap) = snap {
+            match &message {
+                Message::SelectRange(path, group) => {
+                    let anchor = self
+                        .mark_anchor
+                        .clone()
+                        .or_else(|| self.selected.as_ref().map(|(p, _)| p.clone()))
+                        .unwrap_or_else(|| path.clone());
+                    self.mark_anchor = Some(anchor);
+                    self.marks = self.range(snap, tree, path);
+                    return self.pick(path.clone(), *group);
+                }
+                Message::MarkAll => {
+                    self.marks = snap.change_files.paths(&snap.status.entries);
+                    self.mark_anchor = self.selected.as_ref().map(|(p, _)| p.clone());
+                    return Update::none();
+                }
+                Message::RightClick(path, group) if self.marks.contains(path) => {
+                    let changed = !self.is_selected(path, *group);
+                    let show = (changed && *group != Group::Conflicts)
+                        .then(|| diff_source(path.clone(), *group));
+                    self.folders.focused = None;
+                    self.selected = Some((path.clone(), *group));
+                    return Update::output(Output::Menu {
+                        show,
+                        menu: self.marked_menu(snap),
+                    });
+                }
+                Message::OpenActions if !self.marks.is_empty() => {
+                    return Update::output(Output::Menu {
+                        show: None,
+                        menu: self.marked_menu(snap),
+                    });
+                }
+                _ => {}
+            }
+        }
         // Only menus need it (not every scroll).
         if !matches!(message, Message::RightClick(..) | Message::OpenActions) {
             return self.update(message);
@@ -614,11 +673,37 @@ impl Feature for State {
                 Update::none()
             }
             Message::Select(path, Group::Conflicts) => {
+                self.clear_marks();
                 self.folders.focused = None;
                 self.selected = Some((path.clone(), Group::Conflicts));
                 Update::output(Output::ResolveConflict(path))
             }
+            Message::ToggleMark(path, group) => {
+                if self.marks.is_empty()
+                    && let Some((selected, _)) = &self.selected
+                    && *selected != path
+                {
+                    self.marks.insert(selected.clone());
+                }
+                if !self.marks.remove(&path) {
+                    self.marks.insert(path.clone());
+                }
+                self.mark_anchor = (!self.marks.is_empty()).then(|| path.clone());
+                self.pick(path, group)
+            }
+            // Without the file list there is no range: mark just this one.
+            Message::SelectRange(path, group) => {
+                self.marks.insert(path.clone());
+                self.pick(path, group)
+            }
+            // Without the file list there is nothing to mark.
+            Message::MarkAll => Update::none(),
+            Message::ClearMarks => {
+                self.clear_marks();
+                Update::none()
+            }
             Message::Select(path, group) => {
+                self.clear_marks();
                 self.folders.focused = None;
                 self.selected = Some((path.clone(), group));
                 Update::output(Output::ShowDiff(diff_source(path, group)))
@@ -640,7 +725,9 @@ impl Feature for State {
                 Update::none()
             }
             Message::RightClick(path, group) => {
-                // Right-click selects like a click (the diff follows).
+                // Right-click selects like a click (the diff follows); off
+                // the marked files it drops them, as in Finder.
+                self.clear_marks();
                 self.folders.focused = None;
                 let changed = !self.is_selected(&path, group);
                 self.selected = Some((path.clone(), group));
@@ -787,6 +874,96 @@ mod tests {
         assert!(
             matches!(out, Some(Output::Discard { tracked, untracked }) if tracked.is_empty() && untracked.len() == 1)
         );
+    }
+
+    #[test]
+    fn marked_files_share_one_menu_and_keys_act_on_all_of_them() {
+        let t = crate::theme::preset("gf-dark");
+        let entries = vec![
+            changed("a", ChangeKind::Unmodified, ChangeKind::Modified),
+            changed("b", ChangeKind::Modified, ChangeKind::Unmodified),
+            StatusEntry::Untracked { path: "c".into() },
+        ];
+        let snap = Snapshot {
+            change_files: std::sync::Arc::new(FileLists::new(&entries)),
+            status: gf_core::model::StatusReport {
+                entries: entries.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p = |s: &str| PathBuf::from(s);
+        let key = |s: &State, nav: Nav| s.nav(nav, &snap, &t, false).and_then(|m| m.message);
+        let mut s = State::default();
+
+        // ⌘-click keeps the current file and adds the clicked one.
+        let _ = s.update(Message::Select(p("a"), Group::Unstaged));
+        let _ = s.update(Message::ToggleMark(p("c"), Group::Untracked));
+        assert_eq!(s.marks, [p("a"), p("c")].into());
+        let Some(Output::Menu { menu, .. }) = s
+            .update_with(
+                Message::RightClick(p("c"), Group::Untracked),
+                Some(&snap),
+                false,
+            )
+            .output
+        else {
+            panic!("menu");
+        };
+        assert_eq!(menu.title, "2 files selected");
+        assert_eq!(keys(&menu), "szdc", "no unstage: nothing staged is marked");
+        assert!(matches!(
+            key(&s, Nav::plain(Key::Space)),
+            Some(Message::Act(Output::Stage(paths))) if paths == [p("a"), p("c")]
+        ));
+        assert!(matches!(
+            key(&s, Nav::plain(Key::Char('d'))),
+            Some(Message::Act(Output::Discard { tracked, untracked }))
+                if tracked == [p("a")] && untracked == [p("c")]
+        ));
+
+        // ⇧-click marks everything between the anchor and the clicked file.
+        let _ = s.update(Message::Select(p("a"), Group::Unstaged));
+        assert!(!s.has_marks(), "a plain click clears the marks");
+        let _ = s.update_with(
+            Message::SelectRange(p("c"), Group::Untracked),
+            Some(&snap),
+            false,
+        );
+        assert_eq!(s.marks, [p("a"), p("b"), p("c")].into());
+        let shift_up = Nav {
+            key: Key::Up,
+            shift: true,
+        };
+        assert!(matches!(
+            key(&s, shift_up),
+            Some(Message::SelectRange(path, Group::Staged)) if path == p("b")
+        ));
+
+        // ⌘A marks every file.
+        let _ = s.update_with(Message::MarkAll, Some(&snap), false);
+        assert_eq!(s.marks, [p("a"), p("b"), p("c")].into());
+
+        // A right-click off the marks acts on that file alone.
+        let _ = s.update(Message::ClearMarks);
+        let _ = s.update(Message::ToggleMark(p("b"), Group::Staged));
+        let Some(Output::Menu { menu, .. }) = s
+            .update_with(
+                Message::RightClick(p("a"), Group::Unstaged),
+                Some(&snap),
+                false,
+            )
+            .output
+        else {
+            panic!("menu");
+        };
+        assert_eq!(menu.title, "a");
+        assert!(!s.has_marks());
+
+        // Files that leave the list leave the marks.
+        let _ = s.update(Message::ToggleMark(p("c"), Group::Untracked));
+        let _ = s.follow(&entries[..2]);
+        assert_eq!(s.marks, [p("a")].into());
     }
 
     #[test]

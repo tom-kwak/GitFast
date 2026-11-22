@@ -246,16 +246,10 @@ impl Feature for State {
         let has_head = repo.is_some_and(|r| r.has_head);
         let staged = repo.map_or(0, |r| r.staged);
 
-        let (status, status_color) = if staged == 0 {
-            ("0 staged".to_owned(), t.warning())
-        } else {
-            (format!("{staged} staged"), t.added())
-        };
         let action = |label: &str, key: Option<&str>, on: Option<Message>, tip: String| {
             widgets::tip(t, widgets::text_button(t, label, key, on), tip)
         };
         let buttons = row![
-            colored(t, status, status_color),
             space().width(Length::Fill),
             widgets::icon_button(
                 t,
@@ -283,7 +277,12 @@ impl Feature for State {
                 ),
             ),
             action(
-                "Commit",
+                // Only staged changes go into the commit: say how many.
+                &if staged == 0 {
+                    "Commit".to_owned()
+                } else {
+                    format!("Commit {staged}")
+                },
                 None,
                 commit_blocked
                     .is_none()

@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gf_config::{AppPaths, Settings};
 use gf_core::model::RepoId;
@@ -102,7 +102,8 @@ pub enum Shortcut {
     },
     /// ⌘C outside text fields: the selected diff lines.
     Copy,
-    /// ⌘A outside text fields: every line of the diff in focus.
+    /// ⌘A outside text fields: every line of the diff in focus, or every
+    /// working tree file.
     SelectAll,
     Quit,
 }
@@ -364,6 +365,9 @@ pub struct App {
     stage_files: HashMap<PathBuf, ops::FileStages>,
     deleting_branches: HashSet<PathBuf>,
     flash: Option<Flash>,
+    /// When the app last became busy; the status line shows `working` only
+    /// once that has lasted [`BUSY_SHOWN_AFTER`].
+    busy_since: Option<Instant>,
     tick: usize,
     drop_hover: bool,
     /// While ⌘ is held, characters a text field inserts are shortcut keys,
@@ -455,6 +459,7 @@ impl App {
             stage_files: HashMap::new(),
             deleting_branches: HashSet::new(),
             flash: None,
+            busy_since: None,
             tick: 0,
             drop_hover: false,
             modifiers: keyboard::Modifiers::empty(),
@@ -510,6 +515,16 @@ impl App {
             || self.log.has_running()
     }
 
+    /// Whether the status line shows `working`. A quick git write (staging
+    /// a file) ends before anyone could read it, and flashing it would only
+    /// make the bar jump; a branch switch says so right away.
+    fn shows_busy(&self, switching: bool) -> bool {
+        switching
+            || self
+                .busy_since
+                .is_some_and(|since| since.elapsed() >= BUSY_SHOWN_AFTER)
+    }
+
     fn flash(&mut self, kind: NoteKind, text: impl Into<String>) {
         self.flash = Some(Flash {
             kind,
@@ -547,6 +562,11 @@ impl App {
         let task = self.handle(message);
         // Any message may have brought a tab to the front or queued a read.
         let task = Task::batch([task, self.load_due()]);
+        self.busy_since = if self.busy() {
+            self.busy_since.or_else(|| Some(Instant::now()))
+        } else {
+            None
+        };
         // Anything may have written to the command log (notes, git output).
         match self.log.follow() {
             follow if follow.units() == 0 => task,
@@ -675,20 +695,33 @@ impl App {
                 }
             }
             Message::Changes(m) => {
+                // Shift-click marks a range, ⌘-click adds/removes one file.
+                let m = match m {
+                    changes::Message::Select(path, group) if self.modifiers.shift() => {
+                        changes::Message::SelectRange(path, group)
+                    }
+                    changes::Message::Select(path, group) if self.modifiers.command() => {
+                        changes::Message::ToggleMark(path, group)
+                    }
+                    other => other,
+                };
                 if matches!(
                     m,
                     changes::Message::Select(..)
+                        | changes::Message::ToggleMark(..)
+                        | changes::Message::SelectRange(..)
                         | changes::Message::RightClick(..)
                         | changes::Message::ToggleFolder(..)
                         | changes::Message::SetTree(_)
                 ) {
                     self.focus_pane(Pane::Changes);
                 }
+                let tree = self.settings.appearance.working_tree_dirs;
                 let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
                 let snap = tab.snapshot.clone();
-                let Update { task, output } = tab.changes.update_with(m, snap.as_deref());
+                let Update { task, output } = tab.changes.update_with(m, snap.as_deref(), tree);
                 let task = task.map(Message::Changes);
                 match output {
                     Some(o) => Task::batch([task, self.on_changes(o)]),
@@ -1558,6 +1591,11 @@ impl App {
                 if in_file_history {
                     return self.update(Message::History(history::Message::RestoreFileHistory));
                 }
+                let marked_files = self.focus == Pane::Changes
+                    && self.active_tab().is_some_and(|t| t.changes.has_marks());
+                if marked_files {
+                    return self.update(Message::Changes(changes::Message::ClearMarks));
+                }
                 Task::none()
             }
             // The file viewer and blame take ⌘F themselves (see `focus`); in the
@@ -1567,10 +1605,14 @@ impl App {
             Shortcut::CodeView(role) => self.update(Message::CodeView(role)),
             Shortcut::Copy => self.copy_diff_selection(),
             Shortcut::SelectAll => {
-                // Only the diff being worked in: ⌘A elsewhere selects nothing.
+                // The diff or the working tree files being worked in: ⌘A
+                // elsewhere selects nothing.
                 match (self.focus, self.active_tab().map(|t| t.code_view)) {
                     (Pane::Diff, Some(role)) => {
                         self.on_diff_message(role, diff_view::Message::SelectAll)
+                    }
+                    (Pane::Changes, Some(_)) => {
+                        self.update(Message::Changes(changes::Message::MarkAll))
                     }
                     _ => Task::none(),
                 }
@@ -1681,7 +1723,7 @@ impl App {
             .push(status_line::view(
                 t,
                 tab,
-                self.busy().then_some((
+                self.shows_busy(checkout.is_some()).then_some((
                     spinner,
                     checkout.map(|c| {
                         let target = &c.target;
@@ -1827,6 +1869,9 @@ impl App {
 /// (character columns).
 const MIN_LIST_COLS: f32 = 18.0;
 const MAX_LIST_COLS: f32 = 120.0;
+
+/// How long the app is busy before the status line says `working`.
+const BUSY_SHOWN_AFTER: Duration = Duration::from_millis(400);
 
 /// The list width after dragging the divider `dx` pixels from a drag that
 /// started at `start` columns.

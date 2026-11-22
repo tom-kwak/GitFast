@@ -5,10 +5,13 @@ use std::ffi::OsString;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
-use iced::widget::{row, space, text::Wrapping};
-use iced::{Element, Length};
+use std::cell::RefCell;
 
-use crate::theme::Tokens;
+use iced::widget::canvas::{self, Geometry, LineJoin, Path as CanvasPath, Stroke};
+use iced::widget::{row, space, text::Wrapping};
+use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
+
+use crate::theme::{Tokens, style};
 use crate::widgets;
 
 #[derive(Debug, Default)]
@@ -115,6 +118,32 @@ impl Tree {
         &self.0[index]
     }
 
+    /// Row of file `index`.
+    pub fn file_row(&self, index: usize) -> Option<usize> {
+        self.0
+            .iter()
+            .position(|row| matches!(row, Row::File { index: i, .. } if *i == index))
+    }
+
+    /// Rows that ↑/↓ land on: files, and folded folders so ↵ can unfold them.
+    pub fn is_stop(&self, row: usize, open: impl Fn(&Path) -> bool) -> bool {
+        match &self.0[row] {
+            Row::Folder { path, .. } => !open(path),
+            Row::File { .. } => true,
+        }
+    }
+
+    /// Folder row that `-` folds from `row`: the row itself when it is an
+    /// open folder, otherwise the innermost folder holding it.
+    pub fn fold_target(&self, row: usize, open: impl Fn(&Path) -> bool) -> Option<usize> {
+        if matches!(&self.0[row], Row::Folder { path, .. } if open(path)) {
+            return Some(row);
+        }
+        (0..row)
+            .rev()
+            .find(|&i| matches!(&self.0[i], Row::Folder { end, .. } if row < *end))
+    }
+
     /// Skip whole subtrees when folded, keeping only rows the list can show.
     pub fn visible(&self, mut open: impl FnMut(&Path) -> bool) -> impl Iterator<Item = usize> {
         let mut index = 0;
@@ -182,6 +211,94 @@ pub fn indent(t: &Tokens, depth: usize) -> Length {
     Length::Fixed(t.cols(2 * depth))
 }
 
+/// Line-drawn folder glyph, one text cell high so it sits among the
+/// monospace text: a closed folder, or one whose front tilts open.
+struct FolderIcon {
+    open: bool,
+    color: Color,
+}
+
+/// What the cached geometry was drawn from; the virtual list reuses row
+/// widgets for other folders as it scrolls.
+#[derive(Default)]
+struct IconCache {
+    cache: canvas::Cache,
+    drawn: RefCell<Option<(bool, Color)>>,
+}
+
+impl<M> canvas::Program<M> for FolderIcon {
+    type State = IconCache;
+
+    fn draw(
+        &self,
+        state: &IconCache,
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = (self.open, self.color);
+        if *state.drawn.borrow() != Some(key) {
+            state.cache.clear();
+            *state.drawn.borrow_mut() = Some(key);
+        }
+        vec![state.cache.draw(renderer, bounds.size(), |frame| {
+            // Drawn on a 12×10 grid, centered and scaled to the bounds.
+            let s = (bounds.width / 12.0).min(bounds.height / 10.0);
+            let (ox, oy) = (
+                (bounds.width - 12.0 * s) / 2.0,
+                (bounds.height - 10.0 * s) / 2.0,
+            );
+            let p = |x: f32, y: f32| Point::new(ox + x * s, oy + y * s);
+            let stroke = Stroke::default()
+                .with_color(self.color)
+                .with_width(1.1_f32.max(s * 0.9))
+                .with_line_join(LineJoin::Round);
+            if self.open {
+                let back = CanvasPath::new(|b| {
+                    b.move_to(p(0.6, 9.2));
+                    b.line_to(p(0.6, 1.4));
+                    b.line_to(p(4.2, 1.4));
+                    b.line_to(p(5.4, 2.8));
+                    b.line_to(p(10.0, 2.8));
+                    b.line_to(p(10.0, 4.4));
+                });
+                let front = CanvasPath::new(|b| {
+                    b.move_to(p(0.6, 9.2));
+                    b.line_to(p(2.4, 4.4));
+                    b.line_to(p(11.6, 4.4));
+                    b.line_to(p(9.8, 9.2));
+                    b.close();
+                });
+                frame.stroke(&back, stroke);
+                frame.stroke(&front, stroke);
+            } else {
+                let closed = CanvasPath::new(|b| {
+                    b.move_to(p(0.6, 1.4));
+                    b.line_to(p(4.2, 1.4));
+                    b.line_to(p(5.4, 2.8));
+                    b.line_to(p(11.2, 2.8));
+                    b.line_to(p(11.2, 9.2));
+                    b.line_to(p(0.6, 9.2));
+                    b.close();
+                });
+                frame.stroke(&closed, stroke);
+            }
+        })]
+    }
+}
+
+/// Folder glyph sized to the font, in the folder color.
+fn folder_icon<'a, M: 'a>(t: &Tokens, open: bool) -> Element<'a, M> {
+    canvas::Canvas::new(FolderIcon {
+        open,
+        color: t.folder(),
+    })
+    .width(Length::Fixed(t.font_size.round()))
+    .height(Length::Fixed((t.font_size * 0.85).round()))
+    .into()
+}
+
 pub fn folder<'a, M: Clone + 'a>(
     t: &'a Tokens,
     label: &Path,
@@ -193,31 +310,45 @@ pub fn folder<'a, M: Clone + 'a>(
 ) -> Element<'a, M> {
     let line = row![
         space().width(indent(t, depth)),
-        widgets::colored(t, if open { "▾ " } else { "▸ " }, t.accent()),
-        widgets::mono(t, label.display().to_string()).wrapping(Wrapping::None),
+        widgets::colored(t, if open { "▾ " } else { "▸ " }, t.folder()),
+        folder_icon(t, open),
+        space().width(Length::Fixed(t.cols(1) * 0.6)),
+        // The trailing slash marks a folder even where colors are hard to tell apart.
+        widgets::colored(t, format!("{}/", label.display()), t.folder()).wrapping(Wrapping::None),
         widgets::dim(t, format!(" ({count})")).wrapping(Wrapping::None),
     ]
     .align_y(iced::Alignment::Center);
     widgets::tip(
         t,
         widgets::list_row(t, line, focused, message),
-        "expand or collapse folder ↵".into(),
+        "expand or collapse folder ↵ · fold from inside -".into(),
     )
 }
 
-/// Keep the display control compact enough for the narrow file panes.
-pub fn mode_button<'a, M: Clone + 'a>(t: &'a Tokens, tree: bool, message: M) -> Element<'a, M> {
-    let (label, hint) = if tree {
-        ("List", "show flat list (T)")
+/// List view toggle for the narrow file panes: one `≡` glyph, lit for the
+/// flat list, dim while folders are shown. `on(tree)` sets the mode.
+pub fn mode_button<'a, M: Clone + 'a>(
+    t: &'a Tokens,
+    tree: bool,
+    on: impl Fn(bool) -> M,
+) -> Element<'a, M> {
+    let hint = if tree {
+        "flat list: off — click to list files without folders (T)"
     } else {
-        ("Tree", "show directory tree (T)")
+        "flat list: on — click to group files by folder (T)"
     };
     widgets::tip(
         t,
-        widgets::text_button(t, label, None, Some(message)),
+        iced::widget::button(widgets::mono(t, MODE_GLYPH))
+            .padding(iced::Padding::from([1, 5]))
+            .style(style::mode_toggle(t, !tree))
+            .on_press(on(!tree)),
         hint.into(),
     )
 }
+
+/// Glyph of [`mode_button`].
+pub const MODE_GLYPH: &str = "≡";
 
 #[cfg(test)]
 mod tests {
@@ -277,6 +408,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 4, 5, 6, 7, 8]
         );
+    }
+
+    #[test]
+    fn stops_are_files_and_folded_folders_and_fold_targets_the_enclosing_folder() {
+        // Rows: 0 a/b/c/, 1 sub/, 2 other.txt, 3 hello.world, 4 z/, 5 last.txt
+        let paths = ["a/b/c/hello.world", "a/b/c/sub/other.txt", "z/last.txt"];
+        let tree = Tree::new(paths.into_iter().map(Path::new).enumerate());
+        let open = |path: &Path| path != Path::new("z");
+        let stops: Vec<_> = (0..6).filter(|&r| tree.is_stop(r, open)).collect();
+        assert_eq!(stops, [2, 3, 4, 5]);
+        assert_eq!(tree.file_row(1), Some(2));
+        assert_eq!(tree.fold_target(2, open), Some(1), "file → its folder");
+        assert_eq!(
+            tree.fold_target(3, open),
+            Some(0),
+            "skips the sibling folder"
+        );
+        assert_eq!(
+            tree.fold_target(1, open),
+            Some(1),
+            "open folder folds itself"
+        );
+        assert_eq!(tree.fold_target(4, open), None, "folded top-level folder");
+        assert_eq!(tree.fold_target(5, open), Some(4));
     }
 
     #[test]

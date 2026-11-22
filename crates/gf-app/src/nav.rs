@@ -118,6 +118,33 @@ pub fn step(current: Option<usize>, len: usize, key: Key, page: usize) -> Option
     })
 }
 
+/// Like [`step`], but lands only on rows where `stop` holds: it keeps going
+/// the way the key moves and falls back the other way at the list's end.
+/// Stays on `current` when no other row can be a stop.
+pub fn step_to(
+    current: Option<usize>,
+    len: usize,
+    key: Key,
+    page: usize,
+    stop: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let target = step(current, len, key, page)?;
+    let forward = match (current, key) {
+        (_, Key::Home) => true,
+        (_, Key::End) => false,
+        (Some(c), _) => target >= c,
+        (None, _) => matches!(key, Key::Down | Key::PageDown),
+    };
+    let ahead = |from: usize| (from..len).find(|&i| stop(i));
+    let behind = |from: usize| (0..=from).rev().find(|&i| stop(i));
+    let found = if forward {
+        ahead(target).or_else(|| behind(target))
+    } else {
+        behind(target).or_else(|| ahead(target))
+    };
+    found.or(current)
+}
+
 /// Rows that fit in the list's viewport.
 pub fn page(pos: ScrollPos, row_height: f32) -> usize {
     if row_height <= 0.0 || pos.height <= 0.0 {
@@ -175,6 +202,21 @@ pub fn scroll_by<M: Send + 'static>(id: &'static str, dy: f32) -> Task<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_to_skips_rows_that_are_not_stops() {
+        // Rows 0 and 3 are open folders; the rest are files.
+        let stop = |i: usize| i != 0 && i != 3;
+        assert_eq!(step_to(Some(2), 6, Key::Down, 3, stop), Some(4));
+        assert_eq!(step_to(Some(4), 6, Key::Up, 3, stop), Some(2));
+        assert_eq!(step_to(Some(1), 6, Key::Up, 3, stop), Some(1), "stays");
+        assert_eq!(step_to(None, 6, Key::Down, 3, stop), Some(1));
+        assert_eq!(step_to(Some(5), 6, Key::Home, 3, stop), Some(1));
+        assert_eq!(step_to(Some(1), 6, Key::PageDown, 2, stop), Some(4));
+        assert_eq!(step_to(Some(0), 6, Key::Down, 3, stop), Some(1));
+        assert_eq!(step_to(Some(0), 1, Key::Down, 3, |_| false), Some(0));
+        assert_eq!(step_to(Some(1), 6, Key::Char('x'), 3, stop), None);
+    }
 
     #[test]
     fn steps_clamp_and_start_at_the_ends() {

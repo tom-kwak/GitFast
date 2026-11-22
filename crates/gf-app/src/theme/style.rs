@@ -119,6 +119,26 @@ pub fn text_button(
     }
 }
 
+/// An on/off toggle glyph: lit in the accent on the selection color while
+/// on, dim until hovered while off.
+pub fn mode_toggle(t: &Tokens, lit: bool) -> impl Fn(&Theme, button::Status) -> button::Style + '_ {
+    move |_, status| {
+        let (background, text_color) = match (lit, status) {
+            (true, _) => (Some(Background::Color(t.selection)), t.accent()),
+            (false, button::Status::Hovered | button::Status::Pressed) => {
+                (Some(Background::Color(t.surface)), t.fg)
+            }
+            (false, _) => (None, t.dim),
+        };
+        button::Style {
+            background,
+            text_color,
+            border: square(Color::TRANSPARENT, 0.0),
+            ..button::Style::default()
+        }
+    }
+}
+
 /// A full-width list row: highlighted when selected or hovered.
 pub fn row_button(
     t: &Tokens,

@@ -20,6 +20,7 @@ use iced_test::runtime::{self, Action};
 use iced_test::selector::Candidate;
 
 use super::*;
+use crate::widgets::file_tree;
 
 const WINDOW: Size = Size::new(1280.0, 820.0);
 
@@ -1498,9 +1499,9 @@ async fn working_tree_defaults_to_list_and_tree_folds_all_files_in_a_folder() {
         .await,
     )
     .await;
-    assert!(ui.shows("[ Tree ]"));
+    assert!(!ui.app.settings.appearance.working_tree_dirs);
     assert!(!ui.shows("STAGED ("));
-    let _ = ui.click("[ Tree ]").await;
+    let _ = ui.click(file_tree::MODE_GLYPH).await;
     assert!(ui.shows("staged.txt"));
     assert!(ui.shows("lib.rs"));
     assert!((file_status_x(&ui, "b.txt", "A") - file_status_x(&ui, "staged.txt", "A")).abs() < 1.0);
@@ -1528,10 +1529,141 @@ async fn working_tree_defaults_to_list_and_tree_folds_all_files_in_a_folder() {
         .expect("Enter expands the focused folder");
     let _ = ui.send(Message::Changes(moved)).await;
     assert!(ui.shows("staged.txt"));
-    let _ = ui.click("[ List ]").await;
+    let _ = ui.click(file_tree::MODE_GLYPH).await;
     let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
     assert!(!saved.appearance.working_tree_dirs);
     assert!(saved.appearance.history_file_dirs);
+}
+
+/// One working tree key press in tree mode, applied to the app.
+async fn tree_key(ui: &mut Ui, key: crate::nav::Key) -> Option<changes::Message> {
+    let tab = ui.app.active_tab().expect("repository");
+    let snap = tab.snapshot.as_deref().expect("status");
+    let message = tab
+        .changes
+        .nav(crate::nav::Nav::plain(key), snap, &ui.app.tokens, true)
+        .and_then(|m| m.message);
+    if let Some(message) = message.clone() {
+        let _ = ui.send(Message::Changes(message)).await;
+    }
+    message
+}
+
+#[tokio::test]
+async fn working_tree_arrows_skip_open_folders_and_minus_folds_the_current_one() {
+    use crate::nav::Key;
+    use changes::Message as M;
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            r.write("src/staged/deep/staged.txt", "staged\n");
+            r.write("src/lib.rs", "unstaged\n");
+        })
+        .await,
+    )
+    .await;
+    let _ = ui.click(file_tree::MODE_GLYPH).await;
+    let selected =
+        |m: &Option<M>, name: &str| matches!(m, Some(M::Select(path, _)) if path.ends_with(name));
+    // Rows: src/ · staged/deep/ · staged.txt · lib.rs · then the root files.
+    let m = tree_key(&mut ui, Key::Home).await;
+    assert!(selected(&m, "staged.txt"), "Home skips open folders: {m:?}");
+    let m = tree_key(&mut ui, Key::Down).await;
+    assert!(selected(&m, "lib.rs"), "{m:?}");
+    let m = tree_key(&mut ui, Key::Up).await;
+    assert!(selected(&m, "staged.txt"), "{m:?}");
+    assert!(
+        tree_key(&mut ui, Key::Up).await.is_none(),
+        "nothing above but folders"
+    );
+
+    let m = tree_key(&mut ui, Key::Char('-')).await;
+    assert!(
+        matches!(&m, Some(M::ToggleFolder(p)) if p == std::path::Path::new("src/staged")),
+        "{m:?}"
+    );
+    // The selected file's name stays in the diff title, so check the rows by moving.
+    let m = tree_key(&mut ui, Key::Down).await;
+    assert!(selected(&m, "lib.rs"), "staged.txt is folded away: {m:?}");
+    let m = tree_key(&mut ui, Key::Up).await;
+    assert!(
+        matches!(&m, Some(M::FocusFolder(p)) if p == std::path::Path::new("src/staged")),
+        "a folded folder is a stop: {m:?}"
+    );
+    let _ = tree_key(&mut ui, Key::Enter).await;
+    let m = tree_key(&mut ui, Key::Down).await;
+    assert!(selected(&m, "staged.txt"), "Enter unfolded it: {m:?}");
+
+    let _ = tree_key(&mut ui, Key::Down).await;
+    let m = tree_key(&mut ui, Key::Char('-')).await;
+    assert!(
+        matches!(&m, Some(M::ToggleFolder(p)) if p == std::path::Path::new("src")),
+        "lib.rs folds src: {m:?}"
+    );
+    assert!(
+        tree_key(&mut ui, Key::Home).await.is_none(),
+        "already on src/"
+    );
+    let m = tree_key(&mut ui, Key::Down).await;
+    assert!(
+        matches!(&m, Some(M::Select(p, _)) if !p.starts_with("src")),
+        "src/ is folded: {m:?}"
+    );
+}
+
+#[tokio::test]
+async fn working_tree_shift_click_marks_files_for_one_menu_and_esc_clears_them() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            for name in ["x1.txt", "x2.txt", "x3.txt"] {
+                r.write(name, "new\n");
+            }
+        })
+        .await,
+    )
+    .await;
+    let _ = ui.click("x1.txt").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::SHIFT))
+        .await;
+    let _ = ui.click("x3.txt").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::empty()))
+        .await;
+    let _ = ui.right_click("x2.txt").await;
+    assert!(ui.shows("3 files selected"));
+    assert!(ui.shows("discard changes… (3)"));
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    assert!(!ui.shows("3 files selected"), "Esc closes the menu first");
+
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    let _ = ui.right_click("x2.txt").await;
+    assert!(!ui.shows("files selected"), "Esc cleared the marks");
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+
+    // ⌘-click adds to the current file.
+    let _ = ui.click("x1.txt").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::COMMAND))
+        .await;
+    let _ = ui.click("x3.txt").await;
+    let _ = ui
+        .send(Message::Modifiers(keyboard::Modifiers::empty()))
+        .await;
+    let _ = ui.right_click("x1.txt").await;
+    assert!(ui.shows("2 files selected"));
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+
+    // ⌘A in the file list marks every changed file.
+    let _ = ui.send(Message::Key(Shortcut::SelectAll)).await;
+    let snap = ui
+        .app
+        .active_tab()
+        .and_then(|tab| tab.snapshot.clone())
+        .expect("status");
+    let all = snap.change_files.paths(&snap.status.entries).len();
+    assert!(all > 3, "the fixture's own changes too");
+    let _ = ui.right_click("x2.txt").await;
+    assert!(ui.shows(&format!("{all} files selected")));
 }
 
 #[tokio::test]
@@ -1544,17 +1676,17 @@ async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() 
     })
     .await;
     let _ = ui.click("move source file").await;
-    assert!(ui.shows("[ List ]"));
+    assert!(ui.app.settings.appearance.history_file_dirs);
     let labels: Vec<_> = ui
         .targets()
         .into_iter()
         .map(|target| target.label)
         .collect();
-    assert!(labels.iter().any(|label| label == "moved/deep/target"));
+    assert!(labels.iter().any(|label| label == "moved/deep/target/"));
     assert!(
         !labels
             .iter()
-            .any(|label| label == "moved" || label == "src")
+            .any(|label| label == "moved/" || label == "src/")
     );
     assert!(ui.shows("lib.rs → lib_new.rs"));
     assert!(
@@ -1571,9 +1703,9 @@ async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() 
             .as_deref(),
         Some(std::path::Path::new("moved/deep/target/lib_new.rs"))
     );
-    let _ = ui.click("moved/deep/target").await;
+    let _ = ui.click("moved/deep/target/").await;
     assert!(!ui.shows("lib.rs → lib_new.rs"));
-    let _ = ui.click("[ List ]").await;
+    let _ = ui.click(file_tree::MODE_GLYPH).await;
     assert!(ui.shows("lib_new.rs"));
 }
 
@@ -3362,12 +3494,39 @@ async fn rebase_rows_cannot_move_past_the_ends() {
 }
 
 #[tokio::test]
+async fn commit_button_counts_the_staged_files() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            r.write("one.txt", "1\n");
+            r.write("two.txt", "2\n");
+            r.git(&["add", "one.txt", "two.txt"]);
+        })
+        .await,
+    )
+    .await;
+    let staged = ui
+        .app
+        .active_tab()
+        .and_then(|t| t.snapshot.as_deref())
+        .expect("status")
+        .staged_count();
+    assert!(staged >= 2);
+    assert!(ui.shows(&format!("[ Commit {staged} ]")));
+
+    let _ = ui
+        .send(Message::Changes(changes::Message::UnstageAll))
+        .await;
+    ui.settle();
+    assert!(ui.shows("[ Commit ]"), "nothing staged: no count");
+}
+
+#[tokio::test]
 async fn a_flash_does_not_move_the_window_contents() {
     let mut ui = working_tree(Ui::open().await).await;
     let commit = |ui: &Ui| {
         ui.targets()
             .into_iter()
-            .find(|t| t.label == "[ Commit ]")
+            .find(|t| t.label.starts_with("[ Commit"))
             .expect("commit button")
             .at
     };
