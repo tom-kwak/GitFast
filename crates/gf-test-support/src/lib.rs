@@ -114,13 +114,7 @@ impl TestRepo {
     /// config) in its own temp dir: cheaper than building it again.
     pub fn duplicate(&self) -> TestRepo {
         let copy = Self::empty_dir();
-        let out = Command::new("cp")
-            .arg("-Rp")
-            .arg(self.path().join("."))
-            .arg(copy.path())
-            .output()
-            .unwrap();
-        assert_success(&["cp -Rp"], &out);
+        copy_tree(self.path(), copy.path()).expect("copying the test repository");
         copy.clock
             .store(self.clock.load(Ordering::SeqCst), Ordering::SeqCst);
         copy
@@ -171,6 +165,54 @@ fn isolated_env(home: &Path, tick: u32) -> Vec<(String, OsString)> {
         ("GIT_COMMITTER_DATE".into(), date),
         ("LC_ALL".into(), s("C")),
     ]
+}
+
+/// Copies `from`'s contents into `to` like `cp -Rp`: files keep their
+/// modification time, so the copied index still matches the working tree.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+            copy_tree(&entry.path(), &dest)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &dest)?;
+            let meta = entry.metadata()?;
+            // Read-only files are git's objects and packs, whose time git
+            // never compares; the rest (work tree, index) keep theirs.
+            if !meta.permissions().readonly() {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&dest)?
+                    .set_modified(meta.modified()?)?;
+            }
+        } else {
+            copy_link(&entry.path(), &dest)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_link(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(std::fs::read_link(from)?, to)
+}
+
+#[cfg(not(unix))]
+fn copy_link(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::copy(from, to).map(drop)
+}
+
+/// `path` without Windows' `\\?\` prefix, which `canonicalize` adds and
+/// git does not understand. Unchanged elsewhere.
+pub fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if cfg!(windows) && !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 fn null_device() -> &'static str {

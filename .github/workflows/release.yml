@@ -1,7 +1,8 @@
 name: Release
 
 # A tag `release-<version>` (the workspace version in Cargo.toml) on a
-# commit that is in main publishes a release with the macOS .dmg: either
+# commit that is in main publishes a release with the macOS .dmg and the
+# Windows .zip: either
 # the tag is pushed onto a commit main already has, or main gets the
 # tagged commit later (a merge of develop). A tag on a commit main does
 # not have waits until main has it.
@@ -140,9 +141,39 @@ jobs:
             ${{ steps.package.outputs.dmg }}.sha256
           retention-days: 7
 
+  windows:
+    name: Package (Windows)
+    needs: [resolve, ci]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Build gf.exe and .zip
+        shell: pwsh
+        run: |
+          $version = "${{ needs.resolve.outputs.tag }}" -replace '^release-', ''
+          # Fails when the tag does not match Cargo.toml (as the macOS job).
+          ./scripts/package-windows.ps1 -Version $version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zip
+          path: |
+            dist/gf-windows-x64.zip
+            dist/gf-windows-x64.zip.sha256
+          retention-days: 7
+
   publish:
     name: Publish release
-    needs: [macos, ui-sweep]
+    needs: [macos, windows, ui-sweep]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -151,6 +182,10 @@ jobs:
         with:
           name: dmg
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: zip
+          path: dist
 
       - name: Publish release
         env:
@@ -158,6 +193,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.macos.outputs.tag }}
           DMG: dist/gf-macos-universal.dmg
+          ZIP: dist/gf-windows-x64.zip
         run: |
           cat > notes.md <<NOTES
           ## Install
@@ -169,9 +205,21 @@ jobs:
           \`\`\`
 
           Universal build (Apple silicon + Intel), macOS 11+.
+
+          ### Windows
+
+          Paste in PowerShell (installs or updates gf for the current user):
+
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
+          \`\`\`
+
+          Windows 10 1809+ / 11 (x64) with [Git for Windows](https://git-scm.com/download/win).
+          gf is not code-signed yet: SmartScreen may warn on first launch
+          ("More info" → "Run anyway"). Each download has a \`.sha256\` to check it against.
           NOTES
           # The tag already exists (on a commit in main).
-          gh release create "$TAG" "$DMG" "$DMG.sha256" \
+          gh release create "$TAG" "$DMG" "$DMG.sha256" "$ZIP" "$ZIP.sha256" \
             --verify-tag \
             --title "gf ${TAG#release-}" \
             --notes-file notes.md \

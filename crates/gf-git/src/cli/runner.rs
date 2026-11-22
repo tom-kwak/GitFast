@@ -219,6 +219,8 @@ impl GitRunner {
         if let Some(cwd) = &cmd.cwd {
             process.current_dir(cwd);
         }
+        #[cfg(windows)]
+        process.creation_flags(gf_core::tool_path::CREATE_NO_WINDOW);
 
         let mut child = process.spawn().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => {

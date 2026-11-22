@@ -1,5 +1,8 @@
 //! gf entry point: storage paths, logging, settings, then the iced app.
 
+// Release builds on Windows are GUI apps: no console window next to gf.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod badges;
 mod feature;
@@ -8,6 +11,7 @@ mod git_actions;
 mod highlight;
 mod logging;
 mod nav;
+mod platform;
 mod repo_tab;
 mod theme;
 mod undo;
@@ -54,9 +58,8 @@ fn main() -> anyhow::Result<()> {
     .title(app::App::title)
     .theme(app::App::theme)
     .subscription(app::App::subscription)
-    .default_font(iced::Font::MONOSPACE)
-    .window_size((1280.0, 820.0))
-    .centered()
+    .default_font(platform::mono_font())
+    .window(platform::window_settings())
     .run()
     .context("running the UI")?;
     Ok(())

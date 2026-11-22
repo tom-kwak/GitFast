@@ -928,7 +928,7 @@ impl Ui {
 
     fn simulator(&self) -> iced_test::Simulator<'_, Message> {
         let settings = iced_test::core::Settings {
-            default_font: iced::Font::MONOSPACE,
+            default_font: crate::platform::mono_font(),
             ..iced_test::core::Settings::default()
         };
         iced_test::Simulator::with_size(settings, WINDOW, self.app.view())
@@ -1036,6 +1036,8 @@ impl Ui {
 
     async fn click_with(&mut self, label: &str, button: mouse::Button) -> Effects {
         self.settle();
+        // Tests name shortcuts with mac glyphs, as the code writes them.
+        let label = &*crate::platform::keys::local(label.into());
         let targets = self.targets();
         let target = targets
             .iter()
@@ -1085,6 +1087,7 @@ impl Ui {
     }
 
     pub fn shows(&self, label: &str) -> bool {
+        let label = &*crate::platform::keys::local(label.into());
         self.targets().iter().any(|t| t.label.contains(label))
     }
 
@@ -2083,7 +2086,7 @@ async fn history_files_menu_previews_the_clicked_files_commit_version() {
     assert!(!clicked.repo_changed);
     assert!(ui.shows("file history"));
     assert!(ui.shows("blame"));
-    assert!(ui.shows("reveal in Finder"));
+    assert!(ui.shows(&format!("reveal in {}", crate::platform::FILE_MANAGER)));
     let copied = ui.click("copy path").await;
     assert_eq!(copied.clipboard, 1);
     assert_eq!(ui.flash(), "copied src/lib.rs");
@@ -3029,6 +3032,7 @@ async fn removing_a_worktree_closes_its_open_tab() {
     let path = folder
         .path()
         .canonicalize()
+        .map(gf_test_support::without_verbatim_prefix)
         .expect("worktree parent path")
         .join("wt");
     let repo = &ui.fixture.repo;
@@ -3177,7 +3181,11 @@ async fn diff_exposes_copy_only_for_a_selection() {
     let ui = a_txt_shown().await;
     assert!(!ui.targets().iter().any(|t| t.label == "[ copy ]"));
     let ui = drag_selected().await;
-    assert!(ui.targets().iter().any(|t| t.label == "[ copy ⌘C ]"));
+    assert!(
+        ui.targets()
+            .iter()
+            .any(|t| t.label == crate::platform::keys::local("[ copy ⌘C ]".into()))
+    );
 }
 
 #[tokio::test]

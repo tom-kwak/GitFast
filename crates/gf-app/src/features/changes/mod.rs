@@ -250,7 +250,7 @@ fn file_menu(path: &Path, group: Group, in_head: bool) -> Menu<Message> {
     ));
     entries.push(Entry::item(
         'f',
-        "reveal in Finder",
+        format!("reveal in {}", crate::platform::FILE_MANAGER),
         "show it in its folder",
         act(Output::Reveal(pb)),
     ));
@@ -510,7 +510,7 @@ impl State {
             .on_toggle_maybe((!staging).then_some(move |_| action.clone()));
         let control = if partial {
             control.icon(iced::widget::checkbox::Icon {
-                font: iced::Font::MONOSPACE,
+                font: crate::platform::mono_font(),
                 code_point: '−',
                 size: None,
                 line_height: Default::default(),

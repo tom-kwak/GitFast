@@ -60,6 +60,9 @@ src/
 ├─ repo_tab.rs       저장소 탭별 상태(RepoTab, Snapshot)
 ├─ undo.rs           undo/redo 기록(Step, History — git dir의 gf/undo.json에 저장)
 ├─ git_actions.rs    git 실행 헬퍼
+├─ platform/         운영체제별 차이를 모두 모은 곳(§4-1)
+│  ├─ mod.rs         홈 폴더, 경로 구분자, 파일 관리자(reveal), 브라우저, 창 설정
+│  └─ keys.rs        단축키 표기: macOS `⌘⇧K` → 그 외 `Ctrl+Shift+K`
 ├─ app/              루트 App (라우팅만)
 │  ├─ mod.rs         Message, update, view, 전역 키 → KeyInput
 │  ├─ outputs.rs     피처 Output 처리(on_history, on_sidebar …)
@@ -155,6 +158,7 @@ mod tests { /* update/nav 단위 테스트 */ }
    - 스크롤 id는 `const` 하나로 둡니다.
 4. **빈 상태는 안내로** 채웁니다: `widgets::empty_hint(t, "무엇을 하면 채워지는지")`.
 5. **단축키는 발견 가능하게** 합니다. 툴팁(`widgets::tip`)과 `:help`(`app/outputs.rs`의 help 줄)에 적습니다.
+   - 문구에는 **mac 글리프로** 씁니다(`⌘⇧Z`, `⌃⇥`, `⏎`). 화면에 그릴 때 `widgets::mono`/`dim`이 `platform::keys::local`을 거쳐 macOS 밖에서는 `Ctrl+Shift+Z`로 바꿉니다. `text()`를 직접 부르지 말고 이 헬퍼를 씁니다.
 6. **툴바에는 git 주요 명령만** 두고 refresh는 맨 오른쪽에 둡니다. 패널 토글은 그 패널 안에 둡니다.
 7. **삭제·변경은 공통 확인 다이얼로그를 거칩니다.**
    - `App::confirm(Confirm::delete(..) | Confirm::change(key, ..))`를 쓰고, 실행할 작업은 `dialogs::Purpose`에 variant로 추가합니다.
@@ -168,6 +172,17 @@ mod tests { /* update/nav 단위 테스트 */ }
 9. **긴 작업은 비동기**로 처리합니다. 진행 표시는 스피너와 상태줄, 결과는 명령 로그와 flash에 남깁니다.
 
 ---
+
+### 4-1. 운영체제별 차이 (macOS · Windows)
+
+- 운영체제마다 달라지는 동작은 **gf-app 안에서는 `gf-app/src/platform/`에, 하위 크레이트(gf-git, gf-watch …)에서는 `gf_core::tool_path`에** 둡니다. 피처 코드(`features/`, `app/`, `widgets/`)에서 `cfg!(target_os = …)`·`cfg!(windows)`를 쓰지 않고 `platform::`의 함수를 부릅니다.
+  - 홈 폴더 `platform::home_dir()`(`HOME`을 직접 읽지 않음), 입력 경로 구분자 `is_path_sep`, 경로처럼 보이는 입력 `looks_like_path`
+  - 파일 관리자 `reveal`·`FILE_MANAGER`("reveal in {FILE_MANAGER}"), 브라우저 `open_url`, 창 설정 `window_settings`, 글꼴 `mono_font`
+  - 단축키 표기 `platform::keys::local`. `widgets::mono`/`dim`은 자동으로 거치지만, `text_input` placeholder처럼 이 헬퍼를 지나지 않는 문구는 직접 변환합니다.
+- git·도구 실행 환경은 `gf_core::tool_path`에 있습니다. git을 동기로 부를 때는 `tool_path::git_command()`(설정의 git 경로 + 확장 PATH + Windows 콘솔 창 숨김)를 씁니다. 새 서브프로세스를 만들면 `hide_console`을 거칩니다.
+  - 예외: tokio `Command`를 쓰는 gf-git runner는 `hide_console`(std 전용)을 쓸 수 없어 `#[cfg(windows)]`로 `CREATE_NO_WINDOW`를 직접 넣고, gf-test-support는 테스트 헬퍼라 `cfg`를 직접 씁니다.
+- 저장소 안 경로를 화면에 쓸 때는 `widgets::format::repo_path`(항상 `/`)를 씁니다. `Path::join` 결과의 `display()`는 Windows에서 `\`가 섞입니다.
+- 테스트도 두 OS에서 돌아야 합니다: `/tmp` 같은 고정 경로 대신 `tempfile`을 쓰고, 플랫폼 전용 테스트에는 `#[cfg(...)]`와 이유 주석을 붙입니다. CI는 macOS와 Windows에서 돕니다.
 
 ## 5. 키보드 (패널 포커스 모델)
 

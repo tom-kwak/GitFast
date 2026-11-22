@@ -5,7 +5,7 @@
 <h1 align="center">gf</h1>
 
 <p align="center">
-  <b>gf</b> is short for <b>Git Fast</b>: a Git GUI client for macOS built to
+  <b>gf</b> is short for <b>Git Fast</b>: a Git GUI client for macOS and Windows built to
   be the fastest one, written in Rust with
   <a href="https://github.com/iced-rs/iced">iced</a>.
 </p>
@@ -14,9 +14,12 @@
   <a href="https://github.com/tom-kwak/GitFast/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/tom-kwak/GitFast?label=release"></a>
   <img alt="macOS 11+" src="https://img.shields.io/badge/macOS-11%2B-black">
   <img alt="Apple silicon and Intel" src="https://img.shields.io/badge/universal-Apple%20silicon%20%7C%20Intel-black">
+  <img alt="Windows 10+" src="https://img.shields.io/badge/Windows-10%2B%20x64-blue">
 </p>
 
 ## Install
+
+### macOS
 
 Paste in Terminal (macOS 11+, Apple silicon or Intel):
 
@@ -30,7 +33,27 @@ opens without a Gatekeeper prompt. Run it again to update.
 gf requires **Git 2.43.1 or later**. Check your version with `git --version`.
 Git is available through Xcode Command Line Tools or Homebrew.
 
-gf runs on macOS today. Windows and Linux support is planned.
+### Windows
+
+Paste in PowerShell (Windows 10 1809+ or 11, x64):
+
+```powershell
+irm https://raw.githubusercontent.com/tom-kwak/GitFast/main/scripts/install.ps1 | iex
+```
+
+It installs the latest release into `%LOCALAPPDATA%\Programs\gf` for the current
+user (no administrator rights), adds it to your `PATH` and the Start menu, and
+checks the download against its published SHA-256. Run it again to update.
+gf needs [Git for Windows](https://git-scm.com/download/win); if git is missing,
+gf says so on its start screen.
+
+gf is not code-signed yet, so SmartScreen may warn the first time
+("More info" → "Run anyway"). To check a manual download, compare
+`Get-FileHash gf-windows-x64.zip` with `gf-windows-x64.zip.sha256` from the release.
+
+Shortcuts read `⌘` on macOS and `Ctrl` on Windows (`⌘⇧Z` is `Ctrl+Shift+Z`).
+
+Linux support is planned.
 
 ## Features
 

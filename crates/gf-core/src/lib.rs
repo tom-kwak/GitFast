@@ -10,4 +10,4 @@ pub mod tool_path;
 
 pub use error::{GfError, Result};
 pub use event::{CommandEvent, CommandPhase, CoreEvent, EventBus};
-pub use tool_path::tool_path;
+pub use tool_path::{git_program, set_git_program, tool_path};

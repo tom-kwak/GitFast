@@ -206,6 +206,8 @@ pub enum Message {
     Open(PathBuf),
     Opened(PathBuf, Result<Box<Repository>, String>),
     Restored(Vec<Repository>, Option<usize>),
+    /// Whether git starts (checked once at boot, off the UI thread).
+    GitChecked(bool),
     PickFolder,
     Picked(Option<PathBuf>),
     Loaded(RepoId, Result<Arc<Snapshot>, String>),
@@ -370,6 +372,8 @@ pub struct App {
     busy_since: Option<Instant>,
     tick: usize,
     drop_hover: bool,
+    /// `git --version` failed at startup: the welcome screen says how to get git.
+    git_missing: bool,
     /// While ⌘ is held, characters a text field inserts are shortcut keys,
     /// not typing (see `Message::Prompt`).
     /// Currently held modifiers.
@@ -394,6 +398,7 @@ impl App {
             // hanging on an invisible vi (see git_actions::hint_for_error).
             .with_env([("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")]);
         if let Some(git) = &settings.git.executable {
+            gf_core::set_git_program(git);
             runner = runner.with_git_path(git);
         }
         let tokens =
@@ -462,6 +467,7 @@ impl App {
             busy_since: None,
             tick: 0,
             drop_hover: false,
+            git_missing: false,
             modifiers: keyboard::Modifiers::empty(),
             opening: 0,
             focus: Pane::default(),
@@ -473,7 +479,15 @@ impl App {
         } else {
             Task::none()
         };
-        (app, Task::batch([restore, focus]))
+        let git_check = Task::perform(
+            async {
+                tokio::task::spawn_blocking(gf_core::tool_path::git_available)
+                    .await
+                    .unwrap_or(false)
+            },
+            Message::GitChecked,
+        );
+        (app, Task::batch([restore, focus, git_check]))
     }
 
     pub fn title(&self) -> String {
@@ -587,6 +601,12 @@ impl App {
             Message::Welcome(m) => match m {
                 welcome::Message::OpenRecent(p) => self.update(Message::Open(p)),
                 welcome::Message::Open => self.update(Message::OpenPicker),
+                welcome::Message::GetGit => {
+                    if let Err(e) = crate::platform::open_url(crate::platform::GIT_DOWNLOAD_URL) {
+                        self.flash(NoteKind::Error, format!("could not open the browser: {e}"));
+                    }
+                    Task::none()
+                }
             },
             Message::Modifiers(m) => {
                 self.modifiers = m;
@@ -918,6 +938,13 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+            Message::GitChecked(found) => {
+                self.git_missing = !found;
+                if !found {
+                    tracing::warn!(git = %gf_core::git_program().display(), "git not found");
+                }
+                Task::none()
             }
             Message::Restored(repos, active) => {
                 let tasks: Vec<_> = repos.into_iter().map(|r| self.add_tab(r)).collect();
@@ -1638,9 +1665,13 @@ impl App {
         let checkout_indicator = checkout.map(|c| (c.target.as_str(), spinner));
 
         let body: Element<'_, Message> = match tab {
-            None => {
-                welcome::view(t, &self.settings.repos.recent, self.drop_hover).map(Message::Welcome)
-            }
+            None => welcome::view(
+                t,
+                &self.settings.repos.recent,
+                self.drop_hover,
+                self.git_missing,
+            )
+            .map(Message::Welcome),
             Some(tab) => {
                 let appearance = &self.settings.appearance;
                 let active = self.pane();

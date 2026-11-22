@@ -1,6 +1,32 @@
 # gf Windows 출시 작업 문서
 
-> 이 문서는 **Windows PC에서 작업을 이어받는 사람(또는 에이전트)** 을 위한 체크리스트다. 코드는 아직 수정하지 않았고, 아래는 macOS에서 코드를 읽어 정리한 분석·계획이다. Windows에서 빌드·실행해 본 적은 없으므로, 단계 0의 결과에 따라 범위를 조정한다.
+> 이 문서는 **Windows PC에서 작업을 이어받는 사람(또는 에이전트)** 을 위한 체크리스트다. 처음에는 macOS에서 코드를 읽어 정리한 계획이었고, 아래 "진행 현황"부터 Windows 11 PC에서 실제로 작업한 결과다.
+
+## 진행 현황 (2026-11-22, Windows 11 x64)
+
+**단계 0 — 빌드 spike: 통과.** VS Build Tools 2022(C++), rustup stable 1.100, Git for Windows 2.48을 설치한 뒤, 코드 수정 없이 `cargo build -p gf-app`가 성공했다.
+- onig(C 빌드): 문제없음 → `fancy-regex` 전환 불필요
+- winit 포크(`[patch.crates-io]`): Windows에서도 빌드됨. 한글 IME 동작은 실행 확인 필요(아래 남은 일)
+- 수정 전 Windows 기준 `cargo test --workspace`: 약 500개 중 7개 실패(전부 테스트·경로 가정)
+
+**운영체제별 코드 정리(리팩토링).** OS마다 다른 동작을 `crates/gf-app/src/platform/` 한 곳으로 모았다. 피처 코드는 `cfg!`를 쓰지 않는다(규칙: DEVELOPMENT.md §4-1).
+- `platform::keys::local`: 단축키 표기. `widgets::mono`/`dim`이 그릴 때 적용하므로 문구는 mac 글리프 그대로 둔다(macOS는 항등)
+- `platform::{home_dir, is_path_sep, looks_like_path}`: `HOME` 대신 `USERPROFILE`, `C:\x`·`\\server\share` 입력, `~\x`
+- `platform::{reveal, FILE_MANAGER, open_url, GIT_DOWNLOAD_URL, window_settings}`: outputs.rs에 있던 `reveal()`을 옮김. "reveal in Finder" → Windows는 "reveal in File Explorer". 창·작업표시줄 아이콘
+- `gf_core::tool_path`: Windows git 설치 경로를 PATH에 추가, `hide_console`/`git_command`/`git_available`, 설정의 `git.executable`을 `set_git_program`으로 전역 공유(파일 감시의 `check-ignore`도 따름)
+
+**완료한 항목** (아래 체크리스트 중)
+- 4-1 콘솔 창 제거: `windows_subsystem`(release), 모든 git 서브프로세스에 `CREATE_NO_WINDOW`(runner, gix_fetch, gf-watch)
+- 4-2 git 탐색 + 미설치 안내: 시작 시 `git --version`을 백그라운드에서 확인 → Welcome 화면에 배너 + "Download Git" 버튼
+- 4-3 단축키 표시: `keys.rs` + 렌더 경계 적용, Welcome 단축키 열 너비 조정, "reveal in File Explorer"
+- 4-4 아이콘: `packaging/windows/gf.ico`를 `build.rs`(embed-resource)로 exe에 넣고, 창 아이콘은 `window_settings`
+- 5 테스트·CI: `cp -Rp` → `std::fs` 복사 헬퍼, `\\?\` 경로 제거 헬퍼, 개행 파일명·`/tmp` 테스트 분기, CI 매트릭스에 `windows-latest`
+- 6 패키징: `scripts/package-windows.ps1`, `scripts/install.ps1`, release.yml `windows` 잡·릴리스 노트, README Windows 설치 섹션, `.gitattributes`
+
+**남은 일**
+- 실행해서 화면 확인(한글 IME, 글리프 렌더링, DPI) — 7장 수동 검증 체크리스트
+- `cargo deny check`의 Windows 전용 의존성 라이선스는 CI(ubuntu)에서 확인
+- release 드라이런(`release-<version>` 태그)과 깨끗한 PC에서 `install.ps1`
 
 ## 0. 목표와 결정 사항
 
@@ -30,6 +56,30 @@
 - 테스트의 Unix 가정(`cp -Rp` 등), CI는 macOS만
 - Windows 패키징·릴리스 워크플로·설치 스크립트·아이콘(.ico) 없음
 - README는 "gf runs on macOS today"
+
+**추가로 발견한 것 (코드 재검토, 2026-11-22)** — 아래 단계에 반영해 처리한다
+- **`HOME` 의존**: Windows에는 보통 `HOME`이 없다(`USERPROFILE`).
+  - [ops.rs:1168](crates/gf-app/src/app/ops.rs) `home_dir()`가 `/`로 폴백한다.
+  - [widgets/format.rs:70,80](crates/gf-app/src/widgets/format.rs)의 `tilde`/`expand_tilde`가 동작하지 않고, `~/` 구분자도 `/` 고정이다.
+  - 대응: `directories::BaseDirs::home_dir()`(이미 의존 중)로 바꾸고, `~\`도 받는다. → 단계 1(4-4)
+- **에디터 환경변수가 sh에 의존**
+  - [rebase_interactive.rs:286](crates/gf-git/src/ops/rebase_interactive.rs)이 `GIT_SEQUENCE_EDITOR="cp '<경로>'"`를 쓰고, todo 안의 `exec git commit -F '<경로>'`도 sh 인용 방식이다.
+  - `GIT_EDITOR=true/false`도 같다([mod.rs:395](crates/gf-app/src/app/mod.rs), [integrate.rs:110](crates/gf-git/src/ops/integrate.rs)).
+  - Git for Windows는 내장 sh로 에디터를 실행하므로 동작할 *가능성*은 높다. 다만 `C:\…` 백슬래시 경로, 한글·공백 경로에서 interactive rebase(reword/squash)를 반드시 실기 확인한다. → 단계 1(4-2), 단계 4
+- **콘솔 깜빡임 대상 누락**: [gf-watch/src/lib.rs:129](crates/gf-watch/src/lib.rs)도 `Command::new("git")`를 쓴다. 여기에도 `CREATE_NO_WINDOW`를 붙인다. 이 호출은 설정의 `git.executable`을 따르지 않고 `"git"`으로 고정돼 있어, git이 PATH에 없는 PC에서는 파일 감시 필터가 실패한다. 실행 파일 경로를 주입하도록 고친다. → 단계 1(4-1, 4-2)
+- **`reveal()`**([outputs.rs:1501](crates/gf-app/src/app/outputs.rs))
+  - git에서 온 `/` 구분 경로가 섞이면 `explorer /select,`가 선택에 실패한다. 경로를 정규화(`\`)해서 넘긴다.
+  - `explorer.exe`는 성공해도 종료 코드 1을 돌려주므로 에러로 표시하지 않는지 확인한다.
+- **undo의 플랫폼 차이**([undo.rs:858,890](crates/gf-git/src/ops/undo.rs))
+  - Windows에서는 실행 비트가 항상 `false`로 기록되고, 심볼릭 링크 복원은 `Unsupported`다.
+  - `core.filemode=false`·`core.symlinks=false` 환경에서 undo 스냅샷이 거짓 변경을 만들지 않는지, 에러 문구가 자연스러운지 확인한다.
+- **`.gitattributes` 없음**(확인함): 2장 항목은 "확인"이 아니라 "추가"다. `rustfmt.toml`에는 `newline_style`이 없으므로 `newline_style = "Unix"` 추가를 검토한다.
+- **테스트 경로 하드코딩**
+  - `/tmp/...`: [prompt/parse.rs:372,425](crates/gf-app/src/features/prompt/parse.rs), [gf-config paths.rs:92](crates/gf-config/src/paths.rs)
+  - macOS `/private/tmp`: [repo_picker/mod.rs:1024](crates/gf-app/src/features/repo_picker/mod.rs)
+  - `#!/bin/sh` 훅: [gix_contract.rs:658](crates/gf-git/tests/gix_contract.rs)
+  - 단계 2에서 `cfg`로 분기하거나 임시 디렉터리 기반으로 바꾼다.
+- **`gf-auth`**: 다른 크레이트가 의존하지 않는다(확인함). 그래서 이번 범위에서 빼도 빌드에 영향이 없다.
 
 ## 2. Windows 개발 환경 준비
 

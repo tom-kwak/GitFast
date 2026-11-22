@@ -1228,7 +1228,7 @@ impl App {
         };
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || reveal(&abs))
+                tokio::task::spawn_blocking(move || crate::platform::reveal(&abs))
                     .await
                     .map_err(|e| e.to_string())?
                     .map_err(|e| e.to_string())
@@ -1484,32 +1484,6 @@ pub(super) fn stash_options(
         keep_index,
         paths: Vec::new(),
     }
-}
-
-/// Shows `path` selected in the file manager (Finder on macOS).
-fn reveal(path: &std::path::Path) -> std::io::Result<()> {
-    // Historical paths may have been removed from the working tree.
-    std::fs::symlink_metadata(path)?;
-    if cfg!(test) {
-        return Ok(());
-    }
-    let mut cmd = if cfg!(target_os = "macos") {
-        let mut c = std::process::Command::new("open");
-        c.arg("-R").arg(path);
-        c
-    } else if cfg!(target_os = "windows") {
-        let mut c = std::process::Command::new("explorer");
-        c.arg(format!("/select,{}", path.display()));
-        c
-    } else {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(path.parent().unwrap_or(path));
-        c
-    };
-    let mut child = cmd.spawn()?;
-    // Reaped in the background so it never lingers as a zombie.
-    std::thread::spawn(move || child.wait());
-    Ok(())
 }
 
 /// `a.rs, b.rs, c.rs  +11 more  [l] list`: the first few blocking files.

@@ -245,7 +245,7 @@ fn match_bounds(t: &Tokens, raw: &str, range: Range<usize>) -> Option<Range<f32>
         bounds: Size::INFINITE,
         size: Pixels(t.font_size),
         line_height: text::LineHeight::default(),
-        font: Font::MONOSPACE,
+        font: crate::platform::mono_font(),
         align_x: text::Alignment::Default,
         align_y: alignment::Vertical::Top,
         shaping: text::Shaping::Advanced,

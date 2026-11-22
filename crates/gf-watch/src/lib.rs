@@ -122,19 +122,18 @@ pub fn drop_ignored(workdir: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 fn ignored(workdir: &Path, paths: &[PathBuf]) -> std::io::Result<HashSet<PathBuf>> {
     use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     if paths.is_empty() {
         return Ok(HashSet::new());
     }
-    let mut child = Command::new("git")
-        .env("PATH", gf_core::tool_path())
-        .arg("-C")
+    let mut cmd = gf_core::tool_path::git_command();
+    cmd.arg("-C")
         .arg(workdir)
         .args(["check-ignore", "--stdin", "-z"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn()?;
     let mut input = Vec::new();
     for p in paths {
         input.extend_from_slice(path_bytes(p).as_ref());

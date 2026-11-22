@@ -65,21 +65,35 @@ pub fn duration(d: Duration) -> String {
     }
 }
 
+/// A path inside the repository as git writes it: `/` between folders on
+/// every platform (`Path::join` puts `\` on Windows).
+pub fn repo_path(path: &Path) -> String {
+    let mut out = String::new();
+    for (i, part) in path.components().enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        out.push_str(&part.as_os_str().to_string_lossy());
+    }
+    out
+}
+
 /// Replaces the home directory prefix with `~`.
 pub fn tilde(path: &Path) -> String {
-    if let Some(home) = std::env::var_os("HOME")
+    if let Some(home) = crate::platform::home_dir()
         && let Ok(rest) = path.strip_prefix(&home)
     {
-        return format!("~/{}", rest.display());
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
     }
     path.display().to_string()
 }
 
-/// Expands a leading `~` in user-typed paths.
+/// Expands a leading `~` in user-typed paths (`~/x`; also `~\x` on Windows).
 pub fn expand_tilde(input: &str) -> std::path::PathBuf {
-    match (input.strip_prefix('~'), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
-            Path::new(&home).join(rest.trim_start_matches('/'))
+    use crate::platform::is_path_sep;
+    match (input.strip_prefix('~'), crate::platform::home_dir()) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(is_path_sep) => {
+            home.join(rest.trim_start_matches(is_path_sep))
         }
         _ => input.into(),
     }
@@ -249,9 +263,9 @@ mod tests {
     fn truncates_and_expands() {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("abc", 4), "abc");
-        if let Some(home) = std::env::var_os("HOME") {
-            assert_eq!(expand_tilde("~/x"), Path::new(&home).join("x"));
-            assert_eq!(expand_tilde("~"), Path::new(&home));
+        if let Some(home) = crate::platform::home_dir() {
+            assert_eq!(expand_tilde("~/x"), home.join("x"));
+            assert_eq!(expand_tilde("~"), home);
         }
         assert_eq!(expand_tilde("/abs"), Path::new("/abs"));
         assert_eq!(expand_tilde("~user/x"), Path::new("~user/x"));

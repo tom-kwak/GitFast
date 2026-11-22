@@ -314,7 +314,12 @@ pub fn folder<'a, M: Clone + 'a>(
         folder_icon(t, open),
         space().width(Length::Fixed(t.cols(1) * 0.6)),
         // The trailing slash marks a folder even where colors are hard to tell apart.
-        widgets::colored(t, format!("{}/", label.display()), t.folder()).wrapping(Wrapping::None),
+        widgets::colored(
+            t,
+            format!("{}/", widgets::format::repo_path(label)),
+            t.folder()
+        )
+        .wrapping(Wrapping::None),
         widgets::dim(t, format!(" ({count})")).wrapping(Wrapping::None),
     ]
     .align_y(iced::Alignment::Center);

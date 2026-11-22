@@ -1045,7 +1045,7 @@ impl State {
             ),
             Entry::item(
                 'f',
-                "reveal in Finder",
+                format!("reveal in {}", crate::platform::FILE_MANAGER),
                 "show the path in the working tree",
                 Message::FileAction(FileAction::Reveal(path.clone())),
             ),

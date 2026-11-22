@@ -1165,7 +1165,7 @@ impl App {
 }
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
+    crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Commands that make sense without a repository.
