@@ -440,6 +440,11 @@ impl Repository {
         gix_then_cli!(self, RefOps::unpushed(since))
     }
 
+    /// The newest `limit` of [`Self::unpushed`].
+    pub async fn unpushed_recent(&self, limit: usize) -> Result<Vec<Oid>> {
+        gix_then_cli!(self, RefOps::unpushed_recent(limit))
+    }
+
     // ---- RemoteOps
     pub async fn remotes(&self) -> Result<Vec<Remote>> {
         gix_then_cli!(self, RemoteOps::remotes())

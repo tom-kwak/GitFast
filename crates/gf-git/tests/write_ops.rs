@@ -613,6 +613,18 @@ async fn unpushed_commits_of_an_unpublished_branch() {
     a.commit_all("three");
     let r = open(&a).await;
     assert_eq!(r.unpushed_count().await.unwrap(), 2);
+    let all = r.unpushed(None).await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(r.unpushed_recent(1).await.unwrap(), all[..1]);
+    assert_eq!(r.unpushed_recent(10).await.unwrap(), all);
+    assert!(
+        open(&TestRepo::new())
+            .await
+            .unpushed_recent(10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         open(&TestRepo::new()).await.unpushed_count().await.unwrap(),
         0

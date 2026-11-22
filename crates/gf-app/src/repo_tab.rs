@@ -318,6 +318,11 @@ pub struct LineStats {
 type Stamp = (u64, Option<std::time::SystemTime>);
 
 /// Untracked files larger than this are not read to count lines.
+/// Newest unpushed commits marked in History. Beyond it (a branch with no
+/// remote and a huge history) the marker is left off rather than holding
+/// every id.
+const UNPUSHED_MARK_LIMIT: usize = 5000;
+
 const MAX_COUNT_BYTES: u64 = 2 * 1024 * 1024;
 /// At most this many untracked files are counted per refresh.
 const MAX_COUNT_FILES: usize = 2000;
@@ -548,7 +553,7 @@ impl Snapshot {
         }
         if refs_part || head_changed || repo.handle().git_dir != repo.cwd().join(".git") {
             if snap.status.head.branch.is_some() && snap.status.head.oid.is_some() {
-                snap.unpushed_commits = match repo.unpushed(None).await {
+                snap.unpushed_commits = match repo.unpushed_recent(UNPUSHED_MARK_LIMIT).await {
                     Ok(commits) => Arc::new(commits.into_iter().collect()),
                     Err(e) => {
                         tracing::warn!(error = %e, "could not load unpushed commits");

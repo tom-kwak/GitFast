@@ -352,6 +352,10 @@ pub trait RefOps {
     /// Commits reachable from HEAD that are on no remote and not reachable
     /// from `since`, newest first.
     fn unpushed(&self, since: Option<&Oid>) -> impl Future<Output = Result<Vec<Oid>>> + Send;
+
+    /// Like [`Self::unpushed`], but only the newest `limit` commits (a
+    /// branch with no remote at all would otherwise list its whole history).
+    fn unpushed_recent(&self, limit: usize) -> impl Future<Output = Result<Vec<Oid>>> + Send;
 }
 
 /// Configured remotes.

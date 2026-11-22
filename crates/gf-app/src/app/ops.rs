@@ -140,7 +140,10 @@ fn file_search_filter(id: RepoId, job: FilterJob) -> Task<Message> {
         async move {
             tokio::task::spawn_blocking(move || job.index.filter(&job.query))
                 .await
-                .unwrap_or_default()
+                .unwrap_or_else(|error| {
+                    tracing::error!(%error, "file search filter failed");
+                    Vec::new()
+                })
         },
         move |hits| Message::FileSearchFiltered(id, request, generation, oid.clone(), hits),
     )
@@ -224,9 +227,8 @@ impl App {
         oid: Oid,
         result: Result<Arc<file_search::Index>, String>,
     ) -> Task<Message> {
-        if self.active_tab().map(|tab| tab.repo.id()) != Some(id) {
-            return Task::none();
-        }
+        // Any tab: `State::paths_loaded` drops results for a closed search, so
+        // a tab left mid-load is not stuck on `Loading files…`.
         let Some(tab) = self.tab_mut(id) else {
             return Task::none();
         };
