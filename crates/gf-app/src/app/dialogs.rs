@@ -159,8 +159,42 @@ pub enum Purpose {
         at: super::reveal::Located,
     },
     MarkResolved(PathBuf),
-    AddWorktree,
-    RemoveWorktree(PathBuf),
+    /// Fields: branch, folder (empty: `root/<branch>`). Choice: start a
+    /// new branch at HEAD or `base`. Check: open it in a tab. A branch in
+    /// `existing` (local, or a remote's) is checked out, not created; one
+    /// in `checked_out` is refused (git allows a branch in one tree only).
+    AddWorktree {
+        root: PathBuf,
+        base: Option<String>,
+        existing: Vec<String>,
+        checked_out: Vec<String>,
+    },
+    /// `force` drops the uncommitted changes the dialog told about.
+    RemoveWorktree {
+        path: PathBuf,
+        force: bool,
+    },
+    LockWorktree(PathBuf, bool),
+    PruneWorktrees,
+    /// Merge `branch` into its base, checked out in the tree at `into`
+    /// (`real`: resolved). Check: always a merge commit.
+    MergeIntoBase {
+        branch: String,
+        into: PathBuf,
+        real: Option<PathBuf>,
+    },
+    /// Field: the local branch `branch` goes back into; empty forgets it
+    /// (it is guessed again). `local`: the branches that can be.
+    SetBranchBase {
+        branch: String,
+        local: Vec<String>,
+    },
+    /// Trees merged into `base` and their branches. Check: delete the
+    /// branches too.
+    CleanupWorktrees {
+        base: String,
+        trees: Vec<(PathBuf, Option<String>)>,
+    },
     UpdateSubmodules,
     TrackLfs,
     UntrackLfs(String),
@@ -362,27 +396,84 @@ impl App {
     }
 
     pub(super) fn new_worktree_dialog(&mut self) -> Task<Message> {
-        let suggested = self
-            .active_tab()
-            .and_then(|t| {
-                t.repo
-                    .cwd()
-                    .parent()
-                    .map(|p| p.join(format!("{}-wt", t.name())))
+        let Some(tab) = self.active_tab() else {
+            return Task::none();
+        };
+        let root = self.settings.worktrees.root.clone().unwrap_or_else(|| {
+            let cwd = tab.repo.cwd();
+            cwd.parent()
+                .unwrap_or(cwd)
+                .join(format!("{}-worktrees", tab.name()))
+        });
+        let head = tab.head_label().unwrap_or_else(|| "HEAD".into());
+        let base = tab
+            .worktrees
+            .base()
+            .filter(|b| tab.head_label().as_deref() != Some(*b))
+            .map(str::to_owned);
+        // Branches that exist: local ones, and remote ones by their short
+        // name (git creates the local branch tracking it).
+        let existing = tab
+            .snapshot
+            .as_ref()
+            .map(|snap| {
+                snap.branches
+                    .iter()
+                    .map(|b| {
+                        let short = b.name.short();
+                        match b.name.kind() {
+                            gf_core::model::RefKind::RemoteBranch => short
+                                .split_once('/')
+                                .map_or(short, |(_, name)| name)
+                                .to_owned(),
+                            _ => short.to_owned(),
+                        }
+                    })
+                    .collect()
             })
-            .map(|p| p.display().to_string())
             .unwrap_or_default();
-        self.open_dialog(
-            Dialog::confirm(
-                "Add worktree",
-                vec!["Check a branch out in another folder, side by side with this one.".into()],
-                "Add",
-                Purpose::AddWorktree,
-            )
-            .field("folder", suggested, "/path/to/new/folder")
-            .field("branch", "", "feature/x")
-            .check("create the branch (from HEAD)", true),
+        let checked_out: Vec<String> = tab
+            .worktrees
+            .cards()
+            .iter()
+            .filter_map(|c| c.tree.branch.clone())
+            .collect();
+        let suggestions = tab
+            .snapshot
+            .as_ref()
+            .map(|snap| branch_suggestions(&snap.branches, &checked_out))
+            .unwrap_or_default();
+        let mut dialog = Dialog::confirm(
+            "New worktree",
+            vec!["Check a branch out in its own folder.".into()],
+            "Add",
+            Purpose::AddWorktree {
+                root: root.clone(),
+                base: base.clone(),
+                existing,
+                checked_out,
+            },
         )
+        .field("branch", "", "new or existing branch")
+        .suggest(suggestions, "no such branch — a new one is made")
+        .field(
+            "folder",
+            "",
+            format!("{}/<branch>", crate::widgets::format::tilde(&root)),
+        )
+        .check("open it in a tab", true);
+        if let Some(base) = base {
+            // From a branch work goes into (develop), start there; from a
+            // feature branch, at the base.
+            let at_head = ["main", "master", "develop", "development", "dev", "trunk"]
+                .contains(&head.as_str());
+            dialog = dialog.choice(
+                "a new branch starts at",
+                vec![(format!("{head} (HEAD)"), false), (base, false)],
+                usize::from(!at_head),
+            );
+        }
+        self.open_dialog(dialog)
     }
 
     pub(super) fn new_tag_dialog(&mut self, at: Option<String>) -> Task<Message> {
@@ -438,6 +529,18 @@ impl App {
             } => {
                 // Map the selected option to its operation argument.
                 let purpose = match purpose {
+                    // Option 0 starts the branch at HEAD, 1 at the base.
+                    Purpose::AddWorktree {
+                        root,
+                        base,
+                        existing,
+                        checked_out,
+                    } => Purpose::AddWorktree {
+                        root,
+                        base: base.filter(|_| choice == Some(1)),
+                        existing,
+                        checked_out,
+                    },
                     Purpose::NewBranch { from, unborn } => Purpose::NewBranch {
                         from: from.filter(|_| choice == Some(1)),
                         unborn,
@@ -842,24 +945,69 @@ impl App {
                     r.reset(&to, mode).await
                 })
             }
-            Purpose::AddWorktree => {
-                let folder = crate::widgets::format::expand_tilde(&value(0));
-                let branch = value(1);
-                let new_branch = check(0);
+            Purpose::AddWorktree {
+                root,
+                base,
+                existing,
+                ..
+            } => {
+                let branch = value(0);
+                let folder = match value(1) {
+                    f if f.is_empty() => root.join(worktree_folder_name(&branch)),
+                    f => crate::widgets::format::expand_tilde(&f),
+                };
+                let new_branch = !existing.contains(&branch);
+                let open = check(0);
+                let path = folder.clone();
                 self.op(
                     format!("add worktree {branch}"),
-                    OpKind::Generic,
-                    move |r| async move { r.add_worktree(&folder, &branch, new_branch).await },
+                    OpKind::AddWorktree { path, open },
+                    move |r| async move {
+                        r.add_worktree(&folder, &branch, new_branch, base.as_deref())
+                            .await
+                    },
                 )
             }
-            Purpose::RemoveWorktree(path) => {
-                let force = check(0);
+            Purpose::LockWorktree(path, locked) => {
+                let verb = if locked { "lock" } else { "unlock" };
                 self.op(
-                    format!("remove worktree {}", path.display()),
-                    OpKind::RemoveWorktree(path.clone()),
-                    move |r| async move { r.remove_worktree(&path, force).await },
+                    format!("{verb} worktree {}", worktree_label(&path)),
+                    OpKind::Generic,
+                    move |r| async move { r.lock_worktree(&path, locked).await },
                 )
             }
+            Purpose::MergeIntoBase { branch, into, real } => {
+                self.merge_in_tree(branch, into, real.as_deref(), check(0))
+            }
+            Purpose::SetBranchBase { branch, .. } => {
+                let base = Some(value(0)).filter(|b| !b.is_empty());
+                let label = match &base {
+                    Some(base) => format!("base of {branch}: {base}"),
+                    None => format!("forget the base of {branch}"),
+                };
+                self.op(label, OpKind::Generic, move |r| async move {
+                    r.set_branch_base(&branch, base.as_deref()).await
+                })
+            }
+            Purpose::PruneWorktrees => {
+                self.op("prune worktrees", OpKind::Generic, |r| async move {
+                    r.prune_worktrees().await
+                })
+            }
+            Purpose::CleanupWorktrees { base, trees } => {
+                let delete_branches = check(0);
+                let paths = trees.iter().map(|(p, _)| p.clone()).collect();
+                self.op(
+                    format!("remove {} merged worktree(s)", trees.len()),
+                    OpKind::RemoveWorktrees(paths),
+                    move |r| async move { cleanup_worktrees(&r, &base, &trees, delete_branches).await },
+                )
+            }
+            Purpose::RemoveWorktree { path, force } => self.op(
+                format!("remove worktree {}", worktree_label(&path)),
+                OpKind::RemoveWorktrees(vec![path.clone()]),
+                move |r| async move { r.remove_worktree(&path, force).await },
+            ),
             Purpose::UpdateSubmodules => {
                 // Undo checks the previous commits out again in submodules
                 // that were already there; newly cloned ones stay.
@@ -995,9 +1143,19 @@ fn validate(purpose: &Purpose, values: &[String]) -> Option<String> {
             }
         }
         Purpose::Publish { .. } if first.is_empty() => Some("choose a remote".into()),
-        Purpose::AddWorktree if first.is_empty() => Some("choose a folder".into()),
-        Purpose::AddWorktree if values.get(1).is_none_or(|b| b.is_empty()) => {
+        Purpose::AddWorktree { .. } if worktree_folder_name(first).is_empty() => {
             Some("a branch is required".into())
+        }
+        Purpose::AddWorktree { checked_out, .. } if checked_out.iter().any(|b| b == first) => {
+            Some(format!("{first} is checked out in another worktree"))
+        }
+        Purpose::SetBranchBase { branch, .. } if first == branch => {
+            Some(format!("{branch} cannot go into itself"))
+        }
+        Purpose::SetBranchBase { local, .. }
+            if !first.is_empty() && !local.iter().any(|b| b == first) =>
+        {
+            Some(format!("no local branch {first}"))
         }
         Purpose::TrackLfs if first.is_empty() => Some("enter a pattern such as *.psd".into()),
         Purpose::Squash { .. } if first.is_empty() => {
@@ -1005,6 +1163,109 @@ fn validate(purpose: &Purpose, values: &[String]) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Branches a new worktree can check out, for the branch field: local ones
+/// first, then the remote ones without a local branch (by the name git
+/// creates locally). Ones checked out in a tree are listed but cannot be
+/// picked: git allows a branch in one tree only.
+fn branch_suggestions(
+    branches: &[gf_core::model::Branch],
+    checked_out: &[String],
+) -> Vec<crate::features::dialog::Suggestion> {
+    use crate::features::dialog::Suggestion;
+    use gf_core::model::RefKind;
+    let mut local: Vec<&str> = branches
+        .iter()
+        .filter(|b| b.name.kind() == RefKind::LocalBranch)
+        .map(|b| b.name.short())
+        .collect();
+    local.sort_unstable();
+    let mut remote: Vec<(&str, &str)> = branches
+        .iter()
+        .filter(|b| b.name.kind() == RefKind::RemoteBranch)
+        .filter_map(|b| {
+            let full = b.name.short();
+            let (_, name) = full.split_once('/')?;
+            (name != "HEAD" && !local.contains(&name)).then_some((name, full))
+        })
+        .collect();
+    remote.sort_unstable();
+    remote.dedup_by(|a, b| a.0 == b.0);
+    local
+        .into_iter()
+        .map(|name| {
+            let busy = checked_out.iter().any(|c| c == name);
+            Suggestion::new(name, if busy { "checked out" } else { "" }).disabled(busy)
+        })
+        .chain(
+            remote
+                .into_iter()
+                .map(|(name, full)| Suggestion::new(name, full)),
+        )
+        .collect()
+}
+
+/// A worktree in op labels: its folder name, not the whole path.
+pub(super) fn worktree_label(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// Removes trees merged into `base` (and with `delete_branches`, their
+/// branches). Each tree is checked again first: still clean and with no
+/// commit outside `base` — it may have changed since the dialog opened.
+/// Goes on past a failing tree and reports the failures at the end.
+async fn cleanup_worktrees(
+    r: &gf_git::Repository,
+    base: &str,
+    trees: &[(PathBuf, Option<String>)],
+    delete_branches: bool,
+) -> gf_core::Result<()> {
+    let mut failed = Vec::new();
+    for (path, branch) in trees {
+        let name = branch.clone().unwrap_or_else(|| worktree_label(path));
+        let result = async {
+            let s = r.worktree_status(path, Some(base)).await?;
+            if !s.is_clean() || s.ahead_of_base > 0 {
+                return Err(gf_core::GfError::Other(format!(
+                    "{name} has new work; left as it is"
+                )));
+            }
+            r.remove_worktree(path, false).await?;
+            if delete_branches && let Some(b) = branch {
+                // Checked above: every commit of it is in `base`.
+                r.delete_branch(b, true).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            failed.push(format!("{name}: {e}"));
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(gf_core::GfError::Other(failed.join("\n")))
+    }
+}
+
+/// Folder name for a new worktree of `branch`: `feature/x` → `feature-x`.
+pub(super) fn worktree_folder_name(branch: &str) -> String {
+    let name: String = branch
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c == ':' {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    name.trim_matches(['-', '.']).to_owned()
 }
 
 /// Sends the tags a push carries along (none: nothing to do).
@@ -1025,6 +1286,39 @@ fn short_ref(full: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_branch_suggestions_list_local_then_remote_only_ones() {
+        use gf_core::model::{Branch, RefName};
+        let branch = |name: &str| Branch {
+            name: RefName::new(name),
+            target: "a".repeat(40).parse().expect("oid"),
+            upstream: None,
+            is_head: false,
+        };
+        let list = branch_suggestions(
+            &[
+                branch("refs/remotes/origin/HEAD"),
+                branch("refs/remotes/origin/main"),
+                branch("refs/remotes/origin/agent/x"),
+                branch("refs/heads/main"),
+                branch("refs/heads/b"),
+            ],
+            &["main".to_owned()],
+        );
+        let shown: Vec<_> = list
+            .iter()
+            .map(|s| (s.value.as_str(), s.hint.as_str(), s.disabled))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("b", "", false),
+                ("main", "checked out", true),
+                ("agent/x", "origin/agent/x", false),
+            ]
+        );
+    }
 
     #[test]
     fn validates_names() {

@@ -3048,18 +3048,222 @@ async fn removing_a_worktree_closes_its_open_tab() {
     assert_eq!(ui.app.tabs.len(), 2);
     let _ = ui.send(Message::Tabs(tabs::Message::Select(0))).await;
     let _ = ui
-        .send(Message::Sidebar(sidebar::Message::Select(
-            sidebar::Selection::Worktree(path.clone()),
-        )))
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    let card = ui
+        .app
+        .active_tab()
+        .and_then(|t| t.worktrees.cards().iter().find(|c| !c.main))
+        .expect("the linked tree's card");
+    assert!(card.in_tab, "its tab is marked");
+    assert!(card.status.is_some(), "its status was read");
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Select(path.clone())))
         .await;
     let _ = ui
-        .send(Message::Sidebar(sidebar::Message::Act(
-            sidebar::Action::Delete,
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::Remove,
         )))
         .await;
     let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
     assert!(!path.exists());
     assert_eq!(ui.app.tabs.len(), 1);
+}
+
+#[tokio::test]
+async fn new_worktree_goes_beside_the_repository_and_opens_in_a_tab() {
+    let mut ui = Ui::open().await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(
+            0,
+            "agent/one".into(),
+        )))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let repo = ui.fixture.repo.path().to_path_buf();
+    let name = ui.app.tabs[0].name();
+    let expected = repo
+        .parent()
+        .expect("parent")
+        .join(format!("{name}-worktrees"))
+        .join("agent-one");
+    assert!(expected.exists(), "{} was created", expected.display());
+    assert_eq!(ui.app.tabs.len(), 2, "and opened in a tab");
+    let _ = std::fs::remove_dir_all(expected.parent().expect("root"));
+}
+
+#[tokio::test]
+async fn a_new_worktree_checks_an_existing_branch_out_instead_of_failing() {
+    let mut ui = Ui::open_with(|r| {
+        r.git(&["branch", "side"]);
+    })
+    .await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(0, "side".into())))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let name = ui.app.tabs[0].name();
+    let root = ui
+        .fixture
+        .repo
+        .path()
+        .parent()
+        .expect("parent")
+        .join(format!("{name}-worktrees"));
+    let head = ui.fixture.repo.git(&[
+        "-C",
+        &root.join("side").display().to_string(),
+        "branch",
+        "--show-current",
+    ]);
+    assert_eq!(head.trim(), "side", "the existing branch is checked out");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_worktrees_branch_merges_into_its_base_in_the_tab_of_the_base() {
+    let mut ui = Ui::open_with(|_| {}).await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(0, "feat".into())))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let name = ui.app.tabs[0].name();
+    let root = ui
+        .fixture
+        .repo
+        .path()
+        .parent()
+        .expect("parent")
+        .join(format!("{name}-worktrees"));
+    let tree = root.join("feat");
+    let dir = tree.display().to_string();
+    std::fs::write(tree.join("feat.txt"), "feat\n").expect("write");
+    ui.fixture.repo.git(&["-C", &dir, "add", "feat.txt"]);
+    ui.fixture
+        .repo
+        .git(&["-C", &dir, "commit", "-qm", "feat work"]);
+    // The new tree opened in its own tab; read the trees again there.
+    assert_eq!(ui.app.tabs.len(), 2);
+    let _ = ui.send(Message::WorktreePoll).await;
+    let card = ui.app.tabs[ui.app.active]
+        .worktrees
+        .cards()
+        .iter()
+        .find(|c| c.tree.branch.as_deref() == Some("feat"))
+        .expect("feat card")
+        .clone();
+    let s = card.status.expect("status");
+    assert_eq!(
+        (s.base.as_deref(), s.ahead_of_base, s.base_guessed),
+        (Some("main"), 1, false)
+    );
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Select(
+            card.tree.path.clone(),
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::Merge,
+        )))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(ui.app.active, 0, "the merge runs in the tab of main");
+    let log = ui.fixture.repo.git(&["log", "--format=%s", "-1", "main"]);
+    assert_eq!(log.trim(), "feat work");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_base_set_by_hand_merges_in_a_tree_opened_for_it() {
+    let mut ui = Ui::open_with(|_| {}).await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    // Two trees, neither opened in a tab.
+    for branch in ["develop", "feat"] {
+        let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+        let _ = ui
+            .send(Message::Dialog(dialog::Message::Field(0, branch.into())))
+            .await;
+        let _ = ui.send(Message::Dialog(dialog::Message::Check(0))).await;
+        let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    }
+    assert_eq!(ui.app.tabs.len(), 1);
+    let name = ui.app.tabs[0].name();
+    let root = ui
+        .fixture
+        .repo
+        .path()
+        .parent()
+        .expect("parent")
+        .join(format!("{name}-worktrees"));
+    let feat = root.join("feat");
+    let dir = feat.display().to_string();
+    std::fs::write(feat.join("feat.txt"), "feat\n").expect("write");
+    ui.fixture.repo.git(&["-C", &dir, "add", "feat.txt"]);
+    ui.fixture
+        .repo
+        .git(&["-C", &dir, "commit", "-qm", "feat work"]);
+    let _ = ui.send(Message::WorktreePoll).await;
+    let path = ui.app.tabs[0]
+        .worktrees
+        .cards()
+        .iter()
+        .find(|c| c.tree.branch.as_deref() == Some("feat"))
+        .expect("feat card")
+        .tree
+        .path
+        .clone();
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Select(path)))
+        .await;
+
+    // feat came from main (HEAD then); say it goes into develop.
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::SetBase,
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(0, "develop".into())))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(
+        ui.fixture
+            .repo
+            .git(&["config", "--get", "branch.feat.gf-base"])
+            .trim(),
+        "develop"
+    );
+    let _ = ui.send(Message::WorktreePoll).await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::Merge,
+        )))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(ui.app.tabs.len(), 2, "develop's tree opened for the merge");
+    let log = ui
+        .fixture
+        .repo
+        .git(&["log", "--format=%s", "-1", "develop"]);
+    assert_eq!(log.trim(), "feat work");
+    let main = ui.fixture.repo.git(&["log", "--format=%s", "-1", "main"]);
+    assert_ne!(main.trim(), "feat work", "main is left alone");
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

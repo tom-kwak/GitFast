@@ -521,14 +521,20 @@ impl App {
 
     /// Hands a key to `pane`; `None` when the pane has no use for it.
     fn nav_pane(&mut self, pane: Pane, n: Nav) -> Option<Task<Message>> {
+        let mode = self.refs_mode();
         let t = &self.tokens;
         let tab = self.tabs.get_mut(self.active)?;
         let snap = tab.snapshot.clone();
         let moved: Moved<Message> = match pane {
-            Pane::Sidebar => tab
-                .sidebar
-                .nav(n, snap.as_deref(), t)?
-                .map(Message::Sidebar),
+            Pane::Sidebar => match mode {
+                crate::features::worktrees::RefsMode::Refs => tab
+                    .sidebar
+                    .nav(n, snap.as_deref(), t)?
+                    .map(Message::Sidebar),
+                crate::features::worktrees::RefsMode::Worktrees => {
+                    tab.worktrees.nav(n, t)?.map(Message::Worktrees)
+                }
+            },
             Pane::History => tab
                 .history
                 .nav(n, snap.as_deref(), t)?

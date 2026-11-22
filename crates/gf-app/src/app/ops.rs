@@ -487,6 +487,9 @@ impl App {
                 // The branch shown instead of HEAD only moves with refs.
                 let refs = snap.loaded.refs;
                 let status = snap.loaded.status;
+                if refs {
+                    tab.worktrees.set_worktrees(&snap.worktrees);
+                }
                 tab.snapshot = Some(snap);
                 tab.error = None;
                 if let Some(rev) = tab.history.revision().map(str::to_owned)
@@ -523,7 +526,35 @@ impl App {
         if reveal {
             tasks.push(self.reveal_pending(id));
         }
+        // Commits and branch moves in any tree show up as ref changes here.
+        tasks.push(self.request_worktrees(id));
         Task::batch(tasks)
+    }
+
+    /// Reads the working trees' statuses for tab `id` when its worktrees
+    /// view is on screen; nothing otherwise (see `worktrees::State`).
+    pub(super) fn request_worktrees(&mut self, id: RepoId) -> Task<Message> {
+        if !self.settings.appearance.show_refs
+            || self.active_tab().is_none_or(|tab| tab.repo.id() != id)
+        {
+            return Task::none();
+        }
+        if self.refs_mode() != crate::features::worktrees::RefsMode::Worktrees {
+            return Task::none();
+        }
+        let open: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .map(|t| t.repo.cwd().to_path_buf())
+            .collect();
+        let Some(tab) = self.tab_mut(id) else {
+            return Task::none();
+        };
+        let here = tab.repo.cwd().to_path_buf();
+        tab.worktrees.set_tabs(open, here);
+        tab.worktrees
+            .request(&tab.repo)
+            .map(move |m| Message::WorktreesOf(id, m))
     }
 
     /// Runs a repository operation; reports and refreshes when done.
@@ -877,6 +908,28 @@ impl App {
         };
         let active = self.active_tab().is_some_and(|tab| tab.repo.id() == id);
         let mut tasks = vec![refresh];
+        // Close the tabs of the trees that are gone, also when a cleanup
+        // stopped part-way.
+        if let OpKind::RemoveWorktrees(paths) = &kind {
+            // Tabs keep resolved paths: resolve the (still existing) parent.
+            let gone: Vec<PathBuf> = paths
+                .iter()
+                .filter(|p| !p.exists())
+                .flat_map(|p| {
+                    let resolved = p
+                        .parent()
+                        .and_then(|d| std::fs::canonicalize(d).ok())
+                        .zip(p.file_name())
+                        .map(|(d, n)| d.join(n));
+                    std::iter::once(p.clone()).chain(resolved)
+                })
+                .collect();
+            for i in (0..self.tabs.len()).rev() {
+                if gone.iter().any(|p| self.tabs[i].repo.cwd().starts_with(p)) {
+                    tasks.push(self.close_tab(i));
+                }
+            }
+        }
         if let OpKind::Undo { redo } = kind {
             tasks.push(self.on_undo_done(id, redo, result.is_ok()));
         }
@@ -886,19 +939,8 @@ impl App {
                     let hint = if recorded { " · ⌘Z undo" } else { "" };
                     self.flash(NoteKind::Info, format!("✓ {}{hint}", truncate(&label, 60)));
                 }
-                if let OpKind::RemoveWorktree(path) = &kind {
-                    let mut closed = false;
-                    for i in (0..self.tabs.len()).rev() {
-                        if self.tabs[i].repo.cwd().starts_with(path) {
-                            tasks.push(self.close_tab(i));
-                            closed = true;
-                        }
-                    }
-                    let suffix = if closed { " (tab closed)" } else { "" };
-                    self.flash(
-                        NoteKind::Info,
-                        format!("removed worktree {}{suffix}", path.display()),
-                    );
+                if let OpKind::AddWorktree { path, open: true } = &kind {
+                    tasks.push(self.update(Message::Open(path.clone())));
                 }
                 if let Some(tab) = self.tab_mut(id)
                     && kind == OpKind::Commit

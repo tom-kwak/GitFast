@@ -43,7 +43,7 @@ use crate::ops::state::RepoState;
 use crate::ops::submodule::Submodule;
 use crate::ops::sync::{PullMode, PushOptions};
 use crate::ops::undo::{Capture, HeadMode, Scope};
-use crate::ops::worktree::Worktree;
+use crate::ops::worktree::{Worktree, WorktreeStatus};
 
 /// `git bisect`: find the commit that introduced a bug.
 pub trait BisectOps {
@@ -472,13 +472,38 @@ pub trait WorktreeOps {
     fn worktrees(&self) -> impl Future<Output = Result<Vec<Worktree>>> + Send;
 
     /// Adds a working tree at `path` for `branch`; with `new_branch`, the
-    /// branch is created from HEAD.
+    /// branch is created from `start` (HEAD when `None`) and that branch is
+    /// kept as its base ([`Self::set_branch_base`]).
     fn add_worktree(
         &self,
         path: &Path,
         branch: &str,
         new_branch: bool,
+        start: Option<&str>,
     ) -> impl Future<Output = Result<()>> + Send;
+
+    /// What the working tree at `path` is doing: changes, upstream and
+    /// `base` distance, last commit and activity.
+    fn worktree_status(
+        &self,
+        path: &Path,
+        base: Option<&str>,
+    ) -> impl Future<Output = Result<WorktreeStatus>> + Send;
+
+    /// Keeps `base` as the branch `branch` goes back into
+    /// (`branch.<b>.gf-base`); `None` forgets it, so it is guessed again.
+    fn set_branch_base(
+        &self,
+        branch: &str,
+        base: Option<&str>,
+    ) -> impl Future<Output = Result<()>> + Send;
+
+    /// The branch work is merged into: the local branch of `origin/HEAD`
+    /// (or `origin/HEAD` itself), else `main` or `master`.
+    fn default_base(&self) -> impl Future<Output = Result<Option<String>>> + Send;
+
+    /// Locks (`git worktree lock`) or unlocks a linked working tree.
+    fn lock_worktree(&self, path: &Path, locked: bool) -> impl Future<Output = Result<()>> + Send;
 
     /// Removes a linked working tree. Without `force`, git refuses when it
     /// has uncommitted changes.

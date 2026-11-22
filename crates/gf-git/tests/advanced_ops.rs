@@ -322,12 +322,152 @@ async fn worktrees() {
     let r = open(&repo).await;
     let extra = tempfile::tempdir().unwrap();
     let path = extra.path().join("wt");
-    r.add_worktree(&path, "side", true).await.unwrap();
+    r.add_worktree(&path, "side", true, None).await.unwrap();
     let list = r.worktrees().await.unwrap();
     assert_eq!(list.len(), 2);
     assert!(list.iter().any(|w| w.branch.as_deref() == Some("side")));
+
+    // Asked from the linked tree: the main tree still comes first, once.
+    let linked = gf_git::Repository::open(&path, common::runner(&repo))
+        .await
+        .unwrap();
+    let from_linked = linked.worktrees().await.unwrap();
+    let branches: Vec<_> = from_linked.iter().map(|w| w.branch.clone()).collect();
+    assert_eq!(
+        branches,
+        list.iter().map(|w| w.branch.clone()).collect::<Vec<_>>()
+    );
+    assert_ne!(from_linked[0].branch.as_deref(), Some("side"));
+
     r.remove_worktree(&path, false).await.unwrap();
     assert_eq!(r.worktrees().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn worktree_status_reports_changes_work_and_merge() {
+    let repo = TestRepo::new();
+    repo.git(&["branch", "-M", "main"]);
+    repo.write("a.txt", "a\n");
+    repo.commit_all("a");
+    let r = open(&repo).await;
+    assert_eq!(r.default_base().await.unwrap().as_deref(), Some("main"));
+    let extra = tempfile::tempdir().unwrap();
+    let path = extra.path().join("wt");
+    r.add_worktree(&path, "agent", true, Some("main"))
+        .await
+        .unwrap();
+    let git = |args: &[&str]| {
+        let out = repo
+            .command()
+            .current_dir(&path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    std::fs::write(path.join("b.txt"), "b\n").unwrap();
+    git(&["add", "b.txt"]);
+    git(&["commit", "-qm", "add b"]);
+    std::fs::write(path.join("a.txt"), "changed\n").unwrap();
+    std::fs::write(path.join("new.txt"), "n\n").unwrap();
+
+    let s = r.worktree_status(&path, Some("main")).await.unwrap();
+    assert_eq!((s.staged, s.unstaged, s.untracked), (0, 1, 1));
+    assert_eq!((s.ahead_of_base, s.behind_base), (1, 0));
+    assert_eq!(
+        s.merge_base.as_ref().map(ToString::to_string),
+        Some(repo.head())
+    );
+    assert_eq!(
+        s.last_commit.as_ref().map(|c| c.subject.as_str()),
+        Some("add b")
+    );
+    assert!(s.last_activity.is_some());
+    assert!(!s.merged());
+
+    // A fresh tree the base moved past is not "merged".
+    let fresh = extra.path().join("fresh");
+    r.add_worktree(&fresh, "fresh", true, Some("main"))
+        .await
+        .unwrap();
+    repo.write("c.txt", "c\n");
+    repo.commit_all("main moves on");
+    let s = r.worktree_status(&fresh, Some("main")).await.unwrap();
+    assert!(s.behind_base == 1 && !s.merged(), "{s:?}");
+
+    // The main tree is on the base: no distance to itself.
+    let main = r.worktree_status(repo.path(), Some("main")).await.unwrap();
+    assert!(main.base.is_none() && main.is_clean());
+
+    // Merge the work, move main on: the agent's tree is merged.
+    git(&["checkout", "--", "a.txt"]);
+    std::fs::remove_file(path.join("new.txt")).unwrap();
+    repo.git(&["merge", "-q", "--no-ff", "-m", "merge agent", "agent"]);
+    let s = r.worktree_status(&path, Some("main")).await.unwrap();
+    assert!(s.is_clean() && s.merged(), "{s:?}");
+
+    r.lock_worktree(&path, true).await.unwrap();
+    assert!(r.worktrees().await.unwrap().iter().any(|w| w.locked));
+    r.lock_worktree(&path, false).await.unwrap();
+    assert!(!r.worktrees().await.unwrap().iter().any(|w| w.locked));
+}
+
+#[tokio::test]
+async fn a_trees_base_is_the_branch_it_was_made_from() {
+    let repo = TestRepo::new();
+    repo.git(&["branch", "-M", "main"]);
+    repo.write("a.txt", "a\n");
+    repo.commit_all("a");
+    repo.git(&["switch", "-q", "-c", "develop"]);
+    repo.write("d.txt", "d\n");
+    repo.commit_all("develop work");
+    let r = open(&repo).await;
+    let extra = tempfile::tempdir().unwrap();
+    let base_of = |path: std::path::PathBuf| {
+        let r = &r;
+        async move {
+            let s = r.worktree_status(&path, Some("main")).await.unwrap();
+            (s.base, s.base_guessed)
+        }
+    };
+
+    // Made by gf from HEAD (develop): recorded, not guessed.
+    let made = extra.path().join("made");
+    r.add_worktree(&made, "made", true, None).await.unwrap();
+    assert_eq!(
+        repo.git(&["config", "--get", "branch.made.gf-base"]).trim(),
+        "develop"
+    );
+    assert_eq!(base_of(made.clone()).await, (Some("develop".into()), false));
+
+    // Named in its creation (`git branch x develop`): read from the reflog.
+    repo.git(&["branch", "named", "develop"]);
+    let named = extra.path().join("named");
+    r.add_worktree(&named, "named", false, None).await.unwrap();
+    assert_eq!(base_of(named).await, (Some("develop".into()), false));
+
+    // Made from HEAD outside gf: the nearest usual branch, a guess.
+    repo.git(&["switch", "-q", "-c", "loose"]);
+    repo.git(&["switch", "-q", "develop"]);
+    let loose = extra.path().join("loose");
+    r.add_worktree(&loose, "loose", false, None).await.unwrap();
+    assert_eq!(base_of(loose.clone()).await, (Some("develop".into()), true));
+
+    // The user's choice wins; forgetting it goes back to guessing.
+    r.set_branch_base("loose", Some("main")).await.unwrap();
+    assert_eq!(base_of(loose.clone()).await, (Some("main".into()), false));
+    r.set_branch_base("loose", None).await.unwrap();
+    r.set_branch_base("loose", None).await.unwrap();
+    assert_eq!(base_of(loose).await, (Some("develop".into()), true));
+
+    // The default base itself has none.
+    repo.git(&["switch", "-q", "main"]);
+    let main = r.worktree_status(repo.path(), Some("main")).await.unwrap();
+    assert_eq!(main.base, None);
 }
 
 #[tokio::test]

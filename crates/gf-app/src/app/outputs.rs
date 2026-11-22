@@ -699,24 +699,6 @@ impl App {
                 };
                 self.update(Message::Open(full))
             }
-            sidebar::Output::NewWorktree => self.new_worktree_dialog(),
-            sidebar::Output::RemoveWorktree(path) => self.confirm(
-                Confirm::delete(
-                    "Remove worktree",
-                    vec![
-                        format!(
-                            "Remove the working tree at {}?",
-                            crate::widgets::format::tilde(&path)
-                        ),
-                        "Its folder is deleted; the branch and its commits stay.".into(),
-                        "git refuses if it has uncommitted changes — tick force to remove anyway."
-                            .into(),
-                    ],
-                    "Remove",
-                    Purpose::RemoveWorktree(path),
-                )
-                .check("force (discard its uncommitted changes)", false),
-            ),
             sidebar::Output::UpdateSubmodules => self.confirm(Confirm::change(
                 "submodule-update",
                 "Update submodules",
@@ -1398,6 +1380,32 @@ impl App {
                 };
                 self.log.note(NoteKind::Info, "confirmations", lines);
                 self.settings.appearance.show_command_log = true;
+                Task::none()
+            }
+            PromptCommand::Worktrees => self.on_shortcut(Shortcut::RefsMode),
+            PromptCommand::Editor(cmd) => {
+                if let Some(cmd) = cmd {
+                    self.settings.worktrees.editor = cmd;
+                    self.save_settings();
+                }
+                let text = format!("editor: {}", self.settings.worktrees.editor);
+                self.flash(NoteKind::Info, text);
+                Task::none()
+            }
+            PromptCommand::Terminal(app) => {
+                if let Some(app) = app {
+                    self.settings.worktrees.terminal = (app != "default").then_some(app);
+                    self.save_settings();
+                }
+                let text = format!(
+                    "terminal: {}",
+                    self.settings
+                        .worktrees
+                        .terminal
+                        .as_deref()
+                        .unwrap_or(crate::platform::TERMINAL)
+                );
+                self.flash(NoteKind::Info, text);
                 Task::none()
             }
             PromptCommand::GixFetch(on) => {

@@ -1,6 +1,7 @@
 //! Reusable terminal-style building blocks. Features compose these instead
 //! of styling raw iced widgets, so the look stays consistent.
 
+pub mod dropdown;
 pub mod file_search;
 pub mod file_tree;
 pub mod format;
@@ -168,6 +169,24 @@ pub fn tip<'a, M: 'a>(
             .padding(Padding::from([2, 6]))
             .style(style::tooltip(t)),
         tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
+}
+
+/// Like [`tip`], shown above: for controls at the bottom of a panel, or
+/// right above a panel whose header it would cover.
+pub fn tip_top<'a, M: 'a>(
+    t: &'a Tokens,
+    content: impl Into<Element<'a, M>>,
+    hint: String,
+) -> Element<'a, M> {
+    tooltip(
+        content,
+        container(dim(t, hint))
+            .padding(Padding::from([2, 6]))
+            .style(style::tooltip(t)),
+        tooltip::Position::Top,
     )
     .gap(4)
     .into()
