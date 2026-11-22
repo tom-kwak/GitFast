@@ -1,6 +1,20 @@
-# gf
+<p align="center">
+  <img src="docs/assets/gf-icon.png" alt="gf" width="128" height="128">
+</p>
 
-A fast, light Git GUI for macOS, written in Rust with iced.
+<h1 align="center">gf</h1>
+
+<p align="center">
+  <b>gf</b> is short for <b>Git Fast</b>: a Git GUI client for macOS built to
+  be the fastest one, written in Rust with
+  <a href="https://github.com/iced-rs/iced">iced</a>.
+</p>
+
+<p align="center">
+  <a href="https://github.com/tom-kwak/GitFast/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/tom-kwak/GitFast?label=release"></a>
+  <img alt="macOS 11+" src="https://img.shields.io/badge/macOS-11%2B-black">
+  <img alt="Apple silicon and Intel" src="https://img.shields.io/badge/universal-Apple%20silicon%20%7C%20Intel-black">
+</p>
 
 ## Install
 
@@ -15,6 +29,31 @@ opens without a Gatekeeper prompt. Run it again to update.
 
 gf requires **Git 2.43.1 or later**. Check your version with `git --version`.
 Git is available through Xcode Command Line Tools or Homebrew.
+
+gf runs on macOS today. Windows and Linux support is planned.
+
+## Features
+
+- **History**: a commit graph drawn in text (`● │ ├─╯`) with branch and tag
+  badges. Find a file with `⌘F` to list only the commits that changed it.
+- **Working Tree**: stage and unstage with checkboxes, or mark several files
+  and stage, unstage, stash or discard them together.
+- **Diffs**: syntax highlighting with TextMate grammars. Add your own VS Code
+  `*.tmLanguage.json` or `*.sublime-syntax` files to
+  `~/Library/Application Support/dev.gf.gf/syntaxes/`.
+- **Branches, tags and stashes** in a sidebar tree with a quick filter.
+- **Blame**: who last changed each line; click a line to find its commit.
+- **Conflicts**: keep ours, theirs or both for each conflict block.
+- **Interactive rebase**: pick, reword, squash, fixup or drop commits and
+  reorder them in a list.
+- **Undo**: `⌘Z` / `⌘⇧Z` for the steps gf can undo, with an undo history.
+- **Command log** (`⌘J`): every git command gf runs, with its output, exit
+  status and duration. The `gf ❯` command line runs any git command.
+- **Tabs**: one per repository. Switch with `⌘1`–`⌘9` or `⌃⇥`.
+
+gf works through your system `git`, and uses
+[gitoxide](https://github.com/GitoxideLabs/gitoxide) for some operations,
+falling back to `git` when gitoxide cannot handle one.
 
 ## What's new in 0.0.7
 
