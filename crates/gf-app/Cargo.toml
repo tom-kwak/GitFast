@@ -31,6 +31,9 @@ tokio-stream = { workspace = true, features = ["sync"] }
 unicode-segmentation = "1"
 regex = "1"
 
+[build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 iced_test = "0.14"
 gf-test-support.workspace = true

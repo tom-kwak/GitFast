@@ -16,9 +16,66 @@ pub enum Message {
     OpenRecent(PathBuf),
     /// The open-repository window.
     Open,
+    /// Opens the git download page (git was not found).
+    GetGit,
 }
 
-pub fn view<'a>(t: &'a Tokens, recent: &'a [PathBuf], drop_hover: bool) -> Element<'a, Message> {
+/// The shortcuts the welcome screen lists, in mac glyphs (drawn in the
+/// platform's notation).
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("⌘O", "open repository"),
+    ("⌘1-9", "switch tab"),
+    ("⌘W", "close tab"),
+    ("⌘R", "refresh"),
+    ("⌘L", "focus the prompt  (↑/↓ history, ⇥ complete)"),
+    ("⌘J", "show/hide command log"),
+    ("?", "help (at the prompt)"),
+];
+
+/// [`SHORTCUTS`], keys right-aligned in a column as wide as the longest
+/// one as drawn (`⌘1-9` on macOS, `Ctrl+1-9` elsewhere).
+fn shortcut_list<'a>(t: &'a Tokens) -> Column<'a, Message> {
+    let keys: Vec<_> = SHORTCUTS
+        .iter()
+        .map(|(k, _)| crate::platform::keys::local((*k).into()))
+        .collect();
+    let width = keys.iter().map(|k| k.chars().count()).max().unwrap_or(0);
+    let rows = keys.into_iter().zip(SHORTCUTS).map(|(k, (_, what))| {
+        row![
+            colored(t, format!("{k:>width$}"), t.accent()),
+            dim(t, *what)
+        ]
+        .spacing(10)
+        .into()
+    });
+    Column::with_children(rows).spacing(6)
+}
+
+/// What to do when git does not start: gf runs every command through it.
+fn git_missing_banner<'a>(t: &'a Tokens) -> Element<'a, Message> {
+    let git = gf_core::git_program().display().to_string();
+    column![
+        colored(t, format!("✗ git not found ({git})"), t.error()),
+        row![
+            widgets::text_button(t, "Download Git", None, Some(Message::GetGit)),
+            dim(
+                t,
+                "then restart gf — or set git.executable in settings (⌘,) to git's full path"
+            ),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(4)
+    .into()
+}
+
+pub fn view<'a>(
+    t: &'a Tokens,
+    recent: &'a [PathBuf],
+    drop_hover: bool,
+    git_missing: bool,
+) -> Element<'a, Message> {
     let mut recent_list = Column::new().spacing(1);
     if recent.is_empty() {
         recent_list = recent_list.push(widgets::empty_hint(
@@ -47,19 +104,22 @@ pub fn view<'a>(t: &'a Tokens, recent: &'a [PathBuf], drop_hover: bool) -> Eleme
         });
     }
 
-    let shortcut = |k: &'a str, what: &'a str| {
-        row![colored(t, format!("{k:>6}"), t.accent()), dim(t, what)].spacing(10)
-    };
     let drop_line = if drop_hover {
         colored(t, "▼ drop the folder to open it", t.success())
     } else {
         dim(t, "or drag a repository folder onto this window")
     };
 
+    let banner: Element<'a, Message> = if git_missing {
+        git_missing_banner(t)
+    } else {
+        column![].into()
+    };
     let content = column![
         row![logo::view(t), dim(t, "Git Fast · Built with Rust")]
             .spacing(16)
             .align_y(iced::Alignment::Center),
+        banner,
         row![
             widgets::text_button(t, "Open repository…", Some("⌘O"), Some(Message::Open)),
             drop_line,
@@ -72,13 +132,7 @@ pub fn view<'a>(t: &'a Tokens, recent: &'a [PathBuf], drop_hover: bool) -> Eleme
         recent_list,
         mono(t, ""),
         dim(t, "─ SHORTCUTS "),
-        shortcut("⌘O", "open repository"),
-        shortcut("⌘1-9", "switch tab"),
-        shortcut("⌘W", "close tab"),
-        shortcut("⌘R", "refresh"),
-        shortcut("⌘L", "focus the prompt  (↑/↓ history, ⇥ complete)"),
-        shortcut("⌘J", "show/hide command log"),
-        shortcut("?", "help (at the prompt)"),
+        shortcut_list(t),
     ]
     .spacing(6)
     .max_width(900);

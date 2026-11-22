@@ -8,7 +8,7 @@ use iced::advanced::widget::operation::scrollable::{Scrollable, scroll_to};
 use iced::advanced::widget::{Id, Operation};
 use iced::futures::{StreamExt, executor::block_on};
 use iced::widget::scrollable::AbsoluteOffset;
-use iced::{Event, Font, Pixels, Rectangle, Renderer, Size, Theme, Vector, mouse};
+use iced::{Event, Pixels, Rectangle, Renderer, Size, Theme, Vector, mouse};
 use iced_test::runtime::{Action, UserInterface, task};
 
 use super::*;
@@ -247,7 +247,7 @@ fn bench_long_file_wheel_actions() {
 
 fn headless_renderer() -> Renderer {
     block_on(Renderer::new(
-        Font::MONOSPACE,
+        crate::platform::mono_font(),
         Pixels(14.0),
         Some("tiny-skia"),
     ))

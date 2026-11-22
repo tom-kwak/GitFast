@@ -1,0 +1,3 @@
+// Windows resources linked into gf.exe (crates/gf-app/build.rs): the icon
+// Explorer, shortcuts and the taskbar show. The first icon is the app's.
+1 ICON "gf.ico"

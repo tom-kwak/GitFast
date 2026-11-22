@@ -29,8 +29,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Add ubuntu-latest / windows-latest here in M9.
-        os: [macos-latest]
+        # Add ubuntu-latest here in M9.
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

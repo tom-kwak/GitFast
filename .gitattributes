@@ -1,0 +1,10 @@
+# Text is stored and checked out with LF on every platform, so `cargo fmt
+# --check` and test fixtures agree on Windows (core.autocrlf would add CR).
+* text=auto eol=lf
+# PowerShell scripts run as downloaded: CRLF is what Windows tools expect.
+*.ps1 text eol=crlf
+*.rc text eol=crlf
+*.ico binary
+*.icns binary
+*.png binary
+*.rgba binary

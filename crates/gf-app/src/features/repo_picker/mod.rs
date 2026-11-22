@@ -51,7 +51,7 @@ pub(crate) fn elide_path(path: &str, max: usize) -> String {
         return path.to_owned();
     }
     let tail: String = path.chars().skip(n - (max - 1)).collect();
-    match tail.find('/') {
+    match tail.find(crate::platform::is_path_sep) {
         Some(i) if i + 1 < tail.len() => format!("…{}", &tail[i..]),
         _ => format!("…{tail}"),
     }
@@ -319,10 +319,16 @@ impl State {
             Item::Path(p, kind) => (p.clone(), *kind == PathKind::Folder),
             Item::Found(f) => (f.path.clone(), !f.repo),
         };
+        // Typed text may mix / and \ on Windows: write the path cleanly.
+        let path: PathBuf = path.components().collect();
         self.set_filter(format!(
             "{}{}",
             format::tilde(&path),
-            if folder { "/" } else { "" }
+            if folder {
+                std::path::MAIN_SEPARATOR_STR
+            } else {
+                ""
+            }
         ));
         Some(Output::Completed)
     }
@@ -451,7 +457,7 @@ fn resolve_path(query: &str) -> String {
 /// The folder whose contents a typed path lists: itself after a `/`,
 /// else its parent (the last part narrows the list).
 fn listed_dir(query: &str, path: &Path) -> Option<PathBuf> {
-    if query.ends_with('/') {
+    if query.ends_with(crate::platform::is_path_sep) {
         Some(path.to_path_buf())
     } else {
         path.parent().map(Path::to_path_buf)
@@ -504,7 +510,7 @@ fn matches(
     listing: &mut Option<Listing>,
 ) -> (Vec<Item>, Option<PathBuf>) {
     let query = filter.trim();
-    if query.starts_with('/') || query.starts_with('~') {
+    if crate::platform::looks_like_path(query) {
         return path_items(entries, query, listing);
     }
     let mut scored: Vec<(i32, usize, Vec<usize>)> = entries
@@ -539,7 +545,7 @@ fn path_items(
     let path = format::expand_tilde(&query);
     let kind = path_kind(&path);
     let dir = listed_dir(&query, &path).filter(|d| d.is_dir());
-    let needle = if query.ends_with('/') {
+    let needle = if query.ends_with(crate::platform::is_path_sep) {
         ""
     } else {
         path.file_name().and_then(|n| n.to_str()).unwrap_or("")
@@ -556,7 +562,7 @@ fn path_items(
     // Nor is a name still being typed (`~/work/ord`).
     let worth_a_row = match kind {
         PathKind::Repo => true,
-        PathKind::Folder => !query.ends_with('/'),
+        PathKind::Folder => !query.ends_with(crate::platform::is_path_sep),
         PathKind::Missing => false,
     };
     if worth_a_row || found.is_empty() {
@@ -593,7 +599,7 @@ pub(crate) fn fuzzy(needle: &str, hay: &str) -> Option<(i32, Vec<usize>)> {
         if marks.last().is_some_and(|&last: &usize| last + 1 == at) {
             score += 5;
         }
-        if at == 0 || matches!(hay[at - 1], '/' | '-' | '_' | '.' | ' ') {
+        if at == 0 || matches!(hay[at - 1], '/' | '\\' | '-' | '_' | '.' | ' ') {
             score += 8;
         }
         score -= i32::try_from(at - from).unwrap_or(i32::MAX).min(10) / 4;
@@ -712,8 +718,9 @@ impl Feature for State {
                     })
                     .count();
                 format!(
-                    "in {}/ · {repos} repositories, {} folders",
-                    format::tilde(dir).trim_end_matches('/'),
+                    "in {}{} · {repos} repositories, {} folders",
+                    format::tilde(dir).trim_end_matches(crate::platform::is_path_sep),
+                    std::path::MAIN_SEPARATOR,
                     self.items.len() - repos
                 )
             }
@@ -1016,6 +1023,8 @@ mod tests {
         assert!(!s.items.iter().any(|i| matches!(i, Item::Path(..))));
     }
 
+    // /tmp and /private/tmp exist on macOS only.
+    #[cfg(target_os = "macos")]
     #[test]
     fn path_typed_with_the_korean_input_method_is_read_as_keys() {
         // "/ㅅㅡㅔ" is what /tmp looks like with the 2-set Korean layout.
@@ -1061,14 +1070,19 @@ mod tests {
         typed(&mut s, format!("{base}/"));
         s.move_by(2);
         assert_eq!(s.activate(), Some(Output::Completed));
-        assert_eq!(s.filter, format!("{base}/team/"));
+        // Completion writes the path as the platform does (`~`, separators).
+        let shown = |p: &Path| format::tilde(p);
+        assert_eq!(
+            s.filter,
+            format!("{}{}", shown(&root.join("team")), std::path::MAIN_SEPARATOR)
+        );
         assert_eq!(s.activate(), None);
         assert!(s.shaking());
 
         // ⇥ on a repository completes its path.
         typed(&mut s, format!("{base}/bil"));
         assert_eq!(s.complete(), Some(Output::Completed));
-        assert_eq!(s.filter, format!("{base}/billing-svc"));
+        assert_eq!(s.filter, shown(&root.join("billing-svc")));
         assert_eq!(
             s.items[0],
             Item::Path(root.join("billing-svc"), PathKind::Repo)

@@ -45,7 +45,13 @@ async fn commit_file_paths_use_the_requested_tree_and_ignore_worktree_files() {
     repo.write("shared.txt", "base\n");
     repo.commit_all("base");
     repo.git(&["switch", "-q", "-c", "feature"]);
-    repo.write("line\nbreak.txt", "newline path\n");
+    // Windows file names cannot hold a newline.
+    let odd_name = if cfg!(windows) {
+        "odd name.txt"
+    } else {
+        "line\nbreak.txt"
+    };
+    repo.write(odd_name, "newline path\n");
     let feature = repo.commit_all("feature paths");
 
     repo.git(&["switch", "-q", "main"]);
@@ -58,14 +64,14 @@ async fn commit_file_paths_use_the_requested_tree_and_ignore_worktree_files() {
     let feature_oid = feature.parse().unwrap();
     let feature_paths = git.commit_file_paths(&feature_oid).await.unwrap();
     assert!(feature_paths.contains(&PathBuf::from("shared.txt")));
-    assert!(feature_paths.contains(&PathBuf::from("line\nbreak.txt")));
+    assert!(feature_paths.contains(&PathBuf::from(odd_name)));
     assert!(!feature_paths.contains(&PathBuf::from("main-only.txt")));
     assert!(!feature_paths.contains(&PathBuf::from("untracked.txt")));
 
     let main_paths = git.commit_file_paths(&main.parse().unwrap()).await.unwrap();
     assert!(main_paths.contains(&PathBuf::from("main-only.txt")));
     assert!(!main_paths.contains(&PathBuf::from("shared.txt")));
-    assert!(!main_paths.contains(&PathBuf::from("line\nbreak.txt")));
+    assert!(!main_paths.contains(&PathBuf::from(odd_name)));
 }
 
 #[tokio::test]

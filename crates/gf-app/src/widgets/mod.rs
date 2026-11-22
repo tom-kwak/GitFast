@@ -19,8 +19,11 @@ use crate::theme::{Tokens, style};
 pub(crate) const PUSH_ARROW: &str = "⇡";
 
 /// Monospace text at the base size.
+///
+/// Shortcut glyphs (`⌘⇧K`) are drawn in the platform's notation
+/// ([`crate::platform::keys::local`]); the same holds for [`dim`].
 pub fn mono<'a>(t: &Tokens, s: impl text::IntoFragment<'a>) -> Text<'a> {
-    text(s).size(t.font_size)
+    text(crate::platform::keys::local(s.into_fragment())).size(t.font_size)
 }
 
 /// Monospace text in a color.
@@ -30,7 +33,9 @@ pub fn colored<'a>(t: &Tokens, s: impl text::IntoFragment<'a>, color: Color) -> 
 
 /// Secondary (dim) text.
 pub fn dim<'a>(t: &Tokens, s: impl text::IntoFragment<'a>) -> Text<'a> {
-    text(s).size(t.small()).color(t.dim)
+    text(crate::platform::keys::local(s.into_fragment()))
+        .size(t.small())
+        .color(t.dim)
 }
 
 /// `[ label ]` button. `shortcut` is shown inside the brackets so it is

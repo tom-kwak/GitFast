@@ -5,7 +5,7 @@
 <h1 align="center">gf</h1>
 
 <p align="center">
-  <b>gf</b> is short for <b>Git Fast</b>: a Git GUI client for macOS built to
+  <b>gf</b> is short for <b>Git Fast</b>: a Git GUI client for macOS and Windows built to
   be the fastest one, written in Rust with
   <a href="https://github.com/iced-rs/iced">iced</a>.
 </p>
@@ -14,9 +14,15 @@
   <a href="https://github.com/tom-kwak/GitFast/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/tom-kwak/GitFast?label=release"></a>
   <img alt="macOS 11+" src="https://img.shields.io/badge/macOS-11%2B-black">
   <img alt="Apple silicon and Intel" src="https://img.shields.io/badge/universal-Apple%20silicon%20%7C%20Intel-black">
+  <img alt="Windows 10+" src="https://img.shields.io/badge/Windows-10%2B%20x64-blue">
 </p>
 
+> **New in 0.0.8: gf runs on Windows.** Install it from PowerShell with one
+> line ([Windows](#windows) below).
+
 ## Install
+
+### macOS
 
 Paste in Terminal (macOS 11+, Apple silicon or Intel):
 
@@ -30,7 +36,29 @@ opens without a Gatekeeper prompt. Run it again to update.
 gf requires **Git 2.43.1 or later**. Check your version with `git --version`.
 Git is available through Xcode Command Line Tools or Homebrew.
 
-gf runs on macOS today. Windows and Linux support is planned.
+### Windows
+
+Available since 0.0.8.
+
+Paste in PowerShell (Windows 10 1809+ or 11, x64):
+
+```powershell
+irm https://raw.githubusercontent.com/tom-kwak/GitFast/main/scripts/install.ps1 | iex
+```
+
+It installs the latest release into `%LOCALAPPDATA%\Programs\gf` for the current
+user (no administrator rights), adds it to your `PATH` and the Start menu, and
+checks the download against its published SHA-256. Run it again to update.
+gf needs [Git for Windows](https://git-scm.com/download/win) 2.43.1 or later; if
+git is missing, gf says so on its start screen.
+
+gf is not code-signed yet, so SmartScreen may warn the first time
+("More info" → "Run anyway"). To check a manual download, compare
+`Get-FileHash gf-windows-x64.zip` with `gf-windows-x64.zip.sha256` from the release.
+
+Shortcuts read `⌘` on macOS and `Ctrl` on Windows (`⌘⇧Z` is `Ctrl+Shift+Z`).
+
+Linux support is planned.
 
 ## Features
 
@@ -40,7 +68,8 @@ gf runs on macOS today. Windows and Linux support is planned.
   and stage, unstage, stash or discard them together.
 - **Diffs**: syntax highlighting with TextMate grammars. Add your own VS Code
   `*.tmLanguage.json` or `*.sublime-syntax` files to
-  `~/Library/Application Support/dev.gf.gf/syntaxes/`.
+  `~/Library/Application Support/dev.gf.gf/syntaxes/` (macOS) or
+  `%APPDATA%\gf\gf\config\syntaxes\` (Windows).
 - **Branches, tags and stashes** in a sidebar tree with a quick filter.
 - **Blame**: who last changed each line; click a line to find its commit.
 - **Conflicts**: keep ours, theirs or both for each conflict block.
@@ -51,38 +80,42 @@ gf runs on macOS today. Windows and Linux support is planned.
   status and duration. The `gf ❯` command line runs any git command.
 - **Tabs**: one per repository. Switch with `⌘1`–`⌘9` or `⌃⇥`.
 
+Shortcuts are written for macOS here; on Windows, `⌘` is `Ctrl`.
+
 gf works through your system `git`, and uses
 [gitoxide](https://github.com/GitoxideLabs/gitoxide) for some operations,
 falling back to `git` when gitoxide cannot handle one.
 
-## What's new in 0.0.7
+## What's new in 0.0.8
 
-- History can find a file (`⌘F`) and show only the commits that changed it,
-  following renames. `×` or Esc returns to the previous view. Commits not yet
-  pushed are marked with the Push arrow.
-- Mark several working tree files with ⌘-click, ⇧-click, ⇧↑/↓ or ⌘A, then
-  stage, unstage, stash or discard them together from one menu.
-- The Commit button shows how many staged files it commits, the FILES view
-  switches with one ≡ toggle, and folders are dimmed with a folder icon.
-- Switching branch with changes asks one short question: stash & switch (`s`,
-  ⏎) or bring changes (`c`).
+- **Windows version**: gf runs on Windows 10 1809+ and 11 (x64), installed
+  with one PowerShell line ([Windows](#windows)). Shortcuts use Ctrl
+  (`Ctrl+Shift+Z`), files open in File Explorer, and text is drawn in
+  Cascadia Mono.
+- gf finds Git for Windows even when it is not on `PATH`, and the start
+  screen says how to get git when it cannot start it.
+- The open-repository window takes Windows paths (`C:\src\gf`,
+  `\\server\share`).
 
-[Release notes](https://github.com/tom-kwak/GitFast/releases/tag/release-0.0.7)
+[Release notes](https://github.com/tom-kwak/GitFast/releases/tag/release-0.0.8)
 
 ## Releases
 
 A release is a tag `release-<version>` on a commit in `main`, where
 `<version>` matches the workspace version in the tagged commit's `Cargo.toml`.
-For example, tag the commit with workspace version `0.0.7`:
+For example, tag the commit with workspace version `0.0.8`:
 
 ```bash
-git tag release-0.0.7 && git push origin release-0.0.7
+git tag release-0.0.8 && git push origin release-0.0.8
 ```
 
 Pushing the tag starts the release workflow if the tagged commit is already
 in `main`. Otherwise, the workflow picks up the tag when the commit reaches
-`main`. After the checks and UI sweep pass, the workflow publishes the
-universal `.dmg` and its SHA-256 checksum.
+`main`. After the checks (macOS and Windows) and UI sweep pass, the workflow
+publishes the universal `.dmg`, the Windows `.zip` and their SHA-256
+checksums. The release notes start with
+`docs/release-notes/<version>.md` ("What's new", written for each release),
+followed by the install steps.
 [Release workflow](.github/workflows/release.yml) ·
 [GitHub Releases](https://github.com/tom-kwak/GitFast/releases)
 

@@ -139,16 +139,17 @@ impl Feature for State {
 
     fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
         let t = cx.tokens;
-        let input = text_input(
-            "/ to type a git command (status, log -5 …)  ·  :help  ·  ⌘O open repo",
-            &self.input,
-        )
-        .id(PROMPT_ID)
-        .on_input(Message::Input)
-        .on_submit(Message::Submit)
-        .size(t.font_size)
-        .padding(Padding::from([4, 0]))
-        .style(style::prompt_input(t));
+        // A placeholder is not drawn through `widgets::mono`: convert here.
+        let placeholder = crate::platform::keys::local(
+            "/ to type a git command (status, log -5 …)  ·  :help  ·  ⌘O open repo".into(),
+        );
+        let input = text_input(&placeholder, &self.input)
+            .id(PROMPT_ID)
+            .on_input(Message::Input)
+            .on_submit(Message::Submit)
+            .size(t.font_size)
+            .padding(Padding::from([4, 0]))
+            .style(style::prompt_input(t));
 
         let prompt = row![colored(t, "gf ❯", t.accent()), input]
             .spacing(8)

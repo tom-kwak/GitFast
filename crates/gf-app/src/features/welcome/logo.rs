@@ -5,7 +5,7 @@ use std::f32::consts::TAU;
 
 use iced::time::{Duration, Instant};
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Text};
-use iced::{Color, Element, Font, Point, Rectangle, Renderer, Theme, alignment, mouse, window};
+use iced::{Color, Element, Point, Rectangle, Renderer, Theme, alignment, mouse, window};
 
 use crate::theme::Tokens;
 
@@ -159,7 +159,7 @@ fn draw_text_row(
         ),
         size: (spacing / 0.61).into(),
         align_y: alignment::Vertical::Center,
-        font: Font::MONOSPACE,
+        font: crate::platform::mono_font(),
         color,
         ..Text::default()
     });
