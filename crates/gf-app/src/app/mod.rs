@@ -1547,6 +1547,16 @@ impl App {
                 if let Some((_, token)) = &self.sync {
                     token.cancel();
                     self.flash(NoteKind::Info, "cancelling…");
+                    return Task::none();
+                }
+                // A file's history picked in Find: Esc goes back, like `×`.
+                let in_file_history =
+                    matches!(self.focus, Pane::History | Pane::Files | Pane::Diff)
+                        && self
+                            .active_tab()
+                            .is_some_and(|t| t.history.searched_file().is_some());
+                if in_file_history {
+                    return self.update(Message::History(history::Message::RestoreFileHistory));
                 }
                 Task::none()
             }

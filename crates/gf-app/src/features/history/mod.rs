@@ -999,7 +999,7 @@ impl Feature for State {
                 t,
                 "×",
                 t.dim,
-                "return to previous history",
+                "Esc: return to previous history",
                 Message::RestoreFileHistory,
             ));
         } else if self.revision.is_some() {

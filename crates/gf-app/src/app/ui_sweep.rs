@@ -409,9 +409,8 @@ async fn history_file_search_opens_the_picked_files_history_and_restores_the_sco
         .revision()
         .expect("file label")
         .to_owned();
-    let _ = ui
-        .send(Message::History(history::Message::RestoreFileHistory))
-        .await;
+    // Esc goes back, like `×`.
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
     let tab = ui.app.active_tab().expect("tab");
     assert_eq!(tab.history.revision(), None);
     assert_eq!(tab.history.searched_file(), None);
