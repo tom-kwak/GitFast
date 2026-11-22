@@ -25,3 +25,4 @@ pub mod tabs;
 pub mod toolbar;
 pub mod undo_list;
 pub mod welcome;
+pub mod worktrees;

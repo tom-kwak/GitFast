@@ -11,6 +11,8 @@
 //! - [`looks_like_path`]: typed text that names a folder (`C:\x` on Windows)
 //! - [`mono_font`], [`window_settings`]: the font, the main window (icon)
 //! - [`open_url`], [`GIT_DOWNLOAD_URL`]: the browser, where to get git
+//! - [`open_in_editor`], [`open_terminal`], [`TERMINAL`]: a folder in the
+//!   IDE or a terminal (worktrees view)
 
 pub mod keys;
 
@@ -132,6 +134,89 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     let mut child = cmd.arg(url).spawn()?;
     std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+/// The system terminal's name, for menu items ("open in Terminal").
+pub const TERMINAL: &str = if cfg!(target_os = "macos") {
+    "Terminal"
+} else if cfg!(windows) {
+    "Windows Terminal"
+} else {
+    "terminal"
+};
+
+/// Starts `cmd` without waiting, reaping it in the background.
+fn spawn_detached(mut cmd: std::process::Command) -> std::io::Result<()> {
+    if cfg!(test) {
+        return Ok(());
+    }
+    cmd.env("PATH", gf_core::tool_path::tool_path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
+/// Splits a configured command (`code -n`) into program and arguments.
+fn command_line(command: &str) -> Option<std::process::Command> {
+    let mut words = command.split_whitespace();
+    let mut cmd = std::process::Command::new(words.next()?);
+    cmd.args(words);
+    Some(cmd)
+}
+
+/// Opens the folder `dir` with the IDE `command` (`code`, `cursor`,
+/// `idea`…; the folder is its last argument). Does not wait for it.
+pub fn open_in_editor(command: &str, dir: &Path) -> std::io::Result<()> {
+    std::fs::metadata(dir)?;
+    let missing = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "no editor command");
+    if cfg!(windows) {
+        // IDE launchers are `.cmd` scripts there, which only cmd starts.
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.arg("/C").args(command.split_whitespace()).arg(dir);
+        gf_core::tool_path::hide_console(&mut cmd);
+        return spawn_detached(cmd);
+    }
+    let mut cmd = command_line(command).ok_or_else(missing)?;
+    cmd.arg(dir);
+    match spawn_detached(cmd) {
+        // Apps started from Finder often lack the IDE's shell command:
+        // ask macOS for an application of that name instead.
+        Err(e) if cfg!(target_os = "macos") && e.kind() == std::io::ErrorKind::NotFound => {
+            let mut open = std::process::Command::new("open");
+            open.arg("-a").arg(command).arg(dir);
+            spawn_detached(open)
+        }
+        other => other,
+    }
+}
+
+/// Opens a terminal in `dir`: `app` (an application name or command), or
+/// the system's terminal. Does not wait for it.
+pub fn open_terminal(app: Option<&str>, dir: &Path) -> std::io::Result<()> {
+    std::fs::metadata(dir)?;
+    if cfg!(target_os = "macos") {
+        let mut open = std::process::Command::new("open");
+        open.arg("-a").arg(app.unwrap_or("Terminal")).arg(dir);
+        return spawn_detached(open);
+    }
+    if cfg!(windows) {
+        let mut cmd = std::process::Command::new("cmd");
+        match app {
+            Some(app) => cmd.arg("/C").args(app.split_whitespace()),
+            // Windows Terminal when installed, else a console window.
+            None => cmd.args(["/C", "start", "", "/D"]).arg(dir).arg("wt"),
+        };
+        cmd.current_dir(dir);
+        gf_core::tool_path::hide_console(&mut cmd);
+        return spawn_detached(cmd);
+    }
+    let mut cmd = command_line(app.unwrap_or("x-terminal-emulator"))
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no terminal"))?;
+    cmd.current_dir(dir);
+    spawn_detached(cmd)
 }
 
 /// Shows `path` selected in the file manager. Does not wait for it.

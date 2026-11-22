@@ -27,6 +27,7 @@ mod settings;
 #[cfg(test)]
 mod ui_sweep;
 mod undoing;
+mod worktree_ops;
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -54,7 +55,7 @@ use crate::features::prompt::PROMPT_ID;
 use crate::features::status_line::Flash;
 use crate::features::{
     changes, command_log, commit_box, diff_view, history, prompt, repo_picker, settings_view,
-    sidebar, status_line, tab_list, tab_switcher, tabs, toolbar, welcome,
+    sidebar, status_line, tab_list, tab_switcher, tabs, toolbar, welcome, worktrees,
 };
 use crate::nav::{Key, Nav, Pane};
 use crate::repo_tab::{History, RepoTab, Snapshot};
@@ -86,6 +87,8 @@ pub enum Shortcut {
     FocusPrompt,
     ToggleLog,
     ToggleRefs,
+    /// ⌘⇧B: REFS ⇄ WORKTREES in the refs panel.
+    RefsMode,
     ToggleHistory,
     ToggleLocal,
     HistoryPrev,
@@ -118,7 +121,13 @@ pub enum OpKind {
     },
     Checkout(PathBuf),
     DeleteBranches(PathBuf),
-    RemoveWorktree(PathBuf),
+    /// Close the tabs of these trees once removed.
+    RemoveWorktrees(Vec<PathBuf>),
+    /// Open the new tree in a tab when `open`.
+    AddWorktree {
+        path: PathBuf,
+        open: bool,
+    },
     Commit,
     Fetch,
     Push {
@@ -169,6 +178,16 @@ pub enum Message {
     Prompt(prompt::Message),
     Log(command_log::Message),
     Sidebar(sidebar::Message),
+    /// The worktrees view of the active tab (clicks, keys).
+    Worktrees(worktrees::Message),
+    /// A worktrees view result for tab `RepoId` (statuses read).
+    WorktreesOf(RepoId, worktrees::Message),
+    /// `REFS │ WORKTREES` above the refs panel.
+    RefsMode(worktrees::RefsMode),
+    /// Read the other trees' statuses again (they are not watched).
+    WorktreePoll,
+    /// The window gained (`true`) or lost focus.
+    WindowFocus(bool),
     Changes(changes::Message),
     History(history::Message),
     LocalDiff(diff_view::Message),
@@ -383,6 +402,11 @@ pub struct App {
     /// not typing (see `Message::Prompt`).
     /// Currently held modifiers.
     modifiers: keyboard::Modifiers,
+    /// The gf window has focus: other trees are polled only then.
+    window_focused: bool,
+    /// A merge to run once the tree it runs in is open in a tab (merging a
+    /// worktree's branch into its base, from the worktrees view).
+    merge_after_open: Option<worktree_ops::MergeAfterOpen>,
     /// Repositories being opened (for the busy indicator).
     opening: usize,
     /// Panel the arrow keys drive while no text field has focus.
@@ -474,6 +498,8 @@ impl App {
             drop_hover: false,
             git_missing: false,
             modifiers: keyboard::Modifiers::empty(),
+            window_focused: true,
+            merge_after_open: None,
             opening: 0,
             focus: Pane::default(),
             typing: no_tabs,
@@ -719,6 +745,63 @@ impl App {
                     None => task,
                 }
             }
+            Message::RefsMode(mode) => {
+                let worktrees = mode == worktrees::RefsMode::Worktrees;
+                if !self.settings.appearance.show_refs
+                    || self.settings.appearance.worktrees_view != worktrees
+                {
+                    self.settings.appearance.show_refs = true;
+                    self.settings.appearance.worktrees_view = worktrees;
+                    self.save_settings();
+                }
+                self.focus_pane(Pane::Sidebar);
+                let id = self.active_tab().map(|t| t.repo.id());
+                id.map_or_else(Task::none, |id| self.request_worktrees(id))
+            }
+            Message::WorktreePoll => {
+                let id = self.active_tab().map(|t| t.repo.id());
+                id.map_or_else(Task::none, |id| self.request_worktrees(id))
+            }
+            Message::WindowFocus(focused) => {
+                self.window_focused = focused;
+                let task = self.update(Message::Modifiers(keyboard::Modifiers::empty()));
+                // Catch up with what the other trees did meanwhile.
+                let id = self.active_tab().map(|t| t.repo.id()).filter(|_| focused);
+                let poll = id.map_or_else(Task::none, |id| self.request_worktrees(id));
+                Task::batch([task, poll])
+            }
+            Message::Worktrees(m) => {
+                if matches!(
+                    m,
+                    worktrees::Message::Click(_)
+                        | worktrees::Message::Select(_)
+                        | worktrees::Message::RightClick(_)
+                ) {
+                    self.focus_pane(Pane::Sidebar);
+                }
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                let id = tab.repo.id();
+                let Update { task, output } = tab.worktrees.update(m);
+                let task = task.map(move |m| Message::WorktreesOf(id, m));
+                match output {
+                    Some(o) => Task::batch([task, self.on_worktrees(o)]),
+                    None => task,
+                }
+            }
+            Message::WorktreesOf(id, m) => {
+                let Some(tab) = self.tab_mut(id) else {
+                    return Task::none();
+                };
+                let Update { task, output } = tab.worktrees.update(m);
+                let task = task.map(move |m| Message::WorktreesOf(id, m));
+                let active = self.active_tab().is_some_and(|t| t.repo.id() == id);
+                match output {
+                    Some(o) if active => Task::batch([task, self.on_worktrees(o)]),
+                    _ => task,
+                }
+            }
             Message::Changes(m) => {
                 // Shift-click marks a range, ⌘-click adds/removes one file.
                 let m = match m {
@@ -833,8 +916,20 @@ impl App {
                 let Some(dialog) = self.dialog.as_mut() else {
                     return Task::none();
                 };
+                let typed = matches!(m, dialog::Message::Field(..));
+                let before: Vec<String> = dialog.fields.iter().map(|f| f.value.clone()).collect();
                 match dialog.update(m) {
                     Some(outcome) => self.on_dialog_outcome(outcome),
+                    // A suggestion filled a field in: keep typing at its end.
+                    None if !typed => dialog
+                        .fields
+                        .iter()
+                        .zip(&before)
+                        .position(|(f, old)| f.value != *old)
+                        .and_then(dialog::field_id)
+                        .map_or_else(Task::none, |id| {
+                            Task::batch([operation::focus(id), operation::move_cursor_to_end(id)])
+                        }),
                     None => Task::none(),
                 }
             }
@@ -930,8 +1025,15 @@ impl App {
             }
             Message::Opened(path, result) => {
                 self.opening = self.opening.saturating_sub(1);
+                let merge = self.merge_after_open.take_if(|m| m.path == path);
                 match result {
-                    Ok(repo) => self.add_tab(*repo),
+                    Ok(repo) => {
+                        let tab = self.add_tab(*repo);
+                        match merge {
+                            Some(m) => Task::batch([tab, self.run_merge(m.branch, m.no_ff)]),
+                            None => tab,
+                        }
+                    }
                     Err(e) => {
                         let shown = widgets::format::tilde(&path);
                         self.log.note(
@@ -1285,8 +1387,21 @@ impl App {
             self.active = i;
             self.note_active();
             self.save_settings();
+            // The worktrees view shows the new tab's trees: read them now.
+            let id = self.tabs[i].repo.id();
+            let poll = self.request_worktrees(id);
+            return Task::batch([self.reveal_active_tab(), poll]);
         }
         self.reveal_active_tab()
+    }
+
+    /// Which list the refs panel shows (the same in every tab).
+    pub(super) fn refs_mode(&self) -> worktrees::RefsMode {
+        if self.settings.appearance.worktrees_view {
+            worktrees::RefsMode::Worktrees
+        } else {
+            worktrees::RefsMode::Refs
+        }
     }
 
     /// Remembers the active tab as the most recently used.
@@ -1543,11 +1658,26 @@ impl App {
         // While a dialog is open only its keys apply.
         if self.dialog.is_some() {
             return match k {
+                // Esc closes a dropped-down list before the dialog.
+                Shortcut::Escape if self.dialog.as_ref().is_some_and(Dialog::suggestions_open) => {
+                    self.update(Message::Dialog(dialog::Message::CloseSuggestions))
+                }
                 Shortcut::Escape => self.update(Message::Dialog(dialog::Message::Cancel)),
                 Shortcut::Enter => match self.dialog.as_mut().and_then(Dialog::enter) {
                     Some(outcome) => self.on_dialog_outcome(outcome),
                     None => Task::none(),
                 },
+                // A field's suggestions: ↑/↓ highlight, ⇥ fills it in.
+                Shortcut::HistoryPrev | Shortcut::HistoryNext | Shortcut::Complete
+                    if self.dialog.as_ref().is_some_and(Dialog::has_suggestions) =>
+                {
+                    let m = match k {
+                        Shortcut::HistoryPrev => dialog::Message::SuggestMove(-1),
+                        Shortcut::HistoryNext => dialog::Message::SuggestMove(1),
+                        _ => dialog::Message::Complete,
+                    };
+                    self.update(Message::Dialog(m))
+                }
                 _ => Task::none(),
             };
         }
@@ -1581,7 +1711,17 @@ impl App {
             Shortcut::ToggleRefs => {
                 self.settings.appearance.show_refs = !self.settings.appearance.show_refs;
                 self.save_settings();
-                Task::none()
+                let id = self.active_tab().map(|t| t.repo.id());
+                id.map_or_else(Task::none, |id| self.request_worktrees(id))
+            }
+            Shortcut::RefsMode => {
+                let mode = if self.settings.appearance.show_refs {
+                    self.refs_mode().toggled()
+                } else {
+                    // ⌘⇧B on a hidden panel shows the worktrees.
+                    worktrees::RefsMode::Worktrees
+                };
+                self.update(Message::RefsMode(mode))
             }
             Shortcut::ToggleHistory => {
                 self.settings.appearance.show_history = !self.settings.appearance.show_history;
@@ -1697,14 +1837,23 @@ impl App {
                 let appearance = &self.settings.appearance;
                 let active = self.pane();
                 let left: Element<'_, Message> = if appearance.show_refs {
-                    container(focus::pane_frame(
-                        t,
-                        Pane::Sidebar,
-                        active,
-                        tab.sidebar
+                    let mode = self.refs_mode();
+                    let list = match mode {
+                        worktrees::RefsMode::Refs => tab
+                            .sidebar
                             .view_with_checkout(cx, checkout_indicator)
                             .map(Message::Sidebar),
-                    ))
+                        worktrees::RefsMode::Worktrees => {
+                            tab.worktrees.view(cx).map(Message::Worktrees)
+                        }
+                    };
+                    container(
+                        column![
+                            refs_mode_tabs(t, tab, mode),
+                            focus::pane_frame(t, Pane::Sidebar, active, list)
+                        ]
+                        .spacing(2),
+                    )
                     .width(Length::Fixed(t.font_size * 22.0))
                     .into()
                 } else {
@@ -1892,6 +2041,15 @@ impl App {
         {
             subs.push(window::frames().map(|_| Message::Frame));
         }
+        // Other trees are not watched: read them again while shown.
+        if self.settings.appearance.show_refs
+            && self.window_focused
+            && self.refs_mode() == worktrees::RefsMode::Worktrees
+            && !self.tabs.is_empty()
+        {
+            let every = Duration::from_secs(self.settings.worktrees.poll_secs.max(1));
+            subs.push(iced::time::every(every).map(|_| Message::WorktreePoll));
+        }
         if self.busy() {
             subs.push(iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick));
         } else if !self.tabs.is_empty() {
@@ -1949,6 +2107,47 @@ fn list_split<'a>(
         container(diff).width(Length::Fill),
     ]
     .height(Length::Fill)
+    .into()
+}
+
+/// `[≡ REFS] [⌂ WORKTREES 3]` above the refs panel (⌘⇧B switches).
+fn refs_mode_tabs<'a>(
+    t: &'a Tokens,
+    tab: &'a RepoTab,
+    current: worktrees::RefsMode,
+) -> Element<'a, Message> {
+    use worktrees::RefsMode;
+    let trees = tab.worktrees.cards().len();
+    let mode_tab = |mode: RefsMode, label: String, hint: &str| {
+        // Above: below would cover the panel's own header buttons.
+        widgets::tip_top(
+            t,
+            iced::widget::button(
+                widgets::mono(t, label).wrapping(iced::widget::text::Wrapping::None),
+            )
+            .padding(Padding::from([2, 8]))
+            .style(style::code_tab(t, t.accent(), current == mode))
+            .on_press(Message::RefsMode(mode)),
+            hint.into(),
+        )
+    };
+    row![
+        mode_tab(
+            RefsMode::Refs,
+            "≡ REFS".into(),
+            "branches, tags, stashes ⌘⇧B"
+        ),
+        mode_tab(
+            RefsMode::Worktrees,
+            if trees > 1 {
+                format!("⌂ WORKTREES {trees}")
+            } else {
+                "⌂ WORKTREES".into()
+            },
+            "every working tree at a glance ⌘⇧B",
+        ),
+    ]
+    .spacing(2)
     .into()
 }
 
@@ -2105,9 +2304,8 @@ fn global_event(event: iced::Event, status: event::Status, _id: window::Id) -> O
                 .then_some(Message::KeyInput(input))
         }
         // Native dialogs can swallow the key-up of ⌘; never keep it stuck.
-        iced::Event::Window(window::Event::Focused | window::Event::Unfocused) => {
-            Some(Message::Modifiers(keyboard::Modifiers::empty()))
-        }
+        iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocus(true)),
+        iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(false)),
         iced::Event::Window(window::Event::FileHovered(_)) => Some(Message::FileHovered),
         iced::Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FileHoverLeft),
         iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
@@ -2217,6 +2415,7 @@ fn shortcut(
             'l' => Shortcut::FocusPrompt,
             'j' => Shortcut::ToggleLog,
             'h' | 'H' if modifiers.shift() && !modifiers.alt() => Shortcut::ToggleHistory,
+            'b' | 'B' if modifiers.shift() && !modifiers.alt() => Shortcut::RefsMode,
             'b' => Shortcut::ToggleRefs,
             'e' => Shortcut::ToggleLocal,
             // ⌘⇧[ / ⌘⇧]: previous / next repository tab (Safari, Terminal).
@@ -2269,6 +2468,31 @@ mod tests {
         status: event::Status,
     ) -> Option<Shortcut> {
         shortcut(&key, modifiers, Physical::Code(code), status)
+    }
+
+    #[test]
+    fn command_shift_b_switches_the_refs_mode_and_command_b_hides_refs() {
+        let cmd = keyboard::Modifiers::COMMAND;
+        for (key, code) in [("B", Code::KeyB), ("ㅠ", Code::KeyB)] {
+            assert_eq!(
+                press(
+                    Key::Character(key.into()),
+                    code,
+                    cmd | keyboard::Modifiers::SHIFT,
+                    event::Status::Ignored
+                ),
+                Some(Shortcut::RefsMode)
+            );
+        }
+        assert_eq!(
+            press(
+                Key::Character("b".into()),
+                Code::KeyB,
+                cmd,
+                event::Status::Ignored
+            ),
+            Some(Shortcut::ToggleRefs)
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub struct Settings {
     pub confirm: ConfirmSettings,
     pub git: GitSettings,
     pub repos: RepoSettings,
+    pub worktrees: WorktreeSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +41,8 @@ pub struct AppearanceSettings {
     pub working_tree_dirs: bool,
     /// Directory tree in the history commit's file list.
     pub history_file_dirs: bool,
+    /// The refs panel shows the worktrees view instead of the refs (⌘⇧B).
+    pub worktrees_view: bool,
 }
 
 /// Default width of the file list beside the diff (character columns).
@@ -56,6 +59,7 @@ impl Default for AppearanceSettings {
             list_cols: DEFAULT_LIST_COLS,
             working_tree_dirs: false,
             history_file_dirs: true,
+            worktrees_view: false,
         }
     }
 }
@@ -99,6 +103,36 @@ pub struct RepoSettings {
     pub open: Vec<PathBuf>,
     /// Index into `open` of the active tab.
     pub active: Option<usize>,
+}
+
+/// The worktrees view (refs panel, ⌘⇧B): how to open a tree elsewhere
+/// and where new trees go.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorktreeSettings {
+    /// Command that opens a folder in the IDE (`code`, `cursor`, `idea`…);
+    /// the folder is its last argument. `:editor <cmd>` changes it.
+    pub editor: String,
+    /// Terminal application; `None` uses the system's own. `:terminal`
+    /// changes it.
+    pub terminal: Option<String>,
+    /// Folder new worktrees go in; `None` puts them in
+    /// `<repo>-worktrees/` beside the repository.
+    pub root: Option<PathBuf>,
+    /// Seconds between status reads of the other trees while the view is
+    /// shown (their files are not watched).
+    pub poll_secs: u64,
+}
+
+impl Default for WorktreeSettings {
+    fn default() -> Self {
+        Self {
+            editor: "code".into(),
+            terminal: None,
+            root: None,
+            poll_secs: 5,
+        }
+    }
 }
 
 impl Settings {
@@ -158,6 +192,8 @@ mod tests {
         s.git.executable = Some("/opt/git/bin/git".into());
         s.repos.open = vec!["/a".into(), "/b".into()];
         s.repos.active = Some(1);
+        s.worktrees.editor = "cursor".into();
+        s.worktrees.root = Some("/w".into());
         s.save(&path).expect("save");
         assert_eq!(Settings::load(&path).expect("load"), s);
     }

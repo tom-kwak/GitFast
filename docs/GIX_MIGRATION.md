@@ -52,8 +52,8 @@ gf-git/src/
 | | reset, undo_to | CLI | 고수준 reset 없음 |
 | StashOps | stashes(목록) | **gix** ✅ | `refs/stash` reflog |
 | | push/apply/pop/drop | CLI | |
-| WorktreeOps | 목록 | **gix** ✅ | unborn 브랜치의 worktree는 CLI |
-| | add/remove/prune | CLI | |
+| WorktreeOps | 목록 | **gix** ✅ | unborn 브랜치의 worktree는 CLI. 연결된 트리에서 읽어도 main 트리가 맨 앞(git과 같음) |
+| | add, remove, prune, lock/unlock, worktree_status, default_base | CLI | worktree_status는 다른 작업 트리 폴더에서 실행(status·log·rev-list·merge-base) |
 | SubmoduleOps | 목록(상태 포함), update/sync | CLI | 목록의 `(describe)`가 git의 describe 단계(태그 → `--tags` → `--contains` → `--all`)와 같아야 해서 CLI 유지 |
 | RebaseOps | rebase_plan, squash_preview | **gix** ✅ | 두 백엔드가 같은 로직(`rebase_interactive::plan/preview`)을 공유하고 log·unpushed만 각자 구현 |
 | | rebase_interactive, squash | CLI | gix-sequencer 없음 |

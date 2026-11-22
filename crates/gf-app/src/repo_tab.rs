@@ -14,7 +14,7 @@ use gf_git::{
 };
 use gf_watch::RepoWatcher;
 
-use crate::features::{changes, commit_box, diff_view, history, sidebar};
+use crate::features::{changes, commit_box, diff_view, history, sidebar, worktrees};
 
 /// Commits per history page: the list starts with this many and loads
 /// another page each time it is scrolled to the end.
@@ -749,6 +749,8 @@ pub struct RepoTab {
     /// Held only to keep the file watcher running for this tab.
     _watcher: Option<RepoWatcher>,
     pub sidebar: sidebar::State,
+    /// The refs panel's other mode (⌘⇧B): every working tree as a card.
+    pub worktrees: worktrees::State,
     pub changes: changes::State,
     pub history: history::State,
     /// A rewrite plan belongs to the repository that produced it.
@@ -802,6 +804,7 @@ impl RepoTab {
             all_branches: true,
             _watcher: watcher,
             sidebar: sidebar::State::default(),
+            worktrees: worktrees::State::default(),
             changes: changes::State::default(),
             history: history::State::default(),
             rebase_editor: None,

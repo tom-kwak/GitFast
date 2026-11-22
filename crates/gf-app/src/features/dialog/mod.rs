@@ -49,6 +49,11 @@ const FIELD_IDS: [&str; 4] = [
     "gf-dialog-field-3",
 ];
 
+/// Id of text field `i`, for focusing it.
+pub fn field_id(i: usize) -> Option<&'static str> {
+    FIELD_IDS.get(i).copied()
+}
+
 /// How careful a dialog is (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -86,6 +91,73 @@ pub struct Field {
     pub label: String,
     pub value: String,
     pub placeholder: String,
+    /// Values to pick from below the field (see [`Dialog::suggest`]).
+    pub suggestions: Vec<Suggestion>,
+    /// Highlighted match (↑/↓), an index into [`Field::matches`].
+    highlight: Option<usize>,
+    /// The suggestions are dropped down (▾, ↓ or typing opens them).
+    open: bool,
+    /// Said under the field when nothing matches what is typed.
+    no_match: String,
+}
+
+/// Rows of suggestions a dropped-down list shows at most.
+const SUGGEST_ROWS: usize = 8;
+
+fn suggest_row_height(t: &Tokens) -> f32 {
+    (t.small() * 1.6).round()
+}
+
+/// A value a field offers, e.g. an existing branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Suggestion {
+    pub value: String,
+    /// Shown dim beside it (`origin/x`, `checked out`).
+    pub hint: String,
+    /// Shown, but cannot be picked (the hint says why).
+    pub disabled: bool,
+}
+
+impl Suggestion {
+    pub fn new(value: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            hint: hint.into(),
+            disabled: false,
+        }
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+}
+
+impl Field {
+    /// The suggestions the typed text matches: all of them while empty,
+    /// else those containing it (any case), the ones starting with it first.
+    pub fn matches(&self) -> Vec<&Suggestion> {
+        let typed = self.value.trim().to_lowercase();
+        if typed.is_empty() {
+            return self.suggestions.iter().collect();
+        }
+        let mut found: Vec<(bool, &Suggestion)> = self
+            .suggestions
+            .iter()
+            .filter_map(|s| {
+                let v = s.value.to_lowercase();
+                v.contains(&typed).then(|| (!v.starts_with(&typed), s))
+            })
+            .collect();
+        found.sort_by_key(|(later, _)| *later);
+        found.into_iter().map(|(_, s)| s).collect()
+    }
+
+    /// The highlighted match, when it can be picked.
+    fn highlighted(&self) -> Option<&Suggestion> {
+        let h = self.highlight?;
+        self.matches().get(h).copied().filter(|s| !s.disabled)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +291,16 @@ pub struct Dialog<P> {
 #[derive(Debug, Clone)]
 pub enum Message {
     Field(usize, String),
+    /// A suggestion clicked: field, value.
+    Suggest(usize, String),
+    /// ↑/↓ in the suggestions of the first field that has some.
+    SuggestMove(isize),
+    /// ⇥: the highlighted (else the first) suggestion into the field.
+    Complete,
+    /// ▾ beside field `i`: drop its suggestions down or close them.
+    ToggleSuggestions(usize),
+    /// Esc while suggestions are dropped down.
+    CloseSuggestions,
     Area(text_editor::Action),
     ReviewScrolled(ScrollPos),
     Check(usize),
@@ -327,8 +409,56 @@ impl<P: Clone> Dialog<P> {
             label: label.into(),
             value: value.into(),
             placeholder: placeholder.into(),
+            suggestions: Vec::new(),
+            highlight: None,
+            open: false,
+            no_match: String::new(),
         });
         self
+    }
+
+    /// Values the last field offers below it (filtered as one types,
+    /// ↑/↓ highlight, ⏎ or ⇥ picks, a click picks).
+    /// `no_match` is said when none matches what is typed.
+    pub fn suggest(mut self, suggestions: Vec<Suggestion>, no_match: impl Into<String>) -> Self {
+        if let Some(f) = self.fields.last_mut() {
+            f.suggestions = suggestions;
+            f.no_match = no_match.into();
+        }
+        self
+    }
+
+    /// The field ↑/↓/⇥ drive: the first one with suggestions.
+    fn suggesting(&mut self) -> Option<(usize, &mut Field)> {
+        self.fields
+            .iter_mut()
+            .enumerate()
+            .find(|(_, f)| !f.suggestions.is_empty())
+    }
+
+    /// Whether ↑/↓/⇥ go to a field's suggestions.
+    pub fn has_suggestions(&self) -> bool {
+        self.fields.iter().any(|f| !f.suggestions.is_empty())
+    }
+
+    /// A field's suggestions are dropped down (Esc closes them first).
+    pub fn suggestions_open(&self) -> bool {
+        self.fields.iter().any(|f| f.open)
+    }
+
+    fn close_suggestions(&mut self) {
+        for f in &mut self.fields {
+            f.open = false;
+            f.highlight = None;
+        }
+    }
+
+    fn pick(&mut self, i: usize, value: String) {
+        if let Some(f) = self.fields.get_mut(i) {
+            f.value = value;
+            self.error = None;
+        }
+        self.close_suggestions();
     }
 
     /// A multi-line text box (one per dialog), shown after the fields.
@@ -434,9 +564,69 @@ impl<P: Clone> Dialog<P> {
     pub fn update(&mut self, message: Message) -> Option<Outcome<P>> {
         match message {
             Message::Field(i, v) => {
+                self.close_suggestions();
                 if let Some(f) = self.fields.get_mut(i) {
                     f.value = v;
+                    // Typing shows what matches.
+                    f.open = !f.suggestions.is_empty();
                     self.error = None;
+                }
+                None
+            }
+            Message::ToggleSuggestions(i) => {
+                let open = self.fields.get(i).is_some_and(|f| f.open);
+                self.close_suggestions();
+                if let Some(f) = self.fields.get_mut(i) {
+                    f.open = !open && !f.suggestions.is_empty();
+                }
+                None
+            }
+            Message::CloseSuggestions => {
+                self.close_suggestions();
+                None
+            }
+            Message::Suggest(i, value) => {
+                let allowed = self.fields.get(i).is_some_and(|f| {
+                    f.suggestions
+                        .iter()
+                        .any(|s| s.value == value && !s.disabled)
+                });
+                if allowed {
+                    self.pick(i, value);
+                }
+                None
+            }
+            Message::SuggestMove(by) => {
+                if let Some((_, f)) = self.suggesting() {
+                    f.open = true;
+                    let matches = f.matches();
+                    let enabled: Vec<usize> = (0..matches.len())
+                        .filter(|j| !matches[*j].disabled)
+                        .collect();
+                    let at = f
+                        .highlight
+                        .and_then(|h| enabled.iter().position(|j| *j == h));
+                    f.highlight = match (at, by.is_negative()) {
+                        _ if enabled.is_empty() => None,
+                        (None, false) => enabled.first().copied(),
+                        (None, true) => enabled.last().copied(),
+                        // Up from the first match leaves the list.
+                        (Some(0), true) => None,
+                        (Some(k), true) => Some(enabled[k - 1]),
+                        (Some(k), false) => Some(enabled[(k + 1).min(enabled.len() - 1)]),
+                    };
+                }
+                None
+            }
+            Message::Complete => {
+                if let Some((i, f)) = self.suggesting() {
+                    let value = f
+                        .highlighted()
+                        .or_else(|| f.matches().into_iter().find(|s| !s.disabled))
+                        .map(|s| s.value.clone());
+                    if let Some(value) = value {
+                        self.pick(i, value);
+                    }
                 }
                 None
             }
@@ -453,12 +643,14 @@ impl<P: Clone> Dialog<P> {
                 None
             }
             Message::Check(i) => {
+                self.close_suggestions();
                 if let Some(c) = self.checks.get_mut(i) {
                     c.value = !c.value;
                 }
                 None
             }
             Message::Choose(i) => {
+                self.close_suggestions();
                 let enabled = |c: &&mut Choice| c.options.get(i).is_some_and(|o| !o.disabled);
                 if let Some(c) = self.choice.as_mut().filter(enabled) {
                     c.selected = i;
@@ -485,6 +677,17 @@ impl<P: Clone> Dialog<P> {
             }
             Message::DontAsk => {
                 self.dont_ask = !self.dont_ask;
+                None
+            }
+            // ⏎ on a highlighted suggestion picks it; the next ⏎ submits.
+            Message::Submit
+                if let Some((i, value)) = self.fields.iter().enumerate().find_map(|(i, f)| {
+                    f.highlighted()
+                        .filter(|s| s.value != f.value.trim())
+                        .map(|s| (i, s.value.clone()))
+                }) =>
+            {
+                self.pick(i, value);
                 None
             }
             Message::Submit => Some(Outcome::Submitted {
@@ -582,6 +785,20 @@ impl<P: Clone> Dialog<P> {
             if !danger {
                 input = input.on_submit(Message::Submit);
             }
+            let input: Element<'a, Message> = if f.suggestions.is_empty() {
+                input.into()
+            } else {
+                let toggle = iced::widget::button(
+                    colored(t, if f.open { "▴" } else { "▾" }, t.accent()).size(t.small()),
+                )
+                .padding(Padding::from([4, 8]))
+                .style(style::text_button(t, t.accent()))
+                .on_press(Message::ToggleSuggestions(i));
+                let base = row![input, widgets::tip(t, toggle, "existing ones  ↓".into())]
+                    .spacing(2)
+                    .align_y(iced::Alignment::Center);
+                widgets::dropdown::dropdown(base, f.open.then(|| suggestion_list(t, i, f)))
+            };
             col = col.push(column![dim(t, format!("│ {}", f.label)), input].spacing(2));
         }
         if let Some(area) = &self.area {
@@ -699,6 +916,79 @@ impl<P: Clone> Dialog<P> {
     }
 }
 
+/// The dropped-down suggestions of field `i` that match what is typed (up
+/// to [`SUGGEST_ROWS`]; the window slides with the highlighted one).
+fn suggestion_list<'a>(t: &'a Tokens, i: usize, f: &'a Field) -> Element<'a, Message> {
+    let matches = f.matches();
+    let height = suggest_row_height(t);
+    let cap = if matches.len() <= SUGGEST_ROWS {
+        SUGGEST_ROWS
+    } else {
+        SUGGEST_ROWS - 1
+    };
+    let first = f
+        .highlight
+        .map_or(0, |h| (h + 1).saturating_sub(cap))
+        .min(matches.len().saturating_sub(cap));
+    let more = matches.len().saturating_sub(first + cap);
+    let note = |text: String| {
+        container(dim(t, text))
+            .height(Length::Fixed(height))
+            .padding(Padding::from([0, 6]))
+            .align_y(iced::Alignment::Center)
+    };
+    let mut col = Column::new();
+    for (k, s) in matches.iter().enumerate().skip(first).take(cap) {
+        let lit = f.highlight == Some(k);
+        let exact = s.value == f.value.trim();
+        let name_color = if s.disabled {
+            t.dim
+        } else if exact {
+            t.accent()
+        } else {
+            t.branch()
+        };
+        let line = row![
+            colored(t, if lit || exact { "›" } else { " " }, t.accent()).size(t.small()),
+            colored(t, s.value.as_str(), name_color)
+                .size(t.small())
+                .wrapping(iced::widget::text::Wrapping::None),
+            space().width(Length::Fill),
+            dim(t, s.hint.as_str()).wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+        let pick = (!s.disabled).then(|| Message::Suggest(i, s.value.clone()));
+        col = col.push(
+            iced::widget::button(line)
+                .width(Length::Fill)
+                .height(Length::Fixed(height))
+                .padding(Padding::from([0, 6]))
+                .style(style::row_button(t, lit))
+                .on_press_maybe(pick),
+        );
+    }
+    if more > 0 {
+        col = col.push(note(format!("… {more} more — type to narrow")));
+    } else if matches.is_empty() {
+        col = col.push(note(f.no_match.clone()));
+    }
+    container(col)
+        .width(Length::Fill)
+        .padding(1)
+        .style(move |_| container::Style {
+            text_color: Some(t.fg),
+            background: Some(Background::Color(t.surface)),
+            border: Border {
+                color: t.accent(),
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
 /// Inline options: the lines of the option under the pointer (else the
 /// selected one) and why any disabled option cannot run, then the last
 /// row: a button per option (the selected one marked ⏎) and Cancel.
@@ -797,6 +1087,82 @@ fn one_line<'a>(t: &'a Tokens, line: String, color: Color) -> Element<'a, Messag
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn branch_dialog() -> Dialog<()> {
+        Dialog::confirm("New worktree", vec![], "Add", ())
+            .field("branch", "", "")
+            .suggest(
+                vec![
+                    Suggestion::new("main", "checked out").disabled(true),
+                    Suggestion::new("fix/login", ""),
+                    Suggestion::new("feature/login", "origin/feature/login"),
+                ],
+                "new",
+            )
+    }
+
+    fn submitted(o: Option<Outcome<()>>) -> Vec<String> {
+        match o {
+            Some(Outcome::Submitted { values, .. }) => values,
+            other => panic!("not submitted: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggestions_drop_down_on_toggle_arrow_or_typing_and_close_on_a_pick() {
+        let mut d = branch_dialog();
+        assert!(!d.suggestions_open(), "closed when the dialog opens");
+        let _ = d.update(Message::ToggleSuggestions(0));
+        assert!(d.suggestions_open());
+        let _ = d.update(Message::ToggleSuggestions(0));
+        assert!(!d.suggestions_open(), "▾ again closes");
+        let _ = d.update(Message::SuggestMove(1));
+        assert!(d.suggestions_open(), "↓ opens");
+        let _ = d.update(Message::CloseSuggestions);
+        assert!(!d.suggestions_open(), "Esc closes");
+        let _ = d.update(Message::Field(0, "fix".into()));
+        assert!(d.suggestions_open(), "typing opens");
+        let _ = d.update(Message::Suggest(0, "fix/login".into()));
+        assert!(!d.suggestions_open() && d.fields[0].value == "fix/login");
+    }
+
+    #[test]
+    fn suggestions_filter_as_one_types_prefix_first() {
+        let mut d = branch_dialog();
+        assert_eq!(d.fields[0].matches().len(), 3, "all while empty");
+        let _ = d.update(Message::Field(0, "LOG".into()));
+        let names: Vec<_> = d.fields[0]
+            .matches()
+            .iter()
+            .map(|s| s.value.as_str())
+            .collect();
+        assert_eq!(names, ["fix/login", "feature/login"]);
+        let _ = d.update(Message::Field(0, "fe".into()));
+        assert_eq!(d.fields[0].matches()[0].value, "feature/login");
+    }
+
+    #[test]
+    fn arrows_skip_disabled_and_enter_picks_before_submitting() {
+        let mut d = branch_dialog();
+        let _ = d.update(Message::SuggestMove(1));
+        assert!(d.update(Message::Submit).is_none(), "⏎ picks first");
+        assert_eq!(d.fields[0].value, "fix/login", "main is checked out");
+        assert_eq!(submitted(d.update(Message::Submit)), ["fix/login"]);
+    }
+
+    #[test]
+    fn tab_completes_and_clicks_ignore_disabled_ones() {
+        let mut d = branch_dialog();
+        let _ = d.update(Message::Field(0, "feat".into()));
+        let _ = d.update(Message::Complete);
+        assert_eq!(d.fields[0].value, "feature/login");
+        let _ = d.update(Message::Suggest(0, "main".into()));
+        assert_eq!(d.fields[0].value, "feature/login", "main cannot be picked");
+        // Up from the first match leaves the list: ⏎ submits what is typed.
+        let _ = d.update(Message::Field(0, "new-one".into()));
+        let _ = d.update(Message::SuggestMove(-1));
+        assert_eq!(submitted(d.update(Message::Submit)), ["new-one"]);
+    }
 
     #[test]
     fn submit_returns_trimmed_values_and_checks() {

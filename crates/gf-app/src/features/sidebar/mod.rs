@@ -25,7 +25,6 @@ pub enum Section {
     Remotes,
     Tags,
     Stashes,
-    Worktrees,
     Submodules,
     Lfs,
 }
@@ -36,7 +35,6 @@ pub enum Selection {
     /// Full ref name of a branch or tag.
     Ref(String),
     Stash(usize),
-    Worktree(std::path::PathBuf),
     Submodule(std::path::PathBuf),
     LfsPattern(String),
 }
@@ -71,7 +69,6 @@ impl Default for State {
                 Section::Remotes,
                 Section::Tags,
                 Section::Stashes,
-                Section::Worktrees,
                 Section::Submodules,
                 Section::Lfs,
             ]),
@@ -120,9 +117,6 @@ impl Item {
             ),
             SideRow::Tag(tg) => Self::Pick(Selection::Ref(tg.name.as_str().to_owned()), None),
             SideRow::Stash(st) => Self::Pick(Selection::Stash(st.index), None),
-            SideRow::Worktree(w) => {
-                Self::Pick(Selection::Worktree(w.path.clone()), Some(Action::Open))
-            }
             SideRow::Submodule(m) => {
                 Self::Pick(Selection::Submodule(m.path.clone()), Some(Action::Open))
             }
@@ -230,7 +224,6 @@ enum SideRow {
     Branch(Branch, usize),
     Tag(Tag),
     Stash(StashEntry),
-    Worktree(gf_git::Worktree),
     Submodule(gf_git::Submodule),
     Lfs(String),
     Hint(&'static str),
@@ -274,8 +267,7 @@ pub enum Action {
     Merge,
     /// Rebase the current branch onto the selected one.
     RebaseOnto,
-    NewWorktree,
-    /// Open the selected worktree / submodule in a new tab.
+    /// Open the selected submodule in a new tab.
     Open,
     UpdateSubmodules,
     TrackLfs,
@@ -289,7 +281,6 @@ impl Action {
             Self::NewBranch => Some(Section::Branches),
             Self::NewTag => Some(Section::Tags),
             Self::NewStash => Some(Section::Stashes),
-            Self::NewWorktree => Some(Section::Worktrees),
             Self::TrackLfs => Some(Section::Lfs),
             _ => None,
         }
@@ -316,9 +307,7 @@ pub enum Output {
     Merge(String),
     /// Rebase the current branch onto this branch (short name).
     RebaseOnto(String),
-    NewWorktree,
-    RemoveWorktree(std::path::PathBuf),
-    /// Open a repository folder (worktree / submodule) in a new tab.
+    /// Open a repository folder (a submodule) in a new tab.
     OpenRepo(std::path::PathBuf),
     UpdateSubmodules,
     TrackLfs,
@@ -372,7 +361,6 @@ impl State {
                     || snapshot.tags.iter().any(|t| t.name.as_str() == r)
             }
             Some(Selection::Stash(i)) => *i < snapshot.stashes.len(),
-            Some(Selection::Worktree(p)) => snapshot.worktrees.iter().any(|w| &w.path == p),
             Some(Selection::Submodule(p)) => snapshot.submodules.iter().any(|m| &m.path == p),
             Some(Selection::LfsPattern(pat)) => {
                 snapshot.lfs.as_ref().is_some_and(|l| l.contains(pat))
@@ -538,7 +526,6 @@ impl State {
                     SideRow::Folder { path, depth, .. } => columns(path) + 12 + depth * 2,
                     SideRow::Tag(tg) => columns(tg.name.short()),
                     SideRow::Stash(s) => columns(&s.message),
-                    SideRow::Worktree(w) => columns(&w.path.display().to_string()) + 20,
                     SideRow::Submodule(m) => columns(&m.path.display().to_string()) + 24,
                     SideRow::Lfs(p) => columns(p),
                     SideRow::Hint(h) => columns(h),
@@ -641,34 +628,7 @@ impl State {
         }
 
         // Optional sections: only shown when the repository has them.
-        if snap.worktrees.len() > 1 || !self.filter.is_empty() && !snap.worktrees.is_empty() {
-            let wts: Vec<_> = snap
-                .worktrees
-                .iter()
-                .filter(|w| self.matches(&w.path.display().to_string()))
-                .collect();
-            rows.push(SideRow::Header(
-                Section::Worktrees,
-                "WORKTREES",
-                wts.len(),
-                Some((Action::NewWorktree, "add a working tree…")),
-            ));
-            if open(Section::Worktrees) {
-                rows.extend(wts.into_iter().cloned().map(SideRow::Worktree));
-            }
-        } else {
-            rows.push(SideRow::Header(
-                Section::Worktrees,
-                "WORKTREES",
-                0,
-                Some((Action::NewWorktree, "add a working tree…")),
-            ));
-            if open(Section::Worktrees) {
-                rows.push(SideRow::Hint(
-                    "none — + checks a branch out in another folder",
-                ));
-            }
-        }
+        // Worktrees have their own view (`REFS │ WORKTREES` above this).
         if !snap.submodules.is_empty() {
             let subs: Vec<_> = snap
                 .submodules
@@ -992,38 +952,6 @@ impl State {
         )
     }
 
-    fn worktree_row<'a>(&self, t: &'a Tokens, w: &'a gf_git::Worktree) -> Element<'a, Message> {
-        let name = w.path.file_name().map_or_else(
-            || w.path.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        let mut line = row![
-            colored(t, "⌂", t.accent()),
-            colored(t, name, t.fg).wrapping(Wrapping::None)
-        ]
-        .spacing(6);
-        line = line.push(
-            dim(t, w.branch.clone().unwrap_or_else(|| "detached".into())).wrapping(Wrapping::None),
-        );
-        if w.locked {
-            line = line.push(colored(t, "locked", t.warning()));
-        }
-        if w.prunable {
-            line = line.push(colored(t, "missing", t.error()));
-        }
-        let sel = Selection::Worktree(w.path.clone());
-        widgets::tip(
-            t,
-            widgets::list_row(
-                t,
-                line,
-                self.selected.as_ref() == Some(&sel),
-                Message::Select(sel),
-            ),
-            format::tilde(&w.path),
-        )
-    }
-
     fn submodule_row<'a>(&self, t: &'a Tokens, m: &'a gf_git::Submodule) -> Element<'a, Message> {
         use gf_git::SubmoduleStatus as S;
         let (mark, color, hint) = match m.status {
@@ -1084,7 +1012,7 @@ impl State {
                 || format!("stash@{{{i}}}"),
                 |s| format::truncate(&s.message, 30),
             ),
-            Selection::Worktree(p) | Selection::Submodule(p) => p.file_name().map_or_else(
+            Selection::Submodule(p) => p.file_name().map_or_else(
                 || p.display().to_string(),
                 |n| n.to_string_lossy().into_owned(),
             ),
@@ -1093,7 +1021,7 @@ impl State {
     }
 
     /// What Enter (and a double click) does with `sel`: check a branch out,
-    /// open a worktree or submodule. `None` for items with no default action.
+    /// open a submodule. `None` for items with no default action.
     fn default_action(sel: &Selection, snap: &Snapshot) -> Option<Action> {
         match sel {
             Selection::Ref(r) => snap
@@ -1102,7 +1030,7 @@ impl State {
                 .find(|b| b.name.as_str() == r)
                 .filter(|b| !b.is_head)
                 .map(|_| Action::Checkout),
-            Selection::Worktree(_) | Selection::Submodule(_) => Some(Action::Open),
+            Selection::Submodule(_) => Some(Action::Open),
             Selection::Stash(_) | Selection::LfsPattern(_) => None,
         }
     }
@@ -1208,22 +1136,6 @@ impl State {
                 Entry::Separator,
                 danger('d', "drop…", "delete the stash", Action::Delete),
             ],
-            Selection::Worktree(p) => {
-                // The main working tree is the repository itself.
-                if snap.worktrees.first().is_some_and(|w| &w.path == p) {
-                    return None;
-                }
-                vec![
-                    item('o', "open in tab", "open this working tree", Action::Open),
-                    Entry::Separator,
-                    danger(
-                        'd',
-                        "remove…",
-                        "delete the working tree folder",
-                        Action::Delete,
-                    ),
-                ]
-            }
             Selection::Submodule(_) => vec![
                 item('o', "open in tab", "open the submodule", Action::Open),
                 item(
@@ -1264,7 +1176,6 @@ impl State {
             }
             Action::NewTag => return Some(Output::NewTag),
             Action::NewStash => return Some(Output::NewStash),
-            Action::NewWorktree => return Some(Output::NewWorktree),
             Action::UpdateSubmodules => return Some(Output::UpdateSubmodules),
             Action::TrackLfs => return Some(Output::TrackLfs),
             Action::LfsPull => return Some(Output::LfsPull),
@@ -1281,11 +1192,6 @@ impl State {
             return Some(Output::DeleteBranches(branches));
         }
         match self.selected.as_ref()? {
-            Selection::Worktree(p) => match action {
-                Action::Open => Some(Output::OpenRepo(p.clone())),
-                Action::Delete => Some(Output::RemoveWorktree(p.clone())),
-                _ => None,
-            },
             Selection::Submodule(p) => match action {
                 Action::Open => Some(Output::OpenRepo(p.clone())),
                 _ => None,
@@ -1403,9 +1309,7 @@ impl State {
                             Update::output(Output::ShowStash(s.clone()))
                         }),
                     // Selecting these only shows their actions.
-                    Selection::Worktree(_) | Selection::Submodule(_) | Selection::LfsPattern(_) => {
-                        Update::none()
-                    }
+                    Selection::Submodule(_) | Selection::LfsPattern(_) => Update::none(),
                 }
             }
             Message::Collapse => Update::output(Output::Collapse),
@@ -1517,7 +1421,6 @@ impl State {
                     SideRow::Branch(b, depth) => self.branch_row(t, b, *depth, progress(b)),
                     SideRow::Tag(tg) => self.tag_row(t, tg),
                     SideRow::Stash(s) => self.stash_row(t, s),
-                    SideRow::Worktree(w) => self.worktree_row(t, w),
                     SideRow::Submodule(m) => self.submodule_row(t, m),
                     SideRow::Lfs(p) => self.lfs_row(t, p),
                     SideRow::Hint(h) => widgets::empty_hint(t, *h),
@@ -1739,7 +1642,6 @@ mod tests {
             Section::Remotes,
             Section::Tags,
             Section::Stashes,
-            Section::Worktrees,
             Section::Submodules,
             Section::Lfs,
         ] {
@@ -1753,7 +1655,6 @@ mod tests {
         for (action, sec) in [
             (Action::NewTag, Section::Tags),
             (Action::NewStash, Section::Stashes),
-            (Action::NewWorktree, Section::Worktrees),
             (Action::TrackLfs, Section::Lfs),
         ] {
             let mut s = State::default();

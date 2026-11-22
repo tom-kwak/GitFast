@@ -979,14 +979,11 @@ impl Feature for State {
         let scope = if let (Some((path, _)), Some(origin)) =
             (&self.file_revision, &self.file_history_origin)
         {
-            let base = origin
-                .as_deref()
-                .map(|r| r.rsplit('/').next().unwrap_or(r))
-                .unwrap_or("HEAD");
+            let base = origin.as_deref().map_or("HEAD", revision_label);
             format!("{base} · {}", path.display())
         } else {
             match &self.revision {
-                Some(r) => r.rsplit('/').next().unwrap_or(r).to_owned(),
+                Some(r) => revision_label(r).to_owned(),
                 None if all => "all branches".into(),
                 None => "HEAD".into(),
             }
@@ -1148,8 +1145,33 @@ impl Feature for State {
     }
 }
 
+/// How a revision reads in `showing:`: a ref by its full short name
+/// (`feature/login`, `origin/main`), a commit id by its first 7 digits.
+fn revision_label(rev: &str) -> &str {
+    let short = ["refs/heads/", "refs/remotes/", "refs/tags/"]
+        .iter()
+        .find_map(|p| rev.strip_prefix(p))
+        .unwrap_or(rev);
+    if short.len() == 40 && short.bytes().all(|b| b.is_ascii_hexdigit()) {
+        &short[..7]
+    } else {
+        short
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn revision_labels_keep_the_branch_folder_and_shorten_ids() {
+        assert_eq!(super::revision_label("refs/heads/agent/docs"), "agent/docs");
+        assert_eq!(
+            super::revision_label("refs/remotes/origin/main"),
+            "origin/main"
+        );
+        assert_eq!(super::revision_label(&"a".repeat(40)), "aaaaaaa");
+        assert_eq!(super::revision_label("HEAD~2"), "HEAD~2");
+    }
+
     use super::*;
 
     #[test]

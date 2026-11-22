@@ -635,11 +635,20 @@ impl WorktreeOps for GixBackend {
                     prunable: false,
                 })
             };
+            // git lists the main working tree first, also when asked from
+            // a linked one (whose own entry is among `worktrees()` below).
+            let owner;
+            let main = if repo.kind() == gix::repository::Kind::LinkedWorkTree {
+                owner = repo.main_repo().map_err(err)?;
+                &owner
+            } else {
+                repo
+            };
             let mut list = Vec::new();
-            match repo.workdir() {
-                Some(dir) => list.push(entry(repo, dir.to_path_buf())?),
+            match main.workdir() {
+                Some(dir) => list.push(entry(main, dir.to_path_buf())?),
                 None => list.push(Worktree {
-                    path: repo.git_dir().to_path_buf(),
+                    path: main.git_dir().to_path_buf(),
                     head: None,
                     branch: None,
                     bare: true,
@@ -665,8 +674,34 @@ impl WorktreeOps for GixBackend {
         .await
     }
 
-    async fn add_worktree(&self, _: &std::path::Path, _: &str, _: bool) -> Result<()> {
+    async fn add_worktree(
+        &self,
+        _: &std::path::Path,
+        _: &str,
+        _: bool,
+        _: Option<&str>,
+    ) -> Result<()> {
         unsupported("worktree add")
+    }
+
+    async fn worktree_status(
+        &self,
+        _: &std::path::Path,
+        _: Option<&str>,
+    ) -> Result<crate::ops::worktree::WorktreeStatus> {
+        unsupported("worktree status")
+    }
+
+    async fn set_branch_base(&self, _: &str, _: Option<&str>) -> Result<()> {
+        unsupported("branch base")
+    }
+
+    async fn default_base(&self) -> Result<Option<String>> {
+        unsupported("default base")
+    }
+
+    async fn lock_worktree(&self, _: &std::path::Path, _: bool) -> Result<()> {
+        unsupported("worktree lock")
     }
 
     async fn remove_worktree(&self, _: &std::path::Path, _: bool) -> Result<()> {

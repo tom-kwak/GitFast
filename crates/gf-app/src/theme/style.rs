@@ -160,6 +160,25 @@ pub fn row_button(
     }
 }
 
+/// A multi-line card in a list (worktrees). Only the selected one gets a
+/// background: hovering leaves a card as it is, so a card under the
+/// pointer never looks selected.
+pub fn card_button(
+    t: &Tokens,
+    selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + '_ {
+    move |_, status| {
+        let background = (selected || status == button::Status::Pressed)
+            .then_some(Background::Color(t.selection));
+        button::Style {
+            background,
+            text_color: t.fg,
+            border: square(Color::TRANSPARENT, 0.0),
+            ..button::Style::default()
+        }
+    }
+}
+
 /// A tab in the tab bar; the active one is drawn inverted like tmux.
 pub fn tab(t: &Tokens, active: bool) -> impl Fn(&Theme, button::Status) -> button::Style + '_ {
     move |_, status| {

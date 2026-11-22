@@ -32,7 +32,7 @@ use crate::ops::state::RepoState;
 use crate::ops::submodule::Submodule;
 use crate::ops::sync::{PullMode, PushOptions};
 use crate::ops::undo::{Capture, HeadMode, Scope};
-use crate::ops::worktree::Worktree;
+use crate::ops::worktree::{Worktree, WorktreeStatus};
 
 /// Calls `Trait::method(args)` on gix when it is available, else (or when
 /// gix answers `Unsupported` or fails) on the git CLI.
@@ -548,9 +548,29 @@ impl Repository {
         gix_then_cli!(self, WorktreeOps::worktrees())
     }
     /// Adds a working tree at `path` for `branch`; with `new_branch`, the
-    /// branch is created from HEAD.
-    pub async fn add_worktree(&self, path: &Path, branch: &str, new_branch: bool) -> Result<()> {
-        WorktreeOps::add_worktree(&self.cli, path, branch, new_branch).await
+    /// branch is created from `start` (HEAD when `None`), kept as its base.
+    pub async fn add_worktree(
+        &self,
+        path: &Path,
+        branch: &str,
+        new_branch: bool,
+        start: Option<&str>,
+    ) -> Result<()> {
+        WorktreeOps::add_worktree(&self.cli, path, branch, new_branch, start).await
+    }
+    /// Runs in the other tree's folder, which gix would open anew: CLI.
+    pub async fn worktree_status(&self, path: &Path, base: Option<&str>) -> Result<WorktreeStatus> {
+        WorktreeOps::worktree_status(&self.cli, path, base).await
+    }
+    pub async fn default_base(&self) -> Result<Option<String>> {
+        WorktreeOps::default_base(&self.cli).await
+    }
+    /// Keeps (or with `None` forgets) the branch `branch` goes back into.
+    pub async fn set_branch_base(&self, branch: &str, base: Option<&str>) -> Result<()> {
+        WorktreeOps::set_branch_base(&self.cli, branch, base).await
+    }
+    pub async fn lock_worktree(&self, path: &Path, locked: bool) -> Result<()> {
+        WorktreeOps::lock_worktree(&self.cli, path, locked).await
     }
     /// Removes a linked working tree. Without `force`, git refuses when it
     /// has uncommitted changes.

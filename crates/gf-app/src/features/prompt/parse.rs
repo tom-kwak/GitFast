@@ -39,6 +39,13 @@ pub enum PromptCommand {
     /// `:gix-fetch [on|off]`: fetch with gix instead of `git fetch`; no
     /// argument shows the current choice.
     GixFetch(Option<bool>),
+    /// `:worktrees`: REFS ⇄ WORKTREES in the refs panel (⌘⇧B).
+    Worktrees,
+    /// `:editor [cmd]`: the IDE command worktrees open in; no argument
+    /// shows it.
+    Editor(Option<String>),
+    /// `:terminal [app|default]`: the terminal worktrees open in.
+    Terminal(Option<String>),
 }
 
 /// Shell commands people type out of terminal habit that are not git
@@ -86,6 +93,18 @@ pub const BUILTINS: &[(&str, &str)] = &[
     (
         ":gix-fetch",
         ":gix-fetch [on|off] — fetch in-process with gix (git as fallback)",
+    ),
+    (
+        ":worktrees",
+        "refs panel: every working tree as a card     ⌘⇧B",
+    ),
+    (
+        ":editor",
+        ":editor [cmd] — IDE a worktree opens in (code, cursor…)",
+    ),
+    (
+        ":terminal",
+        ":terminal [app|default] — terminal a worktree opens in",
     ),
     (":clear", "clear the command log"),
     (":help", "show this help                                ?"),
@@ -187,6 +206,10 @@ pub fn parse(line: &str) -> Result<Option<PromptCommand>, String> {
                     ));
                 }
             }),
+            "worktrees" | "wt" => PromptCommand::Worktrees,
+            // The rest of the line: a command may have arguments.
+            "editor" => PromptCommand::Editor((words.len() > 1).then(|| words[1..].join(" "))),
+            "terminal" => PromptCommand::Terminal((words.len() > 1).then(|| words[1..].join(" "))),
             "local" => PromptCommand::ToggleLocal,
             "clear" => PromptCommand::ClearLog,
             "help" | "h" => PromptCommand::Help,
@@ -446,6 +469,20 @@ mod tests {
             Ok(Some(PromptCommand::Confirms { reset: true }))
         );
         assert!(parse(":confirm nope").is_err());
+    }
+
+    #[test]
+    fn parses_worktree_commands() {
+        assert_eq!(parse(":worktrees"), Ok(Some(PromptCommand::Worktrees)));
+        assert_eq!(parse(":editor"), Ok(Some(PromptCommand::Editor(None))));
+        assert_eq!(
+            parse(":editor code -n"),
+            Ok(Some(PromptCommand::Editor(Some("code -n".into()))))
+        );
+        assert_eq!(
+            parse(":terminal iTerm"),
+            Ok(Some(PromptCommand::Terminal(Some("iTerm".into()))))
+        );
     }
 
     #[test]
