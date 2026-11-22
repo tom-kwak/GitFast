@@ -3729,3 +3729,113 @@ async fn file_history_preserves_native_names_and_treats_pathspec_magic_literally
     }
     panic!("missing history result");
 }
+
+/// Records `n` commits made outside gf as undo steps, the way a commit
+/// in gf records them (HEAD only, undone with `reset --soft`).
+async fn record_commits(ui: &mut Ui, n: usize) -> Vec<String> {
+    let repo = ui.app.tabs[0].repo.clone();
+    let scope = gf_git::Scope::head();
+    let mut heads = Vec::new();
+    for i in 0..n {
+        let before = repo.capture(&scope).await.expect("capture");
+        ui.fixture.repo.write(format!("batch{i}.txt"), "x\n");
+        heads.push(ui.fixture.repo.commit_all(&format!("batch {i}")));
+        let after = repo.capture(&scope).await.expect("capture");
+        ui.app.tabs[0].undo.push(crate::undo::Step::new(
+            format!("commit: batch {i}"),
+            scope.clone(),
+            before,
+            after,
+            gf_git::HeadMode::Soft,
+        ));
+    }
+    heads
+}
+
+#[tokio::test]
+async fn going_back_several_commits_asks_once_for_all_of_them() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["reset", "--hard"]);
+        repo.git(&["clean", "-fd"]);
+    })
+    .await;
+    let start = ui.fixture.repo.head();
+    record_commits(&mut ui, 3).await;
+
+    let _ = ui
+        .send(Message::UndoList(
+            crate::features::undo_list::Message::Toggle,
+        ))
+        .await;
+    // Rows: newest first, so the third row goes back over all three.
+    let _ = ui
+        .send(Message::UndoList(
+            crate::features::undo_list::Message::Pick(2),
+        ))
+        .await;
+    let dialog = ui.app.dialog.as_ref().expect("one confirmation");
+    assert_eq!(dialog.title, "Undo 3 steps");
+    assert!(dialog.body.iter().any(|l| l.contains("commit: batch 0")));
+    assert!(dialog.body.iter().any(|l| l.starts_with("In the end `")));
+
+    let _ = ui.click("[ Undo 3 ⏎ ]").await;
+    assert!(ui.app.dialog.is_none(), "no question per step");
+    assert_eq!(ui.fixture.repo.head(), start);
+    let tab = &ui.app.tabs[0];
+    assert_eq!((tab.undo.undo.len(), tab.undo.redo.len()), (0, 3));
+    assert!(tab.undo_queue.is_none());
+    assert!(ui.flash().contains("undid 3 steps"), "{}", ui.flash());
+}
+
+#[tokio::test]
+async fn a_batch_stops_at_the_first_step_that_fails() {
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["reset", "--hard"]);
+        repo.git(&["clean", "-fd"]);
+    })
+    .await;
+    // An older step whose tag is gone since: its guard fails.
+    let tag_scope = crate::undo::tag("gone");
+    let tagged = gf_git::Capture {
+        refs: vec![("refs/tags/gone".into(), Some(ui.fixture.repo.head()))],
+        ..gf_git::Capture::default()
+    };
+    ui.app.tabs[0].undo.push(crate::undo::Step::new(
+        "create tag gone".into(),
+        tag_scope.clone(),
+        gf_git::Capture {
+            refs: vec![("refs/tags/gone".into(), None)],
+            ..gf_git::Capture::default()
+        },
+        tagged,
+        gf_git::HeadMode::Keep,
+    ));
+    let heads = record_commits(&mut ui, 1).await;
+    let before_commit = ui
+        .fixture
+        .repo
+        .git(&["rev-parse", &format!("{}^", heads[0])]);
+
+    let _ = ui
+        .send(Message::UndoList(
+            crate::features::undo_list::Message::Toggle,
+        ))
+        .await;
+    let _ = ui
+        .send(Message::UndoList(
+            crate::features::undo_list::Message::Pick(1),
+        ))
+        .await;
+    let _ = ui.click("[ Undo 2 ⏎ ]").await;
+
+    assert_eq!(ui.fixture.repo.head(), before_commit, "the first step ran");
+    let tab = &ui.app.tabs[0];
+    assert_eq!(tab.undo.undo.len(), 1, "the failed step stays to undo");
+    assert_eq!(tab.undo.redo.len(), 1);
+    assert!(tab.undo_queue.is_none());
+    assert!(
+        ui.flash().contains("undo 2/2: create tag gone"),
+        "{}",
+        ui.flash()
+    );
+}

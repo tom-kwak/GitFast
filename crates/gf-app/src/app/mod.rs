@@ -243,10 +243,15 @@ pub enum Message {
         record: Option<Box<advanced::Recorded>>,
     },
     /// The repository state an undo / redo is about to replace.
+    /// Saved work tree copies were (or could not be) kept from `git gc`.
+    UndoPinned(Result<(), String>),
     UndoChecked {
         repo: RepoId,
         redo: bool,
         now: Result<Box<gf_git::Capture>, String>,
+        /// Commits already on the upstream that the step takes off the
+        /// branch.
+        published: usize,
     },
     Banner(crate::features::op_banner::Message),
     Conflict(crate::features::conflict_view::Message),
@@ -1045,10 +1050,11 @@ impl App {
                     _ => repo,
                 };
                 let recorded = step.is_some();
-                if let Some(step) = step {
-                    self.record_step(repo, *step);
-                }
-                self.on_op_done(repo, label, kind, result, recorded)
+                let pin = match step {
+                    Some(step) => self.record_step(repo, *step),
+                    None => Task::none(),
+                };
+                Task::batch([pin, self.on_op_done(repo, label, kind, result, recorded)])
             }
             Message::IntegrateDone {
                 repo,
@@ -1056,7 +1062,20 @@ impl App {
                 result,
                 record,
             } => self.on_integrate_done(repo, label, result, record),
-            Message::UndoChecked { repo, redo, now } => self.on_undo_checked(repo, redo, now),
+            Message::UndoPinned(result) => {
+                // Only the copies' lifetime is at stake: undo still works
+                // until `git gc` removes them, and the next step tries again.
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "keeping undo copies from git gc");
+                }
+                Task::none()
+            }
+            Message::UndoChecked {
+                repo,
+                redo,
+                now,
+                published,
+            } => self.on_undo_checked(repo, redo, now, published),
             Message::DiscardMeasured {
                 repo,
                 tracked,
@@ -1237,6 +1256,8 @@ impl App {
         if let Some(stage_files) = self.stage_files.get(&git_dir) {
             stage_files.restore(&mut tab);
         }
+        // Histories saved before the copies were kept: protect them now.
+        let pin = undoing::pin_undo_copies(&tab);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.note_active();
@@ -1247,7 +1268,7 @@ impl App {
             format!("opened {}", widgets::format::tilde(&cwd)),
         );
         self.focus_pane(Pane::History);
-        Task::none()
+        pin
     }
 
     /// A pending repository open can switch tabs even while a modal is visible.

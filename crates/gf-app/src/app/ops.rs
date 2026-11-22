@@ -465,7 +465,7 @@ impl App {
                 // abort): continuing a later one must not record it. A
                 // Continue already running holds its own copy.
                 if snap.state.is_clean() {
-                    tab.pending = None;
+                    tab.undo.set_pending(None, &tab.repo.handle().git_dir);
                 }
                 // A commit waiting for a longer history (`reveal`).
                 reveal = snap.loaded.history;

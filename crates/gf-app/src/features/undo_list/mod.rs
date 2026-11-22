@@ -197,6 +197,7 @@ mod tests {
         History {
             undo: undo.iter().map(step).collect(),
             redo: redo.iter().map(step).collect(),
+            ..History::default()
         }
     }
 

@@ -582,4 +582,19 @@ impl Repository {
     ) -> Result<()> {
         UndoOps::restore(&self.cli, scope, expected, to, mode).await
     }
+    /// Keeps saved work tree copies from `git gc` (see
+    /// [`UndoOps::pin_saved_files`]).
+    pub async fn pin_saved_files(&self, blobs: &[String]) -> Result<()> {
+        UndoOps::pin_saved_files(&self.cli, blobs).await
+    }
+    /// Commits leaving `branch` (moved `from` → `to`) that its upstream
+    /// already has (see [`UndoOps::published_leaving`]).
+    pub async fn published_leaving(
+        &self,
+        branch: &str,
+        from: &str,
+        to: Option<&str>,
+    ) -> Result<usize> {
+        UndoOps::published_leaving(&self.cli, branch, from, to).await
+    }
 }

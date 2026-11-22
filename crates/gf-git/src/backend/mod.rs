@@ -453,6 +453,19 @@ pub trait UndoOps {
         to: &Capture,
         mode: HeadMode,
     ) -> impl Future<Output = Result<()>> + Send;
+    /// How many commits that leave `branch` when it moves from `from` to
+    /// `to` (`None`: unborn) are already on its upstream — undoing them
+    /// locally does not take them off the remote. 0 without an upstream.
+    /// Keeps the saved work tree copies `blobs` from `git gc` by pointing
+    /// [`crate::UNDO_REF`] at a tree of them (deleted when there are
+    /// none). Ids that no longer exist are left out.
+    fn pin_saved_files(&self, blobs: &[String]) -> impl Future<Output = Result<()>> + Send;
+    fn published_leaving(
+        &self,
+        branch: &str,
+        from: &str,
+        to: Option<&str>,
+    ) -> impl Future<Output = Result<usize>> + Send;
 }
 
 pub trait WorktreeOps {

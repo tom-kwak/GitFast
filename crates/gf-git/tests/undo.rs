@@ -565,3 +565,131 @@ async fn a_failed_switch_puts_the_left_changes_back() {
     assert_eq!(read(&repo, "a.txt").as_deref(), Some("work\n"));
     assert!(repo.git(&["stash", "list"]).is_empty());
 }
+
+#[tokio::test]
+async fn commits_already_on_the_upstream_are_counted_when_they_leave() {
+    let repo = TestRepo::new();
+    let remote = TestRepo::new_bare();
+    repo.write("a.txt", "1\n");
+    let first = repo.commit_all("first");
+    repo.write("a.txt", "2\n");
+    let pushed = repo.commit_all("pushed");
+    let branch = repo.git(&["symbolic-ref", "--short", "HEAD"]);
+    let r = open(&repo).await;
+    // No upstream yet: nothing is published.
+    assert_eq!(
+        r.published_leaving(&branch, &pushed, Some(&first))
+            .await
+            .unwrap(),
+        0
+    );
+
+    repo.git(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    repo.git(&["push", "-q", "-u", "origin", "HEAD"]);
+    repo.write("a.txt", "3\n");
+    let local = repo.commit_all("local");
+
+    // Undoing the unpushed commit only: nothing published leaves.
+    assert_eq!(
+        r.published_leaving(&branch, &local, Some(&pushed))
+            .await
+            .unwrap(),
+        0
+    );
+    // Going back past the pushed one takes it off the branch.
+    assert_eq!(
+        r.published_leaving(&branch, &local, Some(&first))
+            .await
+            .unwrap(),
+        1
+    );
+    // Back to unborn: both pushed commits leave.
+    assert_eq!(r.published_leaving(&branch, &local, None).await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_restore_that_fails_half_way_puts_back_what_it_wrote() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "1\n");
+    let first = repo.commit_all("first");
+    repo.write("a.txt", "2\n");
+    let second = repo.commit_all("second");
+    let r = open(&repo).await;
+    let scope = Scope {
+        head: true,
+        refs: vec!["refs/tags/t".into()],
+        files: vec![p("d/x.txt")],
+        ..Scope::default()
+    };
+
+    // The state to go back to: at `first`, tagged, with d/x.txt.
+    repo.git(&["reset", "-q", "--keep", &first]);
+    repo.git(&["tag", "t"]);
+    repo.write("d/x.txt", "saved\n");
+    let target = r.capture(&scope).await.unwrap();
+
+    // Now: at `second`, no tag, and a plain file `d` where the folder
+    // has to go — writing d/x.txt fails after HEAD and the tag moved.
+    std::fs::remove_dir_all(repo.path().join("d")).unwrap();
+    repo.git(&["tag", "-d", "t"]);
+    repo.git(&["reset", "-q", "--keep", &second]);
+    repo.write("d", "in the way\n");
+    let before = r.capture(&scope).await.unwrap();
+
+    let err = r
+        .restore(&scope, None, &target, HeadMode::Keep)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("nothing was changed"), "{err}");
+    assert!(before.matches(&r.capture(&scope).await.unwrap()));
+    assert_eq!(repo.head(), second);
+    assert!(
+        repo.git_output(&["rev-parse", "-q", "--verify", "refs/tags/t"])
+            .stdout
+            .is_empty()
+    );
+    assert_eq!(read(&repo, "d").as_deref(), Some("in the way\n"));
+}
+
+#[tokio::test]
+async fn pinned_copies_survive_gc_until_unpinned() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.commit_all("init");
+    repo.write("a.txt", "only in the saved copy\n");
+    let r = open(&repo).await;
+    let scope = Scope {
+        files: vec![p("a.txt")],
+        ..Scope::default()
+    };
+    let saved = r.capture(&scope).await.unwrap();
+    let blobs: Vec<String> = saved.blobs().map(str::to_owned).collect();
+    assert_eq!(blobs.len(), 1);
+    let exists = |oid: &str| repo.git_output(&["cat-file", "-e", oid]).status.success();
+
+    // A missing id is left out instead of failing the whole pin.
+    let missing = "0".repeat(blobs[0].len());
+    r.pin_saved_files(&[blobs[0].clone(), missing])
+        .await
+        .unwrap();
+    repo.git(&["gc", "-q", "--prune=now"]);
+    assert!(exists(&blobs[0]), "kept by {}", gf_git::UNDO_REF);
+    // Not a commit: no log shows it.
+    assert!(
+        !repo
+            .git(&["log", "--all", "--format=%H"])
+            .contains(&blobs[0])
+    );
+
+    r.pin_saved_files(&[]).await.unwrap();
+    assert!(
+        repo.git_output(&["rev-parse", "-q", "--verify", gf_git::UNDO_REF])
+            .stdout
+            .is_empty()
+    );
+    // Unpinning twice is fine.
+    r.pin_saved_files(&[]).await.unwrap();
+    repo.git(&["gc", "-q", "--prune=now"]);
+    assert!(!exists(&blobs[0]), "no longer kept");
+}

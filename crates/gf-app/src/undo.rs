@@ -70,11 +70,19 @@ impl Step {
     pub fn target(&self, redo: bool) -> &Capture {
         if redo { &self.after } else { &self.before }
     }
+
+    /// `(branch, from, to)` when `redo` (or undo) moves a branch that
+    /// stays checked out (`to` is `None` when it goes back to unborn):
+    /// the commits it takes off may already be pushed.
+    pub fn branch_move(&self, redo: bool) -> Option<(&str, &str, Option<&str>)> {
+        batch_move(std::slice::from_ref(self), redo)
+    }
 }
 
 /// An operation that stopped on conflicts: its step is recorded once it
-/// is continued to the end (and dropped when aborted).
-#[derive(Debug, Clone)]
+/// is continued to the end (and dropped when aborted). Saved with the
+/// history, so quitting gf in the middle of a merge keeps it undoable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pending {
     pub label: String,
     pub scope: Scope,
@@ -82,21 +90,67 @@ pub struct Pending {
     pub mode: HeadMode,
 }
 
-/// Several undo / redo steps asked at once (from the history list).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Several undo / redo steps asked at once (from the history list): one
+/// confirmation for all of them, then each runs (and is guarded) in turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Queue {
     pub redo: bool,
+    /// Steps asked for.
+    pub total: usize,
     /// Steps still to run after the current one.
     pub left: usize,
+    /// The batch was confirmed (or needed no confirmation): the steps
+    /// after the first run without asking.
+    pub confirmed: bool,
+    /// Message of the stash made before the first step, if any.
+    pub stashed: Option<String>,
+}
+
+impl Queue {
+    pub fn new(redo: bool, total: usize) -> Self {
+        Self {
+            redo,
+            total,
+            left: total.saturating_sub(1),
+            confirmed: false,
+            stashed: None,
+        }
+    }
+
+    /// Steps finished once the current one is.
+    pub fn done(&self) -> usize {
+        self.total - self.left
+    }
+}
+
+/// `(branch, from, to)` when `steps` (run in this order, `redo` or undo)
+/// move a branch that stays checked out, from the first one that moves
+/// HEAD to the last: the commits that leave it may already be pushed.
+pub fn batch_move(steps: &[Step], redo: bool) -> Option<(&str, &str, Option<&str>)> {
+    let mut moving = steps.iter().filter(|s| s.moves_head());
+    let first = moving.next()?;
+    let last = moving.next_back().unwrap_or(first);
+    let from = first.expected(redo).head.as_ref()?;
+    let to = last.target(redo).head.as_ref()?;
+    let branch = from.branch.as_deref()?;
+    (to.branch.as_deref() == Some(branch)).then_some((
+        branch,
+        from.oid.as_deref()?,
+        to.oid.as_deref(),
+    ))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct History {
     /// Oldest first; the last one is undone next.
     pub undo: Vec<Step>,
-    /// Undone steps, the last one is redone next. Not saved.
-    #[serde(skip)]
+    /// Undone steps, the last one is redone next. Saved too, so an undo
+    /// can still be redone after gf restarts (each redo is guarded).
+    #[serde(default)]
     pub redo: Vec<Step>,
+    /// An operation that stopped on conflicts (see [`Pending`]).
+    #[serde(default)]
+    pub pending: Option<Pending>,
 }
 
 impl History {
@@ -107,6 +161,12 @@ impl History {
         if self.undo.len() > MAX_STEPS {
             self.undo.remove(0);
         }
+    }
+
+    /// The next `n` steps `redo` (or undo) would run, in that order.
+    pub fn upcoming(&self, redo: bool, n: usize) -> Vec<Step> {
+        let side = if redo { &self.redo } else { &self.undo };
+        side.iter().rev().take(n).cloned().collect()
     }
 
     pub fn next(&self, redo: bool) -> Option<&Step> {
@@ -130,11 +190,35 @@ impl History {
         }
     }
 
+    /// Ids of every saved work tree copy a step can still write back.
+    pub fn saved_blobs(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .undo
+            .iter()
+            .chain(&self.redo)
+            .flat_map(|s| s.before.blobs().chain(s.after.blobs()))
+            .chain(self.pending.iter().flat_map(|p| p.before.blobs()))
+            .map(str::to_owned)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Sets the operation waiting on conflicts; saved when it changed
+    /// (`on_loaded` clears it on every refresh of a clean repository).
+    pub fn set_pending(&mut self, pending: Option<Pending>, git_dir: &Path) {
+        if self.pending != pending {
+            self.pending = pending;
+            self.save(git_dir);
+        }
+    }
+
     fn file(git_dir: &Path) -> PathBuf {
         git_dir.join("gf").join("undo.json")
     }
 
-    /// The saved undo stack; empty when there is none or it cannot be read.
+    /// The saved history; empty when there is none or it cannot be read.
     pub fn load(git_dir: &Path) -> Self {
         std::fs::read(Self::file(git_dir))
             .ok()
@@ -142,7 +226,7 @@ impl History {
             .unwrap_or_default()
     }
 
-    /// Saves the undo stack in the background: it can hold thousands of
+    /// Saves the history in the background: it can hold thousands of
     /// paths, too much to write on the UI thread after every operation.
     /// Saves finish in the order they were asked for (an older one never
     /// overwrites a newer one).
@@ -154,7 +238,7 @@ impl History {
 
         let seq = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = Self::file(git_dir);
-        let undo = self.undo.clone();
+        let history = self.clone();
         std::thread::spawn(move || {
             let mut written = WRITTEN
                 .lock()
@@ -163,10 +247,6 @@ impl History {
             if last.get(&path).is_some_and(|&l| l > seq) {
                 return;
             }
-            let history = Self {
-                undo,
-                redo: Vec::new(),
-            };
             if let Err(e) = history.write(&path) {
                 tracing::warn!(error = %e, "saving undo history");
             }
@@ -244,9 +324,23 @@ pub fn files(paths: Vec<PathBuf>) -> Scope {
 
 /// Resolving a conflict: the file and its index entries (all stages).
 pub fn resolve(path: PathBuf) -> Scope {
+    file_and_index(path)
+}
+
+/// A file gf rewrites that may also get staged (`.gitattributes` for
+/// `lfs track`): its content and its index entry.
+pub fn file_and_index(path: PathBuf) -> Scope {
     Scope {
         index: vec![path.clone()],
         files: vec![path],
+        ..Scope::default()
+    }
+}
+
+/// Which commit is checked out in each of `paths` (submodule update).
+pub fn submodules(paths: Vec<PathBuf>) -> Scope {
+    Scope {
+        submodules: paths,
         ..Scope::default()
     }
 }
@@ -309,6 +403,105 @@ mod tests {
     }
 
     #[test]
+    fn only_a_branch_that_stays_checked_out_is_checked_for_pushed_commits() {
+        let head = |branch: &str, oid: Option<&str>| Capture {
+            head: Some(gf_git::Head {
+                branch: Some(branch.into()),
+                oid: oid.map(Into::into),
+            }),
+            ..Capture::default()
+        };
+        let commit = Step::new(
+            "commit".into(),
+            Scope::head(),
+            head("main", Some("a")),
+            head("main", Some("b")),
+            HeadMode::Soft,
+        );
+        assert_eq!(commit.branch_move(false), Some(("main", "b", Some("a"))));
+        assert_eq!(commit.branch_move(true), Some(("main", "a", Some("b"))));
+        let first = Step::new(
+            "first commit".into(),
+            Scope::head(),
+            head("main", None),
+            head("main", Some("a")),
+            HeadMode::Soft,
+        );
+        assert_eq!(first.branch_move(false), Some(("main", "a", None)));
+        let checkout = Step::new(
+            "checkout".into(),
+            Scope::head(),
+            head("main", Some("a")),
+            head("dev", Some("c")),
+            HeadMode::Keep,
+        );
+        assert_eq!(checkout.branch_move(false), None);
+        assert_eq!(step("stage").branch_move(false), None);
+    }
+
+    #[test]
+    fn saved_copies_of_both_stacks_are_kept_once() {
+        let blob = |oid: &str| Capture {
+            files: vec![(
+                "a.txt".into(),
+                Some(gf_git::FileContent::Blob {
+                    oid: oid.into(),
+                    executable: false,
+                }),
+            )],
+            ..Capture::default()
+        };
+        let mut h = History::default();
+        let mut discard = step("discard");
+        discard.before = blob("b1");
+        h.push(discard);
+        let mut redo = step("ignore");
+        redo.before = blob("b1");
+        redo.after = blob("b2");
+        h.push(redo);
+        h.applied(false);
+        h.push(step("stage"));
+        // `push` dropped what could be redone: only its copies go.
+        assert_eq!(h.saved_blobs(), ["b1"]);
+        h.applied(false);
+        h.applied(false);
+        assert_eq!(h.saved_blobs(), ["b1"], "undone steps keep theirs");
+    }
+
+    #[test]
+    fn a_batch_moves_the_branch_from_its_first_head_step_to_its_last() {
+        let head = |oid: &str| Capture {
+            head: Some(gf_git::Head {
+                branch: Some("main".into()),
+                oid: Some(oid.into()),
+            }),
+            ..Capture::default()
+        };
+        let commit = |label: &str, from: &str, to: &str| {
+            Step::new(
+                label.into(),
+                Scope::head(),
+                head(from),
+                head(to),
+                HeadMode::Soft,
+            )
+        };
+        let mut h = History::default();
+        h.push(commit("c1", "a", "b"));
+        h.push(step("stage"));
+        h.push(commit("c2", "b", "c"));
+        let steps = h.upcoming(false, 3);
+        let labels: Vec<&str> = steps.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, ["c2", "stage", "c1"], "run order");
+        assert_eq!(batch_move(&steps, false), Some(("main", "c", Some("a"))));
+        assert_eq!(batch_move(&steps[1..2], false), None, "no HEAD step");
+        let mut q = Queue::new(false, 3);
+        assert_eq!((q.left, q.done()), (2, 1));
+        q.left -= 1;
+        assert_eq!(q.done(), 2);
+    }
+
+    #[test]
     fn history_is_capped() {
         let mut h = History::default();
         for i in 0..MAX_STEPS + 3 {
@@ -319,17 +512,34 @@ mod tests {
     }
 
     #[test]
-    fn saved_undo_stack_loads_back_without_redo() {
+    fn saved_history_loads_back_with_redo_and_pending() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut h = History::default();
         h.push(step("a"));
         h.push(step("b"));
         h.applied(false);
+        h.pending = Some(Pending {
+            label: "merge x".into(),
+            scope: Scope::head(),
+            before: Capture::default(),
+            mode: HeadMode::Keep,
+        });
         h.write(&History::file(dir.path())).expect("write");
         let loaded = History::load(dir.path());
         assert_eq!(loaded.undo, h.undo);
-        assert!(loaded.redo.is_empty());
+        assert_eq!(loaded.redo, h.redo);
+        assert_eq!(loaded.pending, h.pending);
         assert!(History::load(&dir.path().join("none")).undo.is_empty());
+    }
+
+    #[test]
+    fn histories_saved_before_redo_was_kept_still_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = History::file(dir.path());
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&file, br#"{"undo":[]}"#).expect("write");
+        let loaded = History::load(dir.path());
+        assert!(loaded.redo.is_empty() && loaded.pending.is_none());
     }
 
     #[test]

@@ -810,7 +810,7 @@ impl App {
             Purpose::AbortOperation => {
                 // Aborting puts everything back: nothing left to record.
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.pending = None;
+                    tab.undo.set_pending(None, &tab.repo.handle().git_dir);
                 }
                 self.op("abort", OpKind::Generic, |r| async move {
                     r.abort_operation().await
@@ -861,21 +861,33 @@ impl App {
                 )
             }
             Purpose::UpdateSubmodules => {
-                self.op("update submodules", OpKind::Generic, |r| async move {
-                    r.update_submodules().await
-                })
+                // Undo checks the previous commits out again in submodules
+                // that were already there; newly cloned ones stay.
+                let subs = self
+                    .active_tab()
+                    .and_then(|t| t.snapshot.as_ref())
+                    .map(|s| s.submodules.iter().map(|m| m.path.clone()).collect())
+                    .unwrap_or_default();
+                self.op_recorded(
+                    "update submodules",
+                    OpKind::Generic,
+                    Some(Record::new(undo::submodules(subs))),
+                    |r| async move { r.update_submodules().await },
+                )
             }
             Purpose::TrackLfs => {
                 let pattern = value(0);
-                self.op(
+                self.op_recorded(
                     format!("lfs track {pattern}"),
                     OpKind::Generic,
+                    Some(Record::new(undo::file_and_index(".gitattributes".into()))),
                     move |r| async move { r.lfs_track(&pattern).await },
                 )
             }
-            Purpose::UntrackLfs(pattern) => self.op(
+            Purpose::UntrackLfs(pattern) => self.op_recorded(
                 format!("lfs untrack {pattern}"),
                 OpKind::Generic,
+                Some(Record::new(undo::file_and_index(".gitattributes".into()))),
                 move |r| async move { r.lfs_untrack(&pattern).await },
             ),
             Purpose::LfsPull => self.op("lfs pull", OpKind::Generic, |r| async move {

@@ -771,8 +771,6 @@ pub struct RepoTab {
     pub conflict: Option<crate::features::conflict_view::State>,
     /// Undo / redo steps of gf's own operations (saved in the git dir).
     pub undo: crate::undo::History,
-    /// An operation stopped on conflicts, recorded once it is continued.
-    pub pending: Option<crate::undo::Pending>,
     /// An undo / redo is being checked or run: further presses wait.
     pub undo_busy: bool,
     /// More undo / redo steps to run after the current one.
@@ -815,7 +813,6 @@ impl RepoTab {
             blame: None,
             conflict: None,
             undo,
-            pending: None,
             undo_busy: false,
             undo_queue: None,
             bisect: None,

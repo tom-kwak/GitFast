@@ -5,7 +5,8 @@
 //! Undo restores the first [`Capture`], redo the second — each only after
 //! checking that the repository still looks like the other one (the
 //! *guard*), so nothing done since (in gf, an editor or the terminal) is
-//! overwritten silently.
+//! overwritten silently. A restore that fails half way puts back what it
+//! already wrote (and checks that it did), so it is all or nothing.
 //!
 //! What a scope can cover, and how it is put back:
 //!
@@ -19,9 +20,10 @@
 //! | config      | whole sections (e.g. `branch.main`)      | `config --remove-section` + `--add`         |
 //! | submodules  | checked-out branch + commit              | `checkout` in the submodule                 |
 //!
-//! Blobs written for the work tree are not referenced by any ref; `git gc`
-//! keeps such objects for two weeks (`gc.pruneExpire`), which bounds how
-//! long a saved discard can be brought back.
+//! Blobs written for the work tree are not referenced by any ref, and
+//! `git gc` removes such objects after two weeks (`gc.pruneExpire`). The
+//! app keeps the ones its history still needs through [`UNDO_REF`], a ref
+//! to a tree of them (not a commit, so no log or graph shows it).
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +32,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::{CliBackend, UndoOps};
 use crate::cli::GitCommand;
+
+/// Ref that keeps saved work tree copies from `git gc`.
+pub const UNDO_REF: &str = "refs/gf/undo";
 
 /// Work tree files larger than this in total are not saved: the operation
 /// runs without an undo step (the app says so before it runs).
@@ -217,6 +222,14 @@ impl Capture {
         out
     }
 
+    /// Ids of the saved work tree copies.
+    pub fn blobs(&self) -> impl Iterator<Item = &str> {
+        self.files.iter().filter_map(|(_, c)| match c {
+            Some(FileContent::Blob { oid, .. }) => Some(oid.as_str()),
+            _ => None,
+        })
+    }
+
     /// Whether `other` (the repository now) still looks like this capture.
     /// The stash is compared as a set: storing an entry back puts it on top.
     pub fn matches(&self, other: &Self) -> bool {
@@ -265,6 +278,18 @@ impl CliBackend {
             .ok()?;
         out.success()
             .then(|| String::from_utf8_lossy(&out.stdout).trim_end().to_owned())
+    }
+
+    /// Hex length of object ids: 64 in a SHA-256 repository, else 40.
+    async fn oid_len(&self) -> usize {
+        match self
+            .try_read(self.command(["rev-parse", "--show-object-format"]))
+            .await
+            .as_deref()
+        {
+            Some("sha256") => 64,
+            _ => 40,
+        }
     }
 
     async fn head_at(&self, dir: &Path) -> Option<Head> {
@@ -508,6 +533,84 @@ impl UndoOps for CliBackend {
         })
     }
 
+    async fn pin_saved_files(&self, blobs: &[String]) -> Result<()> {
+        let mut blobs: Vec<&str> = blobs.iter().map(String::as_str).collect();
+        blobs.sort_unstable();
+        blobs.dedup();
+        let mut kept = Vec::new();
+        if !blobs.is_empty() {
+            let input: String = blobs.iter().map(|o| format!("{o}\n")).collect();
+            let out = self
+                .read(
+                    self.command(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+                        .stdin(input),
+                )
+                .await?;
+            kept.extend(
+                String::from_utf8_lossy(&out)
+                    .lines()
+                    .filter_map(|l| l.strip_suffix(" blob").map(str::to_owned)),
+            );
+        }
+        if kept.is_empty() {
+            // Nothing left to keep: no ref (and no error when there is none).
+            self.runner()
+                .run(&self.command(["update-ref", "-d", UNDO_REF]).allow_failure())
+                .await?;
+            return Ok(());
+        }
+        // Each blob named by its own id: unique, and nothing to escape.
+        let entries: String = kept
+            .iter()
+            .map(|o| format!("100644 blob {o}\t{o}\0"))
+            .collect();
+        let tree = self
+            .read(self.command(["mktree", "-z"]).stdin(entries))
+            .await?;
+        let tree = String::from_utf8_lossy(&tree).trim().to_owned();
+        self.exec(
+            self.command(["update-ref", "-m", "gf: keep undo copies", UNDO_REF])
+                .arg(tree),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn published_leaving(&self, branch: &str, from: &str, to: Option<&str>) -> Result<usize> {
+        let Some(upstream) = self
+            // `<branch>@{upstream}`: the `refs/heads/` form does not resolve.
+            .try_read(
+                self.command(["rev-parse", "-q", "--verify", "--end-of-options"])
+                    .arg(format!("{branch}@{{upstream}}")),
+            )
+            .await
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(0);
+        };
+        // Commits on both the branch and its upstream are the ancestors of
+        // their merge base: the published ones that leave are those not
+        // also reachable from `to`.
+        let Some(base) = self
+            .try_read(
+                self.command(["merge-base", "--end-of-options"])
+                    .args([from, upstream.as_str()]),
+            )
+            .await
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(0);
+        };
+        let mut cmd = self
+            .command(["rev-list", "--count", "--end-of-options"])
+            .arg(&base);
+        if let Some(to) = to {
+            cmd = cmd.arg(format!("^{to}"));
+        }
+        let out = self.read(cmd).await?;
+        Ok(String::from_utf8_lossy(&out).trim().parse().unwrap_or(0))
+    }
+
     async fn restore(
         &self,
         scope: &Scope,
@@ -531,14 +634,7 @@ impl UndoOps for CliBackend {
 
         // Everything needed is still there before anything is changed:
         // saved file contents can be pruned by `git gc` after two weeks.
-        let blobs: Vec<&str> = to
-            .files
-            .iter()
-            .filter_map(|(_, c)| match c {
-                Some(FileContent::Blob { oid, .. }) => Some(oid.as_str()),
-                _ => None,
-            })
-            .collect();
+        let blobs: Vec<&str> = to.blobs().collect();
         if !blobs.is_empty() {
             let input: String = blobs.iter().map(|o| format!("{o}\n")).collect();
             let out = self
@@ -558,6 +654,48 @@ impl UndoOps for CliBackend {
             }
         }
 
+        // Written in several steps (refs, HEAD, config, index, files,
+        // stash): if one fails, what was already written is put back to
+        // `now`, so a failed undo leaves the repository as it found it.
+        let Err(e) = self.apply(scope, &now, to, mode).await else {
+            return Ok(());
+        };
+        let rollback = async {
+            let mid = self.capture(scope).await?;
+            self.apply(scope, &mid, &now, mode).await?;
+            // Trust what is there, not that every command succeeded.
+            let back = self.capture(scope).await?;
+            let left = now.differences(&back);
+            if left.is_empty() {
+                Ok(())
+            } else {
+                Err(GfError::Other(format!(
+                    "still different: {}",
+                    left.join(", ")
+                )))
+            }
+        };
+        let rollback = rollback.await;
+        Err(GfError::Other(match rollback {
+            Ok(()) => format!("{e} — nothing was changed (what was done is put back)"),
+            Err(r) => format!(
+                "{e} — putting back what was done also failed ({r}): \
+                 the repository is partly restored, check its state"
+            ),
+        }))
+    }
+}
+
+impl CliBackend {
+    /// Writes `to` over the repository, which looks like `now` (both
+    /// captures of `scope`). Stops at the first failure.
+    async fn apply(
+        &self,
+        scope: &Scope,
+        now: &Capture,
+        to: &Capture,
+        mode: HeadMode,
+    ) -> Result<()> {
         // Refs that exist in the target are set before HEAD may point at them.
         for (name, id) in &to.refs {
             let cur = now
@@ -594,16 +732,16 @@ impl UndoOps for CliBackend {
             }
         }
 
+        // Only sections that exist now: removing a missing one fails, and
+        // any other failure must stop the restore rather than go unseen.
         for section in &scope.config {
-            let _ = self
-                .runner()
-                .run(
-                    &self
-                        .command(["config", "--local", "--remove-section"])
-                        .arg(section)
-                        .allow_failure(),
+            if now.config.iter().any(|(k, _)| in_section(k, section)) {
+                self.exec(
+                    self.command(["config", "--local", "--remove-section"])
+                        .arg(section),
                 )
-                .await;
+                .await?;
+            }
         }
         for (k, v) in &to.config {
             self.exec(self.command(["config", "--local", "--add"]).args([k, v]))
@@ -611,12 +749,11 @@ impl UndoOps for CliBackend {
         }
 
         if !scope.index.is_empty() {
-            let zero = "0".repeat(
-                to.index
-                    .first()
-                    .or(now.index.first())
-                    .map_or(40, |e| e.oid.len()),
-            );
+            let len = match to.index.first().or(now.index.first()) {
+                Some(e) => e.oid.len(),
+                None => self.oid_len().await,
+            };
+            let zero = "0".repeat(len);
             let mut input = Vec::new();
             for p in &scope.index {
                 input.extend(format!("0 {zero}\t{}\0", p.display()).into_bytes());
@@ -709,9 +846,7 @@ impl UndoOps for CliBackend {
         }
         Ok(())
     }
-}
 
-impl CliBackend {
     /// Moves HEAD to `to`. `owned` are the files this step restores right
     /// after: changes in them may be overwritten by a switch (redoing
     /// "stash, then switch" finds them back while still on the old branch).

@@ -58,7 +58,11 @@ impl App {
         Fut: Future<Output = gf_core::Result<Integration>> + Send + 'static,
     {
         let label = label.into();
-        let pending = if undoable { None } else { tab.pending.clone() };
+        let pending = if undoable {
+            None
+        } else {
+            tab.undo.pending.clone()
+        };
         let repo = tab.repo.clone();
         let id = repo.id();
         let fut = f(repo.clone());
@@ -116,25 +120,27 @@ impl App {
     ) -> Task<Message> {
         let refresh = self.request_refresh(id);
         let recorded = matches!(record.as_deref(), Some(Recorded::Step(_)));
+        let mut pin = Task::none();
         match record.map(|r| *r) {
             Some(Recorded::Step(step)) => {
                 if let Some(tab) = self.tab_mut(id) {
-                    tab.pending = None;
+                    tab.undo.set_pending(None, &tab.repo.handle().git_dir);
                 }
-                self.record_step(id, *step);
+                pin = self.record_step(id, *step);
             }
             Some(Recorded::Pending(p)) => {
                 if let Some(tab) = self.tab_mut(id) {
-                    tab.pending = Some(*p);
+                    tab.undo.set_pending(Some(*p), &tab.repo.handle().git_dir);
                 }
             }
             None => {}
         }
+        let refresh = Task::batch([refresh, pin]);
         let active = self.active_tab().is_some_and(|tab| tab.repo.id() == id);
         match result {
             Ok(Integration::Done) => {
                 if let Some(tab) = self.tab_mut(id) {
-                    tab.pending = None;
+                    tab.undo.set_pending(None, &tab.repo.handle().git_dir);
                 }
                 let hint = if recorded { " · ⌘Z undo" } else { "" };
                 if active {
