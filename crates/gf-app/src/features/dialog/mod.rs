@@ -32,6 +32,10 @@ pub const AREA_ID: &str = "gf-dialog-area";
 pub const FIRST_FIELD_ID: &str = "gf-dialog-field-0";
 
 const REVIEW_ID: &str = "gf-dialog-review";
+
+/// Widest the box gets, and its padding left and right.
+const MAX_WIDTH: f32 = 640.0;
+const PAD_X: f32 = 14.0;
 const MAX_REVIEW_ROWS: usize = 10;
 
 fn review_row_height(t: &Tokens) -> f32 {
@@ -124,13 +128,17 @@ pub struct Choice {
     pub label: String,
     pub options: Vec<Opt>,
     pub selected: usize,
+    /// Drawn as a row of action buttons instead of radio buttons: one
+    /// click runs an option, ⏎ runs the selected one, and only the
+    /// option under the pointer (else the selected one) shows its lines.
+    pub inline: bool,
+    /// Option under the pointer (inline only).
+    hovered: Option<usize>,
 }
 
 /// How a line under an option reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
-    /// A git command the option runs (`$ git switch dev`).
-    Command,
     Hint,
     /// Why the option cannot run.
     Problem,
@@ -144,7 +152,7 @@ pub struct Opt {
     /// Pressing it picks the option and runs it (a dangerous one is only
     /// picked: it still needs a click).
     pub key: Option<char>,
-    /// Shown under the label: the commands it runs, hints, problems.
+    /// Shown under the label: hints and problems.
     pub lines: Vec<(String, Tone)>,
     /// Cannot be picked (the lines say why).
     pub disabled: bool,
@@ -215,6 +223,10 @@ pub enum Message {
     ReviewScrolled(ScrollPos),
     Check(usize),
     Choose(usize),
+    /// Inline option clicked: picks it and runs it.
+    Pick(usize),
+    /// Pointer over an inline option (`None`: left it).
+    Hover(Option<usize>),
     DontAsk,
     Submit,
     Cancel,
@@ -365,7 +377,19 @@ impl<P: Clone> Dialog<P> {
             label: label.into(),
             options,
             selected,
+            inline: false,
+            hovered: None,
         });
+        self
+    }
+
+    /// Options as action buttons in place of the confirm button (see
+    /// [`Choice::inline`]); `selected` runs on ⏎.
+    pub fn actions(mut self, options: Vec<Opt>, selected: usize) -> Self {
+        self = self.options("", options, selected);
+        if let Some(c) = self.choice.as_mut() {
+            c.inline = true;
+        }
         self
     }
 
@@ -438,6 +462,24 @@ impl<P: Clone> Dialog<P> {
                 let enabled = |c: &&mut Choice| c.options.get(i).is_some_and(|o| !o.disabled);
                 if let Some(c) = self.choice.as_mut().filter(enabled) {
                     c.selected = i;
+                }
+                None
+            }
+            Message::Pick(i) => {
+                let enabled = self
+                    .choice
+                    .as_ref()
+                    .and_then(|c| c.options.get(i))
+                    .is_some_and(|o| !o.disabled);
+                if !enabled {
+                    return None;
+                }
+                let _ = self.update(Message::Choose(i));
+                self.update(Message::Submit)
+            }
+            Message::Hover(i) => {
+                if let Some(c) = self.choice.as_mut() {
+                    c.hovered = i;
                 }
                 None
             }
@@ -552,7 +594,8 @@ impl<P: Clone> Dialog<P> {
                 .style(style::text_area(t));
             col = col.push(column![dim(t, format!("│ {}", area.label)), editor].spacing(2));
         }
-        if let Some(choice) = &self.choice {
+        let inline = self.choice.as_ref().filter(|c| c.inline);
+        if let Some(choice) = self.choice.as_ref().filter(|c| !c.inline) {
             col = col.push(dim(t, format!("│ {}", choice.label)));
             for (i, o) in choice.options.iter().enumerate() {
                 let picked = i == choice.selected;
@@ -566,8 +609,7 @@ impl<P: Clone> Dialog<P> {
                 });
                 for (line, tone) in &o.lines {
                     let color = match tone {
-                        Tone::Command if !o.disabled => t.fg,
-                        Tone::Command | Tone::Hint => t.dim,
+                        Tone::Hint => t.dim,
                         Tone::Problem => t.error(),
                     };
                     col = col.push(colored(t, format!("│       {line}"), color));
@@ -598,6 +640,12 @@ impl<P: Clone> Dialog<P> {
         if let Some(e) = &self.error {
             col = col.push(colored(t, format!("│ ⚠ {e}"), t.error()));
         }
+        if let Some(choice) = inline {
+            // Full width (up to the cap) whatever the hint says, so
+            // hovering cannot resize the box.
+            let content = col.push(inline_actions(t, choice)).width(Length::Fill);
+            return self.frame(t, accent, content);
+        }
         let confirm = if danger {
             widgets::danger_button(t, &self.confirm_label, Some(Message::Submit))
         } else {
@@ -624,9 +672,19 @@ impl<P: Clone> Dialog<P> {
             ));
         }
 
+        self.frame(t, accent, col)
+    }
+
+    /// The bordered box around the dialog's content.
+    fn frame<'a>(
+        &'a self,
+        t: &'a Tokens,
+        accent: Color,
+        col: Column<'a, Message>,
+    ) -> Element<'a, Message> {
         container(col)
-            .padding(Padding::from([10, 14]))
-            .max_width(640)
+            .padding(Padding::from([10.0, PAD_X]))
+            .max_width(MAX_WIDTH)
             .style(move |_| container::Style {
                 text_color: Some(t.fg),
                 background: Some(Background::Color(t.surface)),
@@ -638,6 +696,101 @@ impl<P: Clone> Dialog<P> {
                 ..container::Style::default()
             })
             .into()
+    }
+}
+
+/// Inline options: the lines of the option under the pointer (else the
+/// selected one) and why any disabled option cannot run, then the last
+/// row: a button per option (the selected one marked ⏎) and Cancel.
+fn inline_actions<'a>(t: &'a Tokens, choice: &'a Choice) -> Element<'a, Message> {
+    let mut buttons = row![].spacing(6);
+    for (i, o) in choice.options.iter().enumerate() {
+        let keys = match (o.key, i == choice.selected) {
+            (Some(k), true) => format!("{k} ⏎"),
+            (Some(k), false) => k.to_string(),
+            (None, true) => "⏎".into(),
+            (None, false) => String::new(),
+        };
+        let label = if o.disabled {
+            format!("{} ✗", o.label)
+        } else {
+            o.label.clone()
+        };
+        let pick = (!o.disabled).then_some(Message::Pick(i));
+        let shortcut = (!keys.is_empty()).then_some(keys.as_str());
+        let button = if o.dangerous {
+            widgets::danger_button(t, &label, pick)
+        } else {
+            widgets::text_button(t, &label, shortcut, pick)
+        };
+        buttons = buttons.push(
+            iced::widget::mouse_area(button)
+                .on_enter(Message::Hover(Some(i)))
+                .on_exit(Message::Hover(None)),
+        );
+    }
+    buttons = buttons
+        .push(space().width(Length::Fill))
+        .push(widgets::text_button(
+            t,
+            "Cancel",
+            Some("Esc"),
+            Some(Message::Cancel),
+        ));
+    let shown = choice
+        .hovered
+        .filter(|i| choice.options.get(*i).is_some())
+        .unwrap_or(choice.selected);
+    let mut col = Column::new().spacing(6);
+    for o in &choice.options {
+        for (line, tone) in &o.lines {
+            if *tone == Tone::Problem {
+                col = col.push(one_line(t, format!("│ {line}"), t.error()));
+            }
+        }
+    }
+    // Hovering swaps the hints in place: as many rows as the option with
+    // the most, one line each, so the buttons never move under the pointer
+    // (moving would end the hover and start it again).
+    let hints = |o: &'a Opt| o.lines.iter().filter(|(_, tone)| *tone == Tone::Hint);
+    let rows = choice
+        .options
+        .iter()
+        .map(|o| hints(o).count())
+        .max()
+        .unwrap_or(0);
+    let mut shown_hints = choice.options.get(shown).map(|o| hints(o));
+    for _ in 0..rows {
+        let line = shown_hints
+            .as_mut()
+            .and_then(Iterator::next)
+            .map_or(String::from("│"), |(line, _)| format!("│ {line}"));
+        col = col.push(one_line(t, line, t.dim));
+    }
+    col.push(buttons).into()
+}
+
+/// Columns of text that fit inside the widest box.
+fn inner_cols(t: &Tokens) -> usize {
+    let cols = ((MAX_WIDTH - 2.0 * PAD_X) / t.char_width()).floor();
+    // Truncation toward zero is the point; a negative width means none.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let cols = cols.max(0.0) as usize;
+    // One spare column: glyphs like ⌘ run a little wider than the estimate.
+    cols.saturating_sub(1)
+}
+
+/// One line that never wraps: cut with `…` to the box's width, the whole
+/// text shown on hover when cut.
+fn one_line<'a>(t: &'a Tokens, line: String, color: Color) -> Element<'a, Message> {
+    let fit = widgets::format::truncate_columns(&line, inner_cols(t));
+    let cut = fit != line;
+    let text = colored(t, fit, color).wrapping(iced::widget::text::Wrapping::None);
+    if cut {
+        let full = line.trim_start_matches(['│', ' ']).to_owned();
+        widgets::tip_at_cursor(t, text, full)
+    } else {
+        text.into()
     }
 }
 
@@ -743,6 +896,36 @@ mod tests {
         );
         assert!(matches!(
             d.key('s'),
+            Some(Outcome::Submitted {
+                choice: Some(0),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn inline_actions_run_on_click_but_not_when_disabled() {
+        let mut d = Dialog::confirm("Switch", vec![], "Switch", ())
+            .severity(Severity::Change)
+            .actions(
+                vec![
+                    Opt::new("stash & switch").key('s'),
+                    Opt::new("bring changes").key('c').disabled(true),
+                ],
+                0,
+            );
+        assert!(d.update(Message::Pick(1)).is_none(), "disabled");
+        assert!(d.update(Message::Hover(Some(1))).is_none());
+        assert_eq!(d.choice.as_ref().map(|c| c.selected), Some(0));
+        assert!(matches!(
+            d.update(Message::Pick(0)),
+            Some(Outcome::Submitted {
+                choice: Some(0),
+                ..
+            })
+        ));
+        assert!(matches!(
+            d.enter(),
             Some(Outcome::Submitted {
                 choice: Some(0),
                 ..

@@ -1007,16 +1007,12 @@ impl App {
             return self.measure_switch(target, name, remote, from, changed);
         }
         let body = if remote {
-            vec![
-                format!("Create a local branch tracking `{name}` and switch to it?"),
-                "Your files change to that branch's content.".into(),
-            ]
+            let local = name.split_once('/').map_or(name.as_str(), |(_, b)| b);
+            vec![format!("{name} → new local branch {local}")]
         } else {
-            vec![
-                format!("Switch to `{name}`?"),
-                "Your files change to that branch. Uncommitted changes come along".into(),
-                "unless they conflict (then git refuses and nothing changes).".into(),
-            ]
+            vec![format!(
+                "→ {name} · changes come along (git refuses on conflict)"
+            )]
         };
         // Nothing to bring along or to leave behind: just switch (⌘Z goes
         // back). A remote branch also creates a local one, so it asks.
@@ -1113,54 +1109,25 @@ impl App {
         {
             return Task::none();
         }
-        let switch = if remote {
-            let local = name.split_once('/').map_or(name.as_str(), |(_, b)| b);
-            format!("$ git switch --track -c {local} {name}")
-        } else {
-            format!("$ git switch {name}")
-        };
-        let earlier = self
-            .active_tab()
-            .and_then(|t| t.snapshot.as_deref())
-            .map_or(0, |s| {
-                s.stashes
-                    .iter()
-                    .filter(|e| gf_git::left_on_branch(&e.message) == Some(from.as_str()))
-                    .count()
-            });
-
-        let mut leave = Opt::new("stash, then switch")
-            .key('s')
-            .line(
-                format!("$ git stash push -u -m \"{}\"", gf_git::left_on(&from)),
-                Tone::Command,
-            )
-            .line(&switch, Tone::Command)
-            .line(
-                format!("offered back when you return to {from}"),
-                Tone::Hint,
-            );
-        if earlier > 0 {
-            leave = leave.line(
-                format!("{earlier} earlier stash(es) left on {from} stay in the list"),
-                Tone::Hint,
-            );
-        }
-        let mut carry = Opt::new("carry changes over")
+        let leave = Opt::new("stash & switch").key('s').line(
+            format!("offered back when you return to {from} · ⌘Z undoes both"),
+            Tone::Hint,
+        );
+        let mut carry = Opt::new("bring changes")
             .key('c')
-            .line(&switch, Tone::Command);
+            .line(format!("your changes move to {name}"), Tone::Hint);
         let blocked = match blocked {
-            Ok(b) if b.is_empty() => {
-                carry = carry.line("✓ nothing in the way", Tone::Hint);
-                b
-            }
+            Ok(b) if b.is_empty() => b,
             Ok(b) => {
                 carry = carry
                     .line(
-                        format!("✗ {} file(s) would block it — git would refuse", b.len()),
+                        format!(
+                            "✗ {} file(s) in the way ({}) · l lists them",
+                            b.len(),
+                            blocker_summary(&b)
+                        ),
                         Tone::Problem,
                     )
-                    .line(blocker_summary(&b), Tone::Problem)
                     .disabled(true);
                 b
             }
@@ -1172,21 +1139,16 @@ impl App {
                 Vec::new()
             }
         };
-
         let to = if remote {
-            format!("{name} (as a new tracking branch)")
+            format!("{name} (new tracking branch)")
         } else {
             name.clone()
         };
-        let body = vec![
-            format!("{changed} changed file(s) on `{from}`"),
-            "⌘Z undoes it afterwards (stash and switch together)".into(),
-        ];
         self.menu = None;
         self.open_dialog(
             Dialog::confirm(
-                format!("switch {from} → {to}"),
-                body,
+                format!("{from} → {to} · {changed} changed"),
+                Vec::new(),
                 "Switch",
                 Purpose::Checkout {
                     target,
@@ -1197,7 +1159,7 @@ impl App {
                 },
             )
             .severity(Severity::Change)
-            .options("your changes:", vec![leave, carry], 0)
+            .actions(vec![leave, carry], 0)
             .undoable(),
         )
     }
@@ -1552,7 +1514,7 @@ fn reveal(path: &std::path::Path) -> std::io::Result<()> {
 
 /// `a.rs, b.rs, c.rs  +11 more  [l] list`: the first few blocking files.
 fn blocker_summary(blocked: &[std::path::PathBuf]) -> String {
-    const SHOWN: usize = 3;
+    const SHOWN: usize = 2;
     let names: Vec<String> = blocked
         .iter()
         .take(SHOWN)
@@ -1560,7 +1522,7 @@ fn blocker_summary(blocked: &[std::path::PathBuf]) -> String {
         .collect();
     let mut s = names.join(", ");
     if blocked.len() > SHOWN {
-        s.push_str(&format!("  +{} more  [l] list", blocked.len() - SHOWN));
+        s.push_str(&format!(" +{} more", blocked.len() - SHOWN));
     }
     s
 }
@@ -1586,14 +1548,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn many_blockers_show_three_and_a_count() {
+    fn many_blockers_show_two_and_a_count() {
         let p = |s: &str| std::path::PathBuf::from(s);
         assert_eq!(blocker_summary(&[p("a.rs")]), "a.rs");
         let many: Vec<_> = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"].map(p).into();
-        assert_eq!(
-            blocker_summary(&many),
-            "a.rs, b.rs, c.rs  +2 more  [l] list"
-        );
+        assert_eq!(blocker_summary(&many), "a.rs, b.rs +3 more");
     }
 
     #[test]
