@@ -7,10 +7,17 @@ name: Release
 # not have waits until main has it.
 #
 #   git tag release-0.0.2 && git push origin release-0.0.2
+#
+# Every other push to main runs the UI sweep on main here (CI sweeps only
+# pull requests into main), so each commit is swept once.
 on:
   push:
     branches: [main]
     tags: ["release-*"]
+    # Changes to docs alone do not run it (tag pushes ignore this filter).
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
 
 # One at a time: a push of main and its tag together release once.
 concurrency:
@@ -19,12 +26,15 @@ concurrency:
 
 jobs:
   # Which tag to release: the newest release-* tag in main that has no
-  # release yet (none: nothing to do).
+  # release yet (none: nothing to do). And what to sweep: that tag, else
+  # main after a push to it, unless a release tag already sits on that
+  # commit (its release swept it).
   resolve:
     name: Find the tag to release
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.find.outputs.tag }}
+      sweep: ${{ steps.find.outputs.sweep }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,7 +57,13 @@ jobs:
           else
             echo "Releasing $tag ($(git rev-parse "$tag^{commit}"))"
           fi
+          sweep="$tag"
+          if [ -z "$sweep" ] && [ "$GITHUB_REF_TYPE" = branch ] &&
+             [ -z "$(git tag -l 'release-*' --points-at "$GITHUB_SHA")" ]; then
+            sweep="$GITHUB_SHA"
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sweep=$sweep" >> "$GITHUB_OUTPUT"
 
   ci:
     needs: resolve
@@ -57,15 +73,16 @@ jobs:
       ref: ${{ needs.resolve.outputs.tag }}
 
   # Runs beside the checks and the .dmg build; the release waits for it.
+  # With nothing to release it checks main alone.
   ui-sweep:
     name: UI sweep (every button does something)
     needs: resolve
-    if: needs.resolve.outputs.tag != ''
+    if: needs.resolve.outputs.sweep != ''
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.sweep }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p gf-app -- --ignored sweep_

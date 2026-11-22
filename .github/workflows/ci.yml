@@ -1,9 +1,16 @@
 name: CI
 
+# Changes to docs alone (Markdown, docs/) do not run CI.
 on:
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   push:
     branches: [main, develop]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   # release.yml runs this on the commit it is about to release.
   workflow_call:
     inputs:
@@ -37,11 +44,12 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
-  # Clicks every button on screen headless (app/ui_sweep.rs). For a
-  # release, release.yml runs it beside the .dmg build instead.
+  # Clicks every button on screen headless (app/ui_sweep.rs). Slow, so
+  # only for main: here for a pull request into it; release.yml runs it
+  # for a push to main (a merge) and for a release.
   ui-sweep:
     name: UI sweep (every button does something)
-    if: ${{ github.workflow == 'CI' }}
+    if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
