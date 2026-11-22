@@ -120,7 +120,8 @@ impl State {
         })
     }
 
-    /// Folder rows participate in movement, and Enter expands or folds them.
+    /// ↑/↓ stop at files and folded folders only; Enter on a folder toggles
+    /// it and `-` folds the folder around the current row.
     pub fn nav(&self, n: Nav, snap: &Snapshot, t: &Tokens, tree: bool) -> Option<Moved<Message>> {
         if n.key == Key::Char('t') {
             return Some(Moved::message(Message::SetTree(!tree)));
@@ -169,7 +170,41 @@ impl State {
             }
         }
         let h = row_height(t);
-        let row = nav::step(current, visible.len(), n.key, nav::page(self.scroll, h))?;
+        let open = |path: &Path| self.folders.open((), path);
+        let tree_row = |row: Row| match row {
+            Row::Folder(index) => Some(index),
+            Row::File(index, _) => lists.tree.file_row(index),
+        };
+        if tree && n.key == Key::Char('-') {
+            let moved =
+                selected
+                    .and_then(tree_row)
+                    .and_then(|row| lists.tree.fold_target(row, open))
+                    .and_then(|target| {
+                        let file_tree::Row::Folder { path, .. } = lists.tree.row(target) else {
+                            return None;
+                        };
+                        let at = visible
+                            .iter()
+                            .position(|&row| matches!(row, Row::Folder(i) if i == target))?;
+                        Some(
+                            Moved::message(Message::ToggleFolder(path.clone()))
+                                .with_task(nav::reveal(LIST_ID, self.scroll, at, h)),
+                        )
+                    });
+            return Some(moved.unwrap_or_else(Moved::stay));
+        }
+        let stop = |i: usize| match visible[i] {
+            Row::Folder(index) => lists.tree.is_stop(index, open),
+            Row::File(..) => true,
+        };
+        let row = nav::step_to(
+            current,
+            visible.len(),
+            n.key,
+            nav::page(self.scroll, h),
+            stop,
+        )?;
         if current == Some(row) {
             return Some(Moved::stay());
         }

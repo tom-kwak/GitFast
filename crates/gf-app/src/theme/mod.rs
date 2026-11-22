@@ -86,6 +86,10 @@ impl Tokens {
     pub fn accent(&self) -> Color {
         self.accent
     }
+    /// Directory rows in file trees: faded so the files they hold stand out.
+    pub fn folder(&self) -> Color {
+        self.dim
+    }
 
     /// Background and foreground for regular and current file search matches.
     pub fn find_match(&self, active: bool) -> (Color, Color) {

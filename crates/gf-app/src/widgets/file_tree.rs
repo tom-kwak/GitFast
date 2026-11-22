@@ -115,6 +115,32 @@ impl Tree {
         &self.0[index]
     }
 
+    /// Row of file `index`.
+    pub fn file_row(&self, index: usize) -> Option<usize> {
+        self.0
+            .iter()
+            .position(|row| matches!(row, Row::File { index: i, .. } if *i == index))
+    }
+
+    /// Rows that ↑/↓ land on: files, and folded folders so ↵ can unfold them.
+    pub fn is_stop(&self, row: usize, open: impl Fn(&Path) -> bool) -> bool {
+        match &self.0[row] {
+            Row::Folder { path, .. } => !open(path),
+            Row::File { .. } => true,
+        }
+    }
+
+    /// Folder row that `-` folds from `row`: the row itself when it is an
+    /// open folder, otherwise the innermost folder holding it.
+    pub fn fold_target(&self, row: usize, open: impl Fn(&Path) -> bool) -> Option<usize> {
+        if matches!(&self.0[row], Row::Folder { path, .. } if open(path)) {
+            return Some(row);
+        }
+        (0..row)
+            .rev()
+            .find(|&i| matches!(&self.0[i], Row::Folder { end, .. } if row < *end))
+    }
+
     /// Skip whole subtrees when folded, keeping only rows the list can show.
     pub fn visible(&self, mut open: impl FnMut(&Path) -> bool) -> impl Iterator<Item = usize> {
         let mut index = 0;
@@ -193,15 +219,16 @@ pub fn folder<'a, M: Clone + 'a>(
 ) -> Element<'a, M> {
     let line = row![
         space().width(indent(t, depth)),
-        widgets::colored(t, if open { "▾ " } else { "▸ " }, t.accent()),
-        widgets::mono(t, label.display().to_string()).wrapping(Wrapping::None),
+        widgets::colored(t, if open { "▾ " } else { "▸ " }, t.folder()),
+        // The trailing slash marks a folder even where colors are hard to tell apart.
+        widgets::colored(t, format!("{}/", label.display()), t.folder()).wrapping(Wrapping::None),
         widgets::dim(t, format!(" ({count})")).wrapping(Wrapping::None),
     ]
     .align_y(iced::Alignment::Center);
     widgets::tip(
         t,
         widgets::list_row(t, line, focused, message),
-        "expand or collapse folder ↵".into(),
+        "expand or collapse folder ↵ · fold from inside -".into(),
     )
 }
 
@@ -277,6 +304,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 4, 5, 6, 7, 8]
         );
+    }
+
+    #[test]
+    fn stops_are_files_and_folded_folders_and_fold_targets_the_enclosing_folder() {
+        // Rows: 0 a/b/c/, 1 sub/, 2 other.txt, 3 hello.world, 4 z/, 5 last.txt
+        let paths = ["a/b/c/hello.world", "a/b/c/sub/other.txt", "z/last.txt"];
+        let tree = Tree::new(paths.into_iter().map(Path::new).enumerate());
+        let open = |path: &Path| path != Path::new("z");
+        let stops: Vec<_> = (0..6).filter(|&r| tree.is_stop(r, open)).collect();
+        assert_eq!(stops, [2, 3, 4, 5]);
+        assert_eq!(tree.file_row(1), Some(2));
+        assert_eq!(tree.fold_target(2, open), Some(1), "file → its folder");
+        assert_eq!(
+            tree.fold_target(3, open),
+            Some(0),
+            "skips the sibling folder"
+        );
+        assert_eq!(
+            tree.fold_target(1, open),
+            Some(1),
+            "open folder folds itself"
+        );
+        assert_eq!(tree.fold_target(4, open), None, "folded top-level folder");
+        assert_eq!(tree.fold_target(5, open), Some(4));
     }
 
     #[test]

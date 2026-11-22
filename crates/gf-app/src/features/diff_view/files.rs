@@ -102,15 +102,40 @@ impl State {
             });
         }
         let h = row_height(t);
+        let layout = &self.diff.file_tree;
+        let open = |path: &Path| self.folders.open((), path);
+        if n.key == Key::Char('-') {
+            let rows = visible.as_ref()?;
+            let moved =
+                current
+                    .and_then(|i| layout.fold_target(rows[i], open))
+                    .and_then(|target| {
+                        let file_tree::Row::Folder { path, .. } = layout.row(target) else {
+                            return None;
+                        };
+                        let at = rows.iter().position(|&r| r == target)?;
+                        Some(
+                            Moved::message(Message::ToggleFolder(path.clone()))
+                                .with_task(nav::reveal(FILES_ID, self.files_scroll, at, h)),
+                        )
+                    });
+            return Some(moved.unwrap_or_else(Moved::stay));
+        }
         let len = visible
             .as_ref()
             .map_or(self.diff.files.len(), |rows| rows.len());
-        let i = nav::step(current, len, n.key, nav::page(self.files_scroll, h))?;
+        let page = nav::page(self.files_scroll, h);
+        let i = match &visible {
+            Some(rows) => {
+                nav::step_to(current, len, n.key, page, |i| layout.is_stop(rows[i], open))?
+            }
+            None => nav::step(current, len, n.key, page)?,
+        };
         if current == Some(i) {
             return Some(Moved::stay());
         }
         let msg = if let Some(rows) = visible {
-            match self.diff.file_tree.row(rows[i]) {
+            match layout.row(rows[i]) {
                 file_tree::Row::Folder { path, .. } => Message::FocusFolder(path.clone()),
                 file_tree::Row::File { index, .. } => Message::SelectFile(*index),
             }

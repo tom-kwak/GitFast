@@ -1397,7 +1397,7 @@ impl App {
                 );
                 lines.push("refs: ⌘-click marks branches · ⇧-click or ⇧↑/↓ selects a range · . then d reviews deletion".into());
                 lines.push(
-                    "file lists: T switches list / tree · Enter toggles a focused folder".into(),
+                    "file lists: T switches list / tree · ↑/↓ skip open folders · - folds the current folder · Enter unfolds".into(),
                 );
                 lines.push("history ⌘F finds a file · ↑/↓ move · Enter shows the commits that changed it · Esc closes".into());
                 lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());

@@ -1481,6 +1481,81 @@ async fn working_tree_defaults_to_list_and_tree_folds_all_files_in_a_folder() {
     assert!(saved.appearance.history_file_dirs);
 }
 
+/// One working tree key press in tree mode, applied to the app.
+async fn tree_key(ui: &mut Ui, key: crate::nav::Key) -> Option<changes::Message> {
+    let tab = ui.app.active_tab().expect("repository");
+    let snap = tab.snapshot.as_deref().expect("status");
+    let message = tab
+        .changes
+        .nav(crate::nav::Nav::plain(key), snap, &ui.app.tokens, true)
+        .and_then(|m| m.message);
+    if let Some(message) = message.clone() {
+        let _ = ui.send(Message::Changes(message)).await;
+    }
+    message
+}
+
+#[tokio::test]
+async fn working_tree_arrows_skip_open_folders_and_minus_folds_the_current_one() {
+    use crate::nav::Key;
+    use changes::Message as M;
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            r.write("src/staged/deep/staged.txt", "staged\n");
+            r.write("src/lib.rs", "unstaged\n");
+        })
+        .await,
+    )
+    .await;
+    let _ = ui.click("[ Tree ]").await;
+    let selected =
+        |m: &Option<M>, name: &str| matches!(m, Some(M::Select(path, _)) if path.ends_with(name));
+    // Rows: src/ · staged/deep/ · staged.txt · lib.rs · then the root files.
+    let m = tree_key(&mut ui, Key::Home).await;
+    assert!(selected(&m, "staged.txt"), "Home skips open folders: {m:?}");
+    let m = tree_key(&mut ui, Key::Down).await;
+    assert!(selected(&m, "lib.rs"), "{m:?}");
+    let m = tree_key(&mut ui, Key::Up).await;
+    assert!(selected(&m, "staged.txt"), "{m:?}");
+    assert!(
+        tree_key(&mut ui, Key::Up).await.is_none(),
+        "nothing above but folders"
+    );
+
+    let m = tree_key(&mut ui, Key::Char('-')).await;
+    assert!(
+        matches!(&m, Some(M::ToggleFolder(p)) if p == std::path::Path::new("src/staged")),
+        "{m:?}"
+    );
+    // The selected file's name stays in the diff title, so check the rows by moving.
+    let m = tree_key(&mut ui, Key::Down).await;
+    assert!(selected(&m, "lib.rs"), "staged.txt is folded away: {m:?}");
+    let m = tree_key(&mut ui, Key::Up).await;
+    assert!(
+        matches!(&m, Some(M::FocusFolder(p)) if p == std::path::Path::new("src/staged")),
+        "a folded folder is a stop: {m:?}"
+    );
+    let _ = tree_key(&mut ui, Key::Enter).await;
+    let m = tree_key(&mut ui, Key::Down).await;
+    assert!(selected(&m, "staged.txt"), "Enter unfolded it: {m:?}");
+
+    let _ = tree_key(&mut ui, Key::Down).await;
+    let m = tree_key(&mut ui, Key::Char('-')).await;
+    assert!(
+        matches!(&m, Some(M::ToggleFolder(p)) if p == std::path::Path::new("src")),
+        "lib.rs folds src: {m:?}"
+    );
+    assert!(
+        tree_key(&mut ui, Key::Home).await.is_none(),
+        "already on src/"
+    );
+    let m = tree_key(&mut ui, Key::Down).await;
+    assert!(
+        matches!(&m, Some(M::Select(p, _)) if !p.starts_with("src")),
+        "src/ is folded: {m:?}"
+    );
+}
+
 #[tokio::test]
 async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() {
     let mut ui = Ui::open_with(|r| {
@@ -1497,11 +1572,11 @@ async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() 
         .into_iter()
         .map(|target| target.label)
         .collect();
-    assert!(labels.iter().any(|label| label == "moved/deep/target"));
+    assert!(labels.iter().any(|label| label == "moved/deep/target/"));
     assert!(
         !labels
             .iter()
-            .any(|label| label == "moved" || label == "src")
+            .any(|label| label == "moved/" || label == "src/")
     );
     assert!(ui.shows("lib.rs → lib_new.rs"));
     assert!(
@@ -1518,7 +1593,7 @@ async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() 
             .as_deref(),
         Some(std::path::Path::new("moved/deep/target/lib_new.rs"))
     );
-    let _ = ui.click("moved/deep/target").await;
+    let _ = ui.click("moved/deep/target/").await;
     assert!(!ui.shows("lib.rs → lib_new.rs"));
     let _ = ui.click("[ List ]").await;
     assert!(ui.shows("lib_new.rs"));
