@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "gf-app"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -1393,15 +1393,15 @@ dependencies = [
 
 [[package]]
 name = "gf-auth"
-version = "0.0.7"
+version = "0.0.8"
 
 [[package]]
 name = "gf-commands"
-version = "0.0.7"
+version = "0.0.8"
 
 [[package]]
 name = "gf-config"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "directories",
  "gf-core",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "gf-core"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "thiserror 2.0.21",
  "tokio",
@@ -1421,11 +1421,11 @@ dependencies = [
 
 [[package]]
 name = "gf-flow"
-version = "0.0.7"
+version = "0.0.8"
 
 [[package]]
 name = "gf-git"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "gf-core",
  "gf-test-support",
@@ -1441,26 +1441,26 @@ dependencies = [
 
 [[package]]
 name = "gf-hosting"
-version = "0.0.7"
+version = "0.0.8"
 
 [[package]]
 name = "gf-hosting-github"
-version = "0.0.7"
+version = "0.0.8"
 
 [[package]]
 name = "gf-hosting-gitlab"
-version = "0.0.7"
+version = "0.0.8"
 
 [[package]]
 name = "gf-test-support"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "gf-watch"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "gf-core",
  "gf-test-support",

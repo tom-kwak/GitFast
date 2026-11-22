@@ -187,6 +187,14 @@ jobs:
           name: zip
           path: dist
 
+      # For the "What's new" notes (docs/release-notes/<version>.md) and
+      # the previous release tag to compare with.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.macos.outputs.tag }}
+          fetch-depth: 0
+          path: src
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -195,33 +203,51 @@ jobs:
           DMG: dist/gf-macos-universal.dmg
           ZIP: dist/gf-windows-x64.zip
         run: |
-          cat > notes.md <<NOTES
-          ## Install
+          version="${TAG#release-}"
+          whats_new="src/docs/release-notes/$version.md"
+          previous="$(git -C src tag -l 'release-*' --sort=-v:refname | grep -vxF "$TAG" | head -1)"
+          {
+            # Written by hand for each release; without it GitHub lists the
+            # merged changes instead (--generate-notes below).
+            if [ -f "$whats_new" ]; then cat "$whats_new"; echo; fi
+            cat <<NOTES
+          ## Install or update
 
-          Paste in Terminal (installs or updates gf in Applications):
+          ### macOS
+
+          Run in Terminal on macOS 11 or later (Apple silicon or Intel):
 
           \`\`\`bash
           curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
           \`\`\`
 
-          Universal build (Apple silicon + Intel), macOS 11+.
-
           ### Windows
 
-          Paste in PowerShell (installs or updates gf for the current user):
+          Run in PowerShell on Windows 10 1809+ or 11 (x64). It installs gf for the
+          current user (no administrator rights), adds it to the Start menu and \`PATH\`,
+          and checks the download's SHA-256:
 
           \`\`\`powershell
           irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
           \`\`\`
 
-          Windows 10 1809+ / 11 (x64) with [Git for Windows](https://git-scm.com/download/win).
-          gf is not code-signed yet: SmartScreen may warn on first launch
-          ("More info" → "Run anyway"). Each download has a \`.sha256\` to check it against.
+          gf is not code-signed yet, so SmartScreen may warn on the first launch
+          ("More info" → "Run anyway").
+
+          Git 2.43.1 or later is required ([Git for Windows](https://git-scm.com/download/win)
+          on Windows). Every download has a \`.sha256\` checksum next to it.
           NOTES
+            if [ -n "$previous" ]; then
+              echo
+              echo "[Compare with ${previous#release-}](https://github.com/${{ github.repository }}/compare/$previous...$TAG)"
+            fi
+          } > notes.md
+          generate=()
+          [ -f "$whats_new" ] || generate=(--generate-notes)
           # The tag already exists (on a commit in main).
           gh release create "$TAG" "$DMG" "$DMG.sha256" "$ZIP" "$ZIP.sha256" \
             --verify-tag \
-            --title "gf ${TAG#release-}" \
+            --title "gf $version" \
             --notes-file notes.md \
-            --generate-notes \
+            "${generate[@]}" \
             --latest
