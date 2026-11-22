@@ -41,4 +41,21 @@ impl RefOps for CliBackend {
             .map(|l| l.trim().parse())
             .collect()
     }
+
+    async fn unpushed_recent(&self, limit: usize) -> Result<Vec<Oid>> {
+        if !self.head_exists().await? {
+            return Ok(Vec::new());
+        }
+        let cmd = self.command([
+            "rev-list".to_owned(),
+            format!("--max-count={limit}"),
+            "HEAD".to_owned(),
+            "--not".to_owned(),
+            "--remotes".to_owned(),
+        ]);
+        String::from_utf8_lossy(&self.read(cmd).await?)
+            .lines()
+            .map(|l| l.trim().parse())
+            .collect()
+    }
 }

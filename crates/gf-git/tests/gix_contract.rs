@@ -178,6 +178,11 @@ async fn reads_match_the_git_cli() {
         })
         .await;
     }
+    // Newest-first order is the same on both backends, so no sorting here.
+    same(&repo, "unpushed_recent", |b| async move {
+        call!(b, RefOps::unpushed_recent(2))
+    })
+    .await;
     same(&repo, "rebase_plan", |b| {
         let base = &base;
         async move { call!(b, RebaseOps::rebase_plan(Some(base))) }

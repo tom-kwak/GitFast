@@ -341,6 +341,14 @@ pub(super) fn upstream(
 /// Commits reachable from HEAD that are on no remote (and not reachable
 /// from `since`), newest first.
 fn unpushed(repo: &gix::Repository, since: Option<ObjectId>) -> Result<Vec<ObjectId>> {
+    unpushed_limited(repo, since, usize::MAX)
+}
+
+fn unpushed_limited(
+    repo: &gix::Repository,
+    since: Option<ObjectId>,
+    limit: usize,
+) -> Result<Vec<ObjectId>> {
     let Some(head) = head_id(repo)? else {
         return Ok(Vec::new());
     };
@@ -350,6 +358,7 @@ fn unpushed(repo: &gix::Repository, since: Option<ObjectId>) -> Result<Vec<Objec
         .with_hidden(hidden)
         .all()
         .map_err(err)?
+        .take(limit)
         .map(|i| i.map(|i| i.id).map_err(err))
         .collect()
 }
@@ -479,6 +488,16 @@ impl RefOps for GixBackend {
         let since = since.map(object_id).transpose()?;
         self.blocking(move |repo| Ok(unpushed(repo, since)?.into_iter().map(oid).collect()))
             .await
+    }
+
+    async fn unpushed_recent(&self, limit: usize) -> Result<Vec<Oid>> {
+        self.blocking(move |repo| {
+            Ok(unpushed_limited(repo, None, limit)?
+                .into_iter()
+                .map(oid)
+                .collect())
+        })
+        .await
     }
 }
 
