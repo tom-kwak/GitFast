@@ -254,7 +254,7 @@ impl State {
             t,
             title,
             self.role.accent(t),
-            file_tree::mode_button(t, cx.file_tree, Message::SetTree(!cx.file_tree)),
+            file_tree::mode_button(t, cx.file_tree, Message::SetTree),
             body,
         )
     }

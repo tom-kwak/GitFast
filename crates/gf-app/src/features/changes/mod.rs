@@ -58,6 +58,8 @@ pub enum Message {
     ToggleMark(PathBuf, Group),
     /// ⇧-click or ⇧↑/↓: marks the files from the anchor to this one.
     SelectRange(PathBuf, Group),
+    /// ⌘A: marks every changed file, folded folders included.
+    MarkAll,
     ClearMarks,
     FocusFolder(PathBuf),
     ToggleFolder(PathBuf),
@@ -517,15 +519,12 @@ impl State {
         } else {
             control
         };
+        // One text for both states: the tooltip stays under the pointer
+        // while the box is clicked, and a different width would make it jump.
         let toggle = widgets::tip(
             t,
             control,
-            if checked {
-                "remove these changes from the next commit (Space)"
-            } else {
-                "include these changes in the next commit (Space)"
-            }
-            .into(),
+            "stage / unstage for the next commit (Space)".into(),
         );
         // Discard and delete live in the right-click menu and on `d`.
         let actions: Element<'a, Message> = match group {
@@ -576,6 +575,11 @@ impl State {
                     self.mark_anchor = Some(anchor);
                     self.marks = self.range(snap, tree, path);
                     return self.pick(path.clone(), *group);
+                }
+                Message::MarkAll => {
+                    self.marks = snap.change_files.paths(&snap.status.entries);
+                    self.mark_anchor = self.selected.as_ref().map(|(p, _)| p.clone());
+                    return Update::none();
                 }
                 Message::RightClick(path, group) if self.marks.contains(path) => {
                     let changed = !self.is_selected(path, *group);
@@ -692,6 +696,8 @@ impl Feature for State {
                 self.marks.insert(path.clone());
                 self.pick(path, group)
             }
+            // Without the file list there is nothing to mark.
+            Message::MarkAll => Update::none(),
             Message::ClearMarks => {
                 self.clear_marks();
                 Update::none()
@@ -933,6 +939,10 @@ mod tests {
             key(&s, shift_up),
             Some(Message::SelectRange(path, Group::Staged)) if path == p("b")
         ));
+
+        // ⌘A marks every file.
+        let _ = s.update_with(Message::MarkAll, Some(&snap), false);
+        assert_eq!(s.marks, [p("a"), p("b"), p("c")].into());
 
         // A right-click off the marks acts on that file alone.
         let _ = s.update(Message::ClearMarks);

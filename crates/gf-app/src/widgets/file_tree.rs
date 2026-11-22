@@ -11,7 +11,7 @@ use iced::widget::canvas::{self, Geometry, LineJoin, Path as CanvasPath, Stroke}
 use iced::widget::{row, space, text::Wrapping};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
-use crate::theme::Tokens;
+use crate::theme::{Tokens, style};
 use crate::widgets;
 
 #[derive(Debug, Default)]
@@ -325,19 +325,30 @@ pub fn folder<'a, M: Clone + 'a>(
     )
 }
 
-/// Keep the display control compact enough for the narrow file panes.
-pub fn mode_button<'a, M: Clone + 'a>(t: &'a Tokens, tree: bool, message: M) -> Element<'a, M> {
-    let (label, hint) = if tree {
-        ("List", "show flat list (T)")
+/// List view toggle for the narrow file panes: one `≡` glyph, lit for the
+/// flat list, dim while folders are shown. `on(tree)` sets the mode.
+pub fn mode_button<'a, M: Clone + 'a>(
+    t: &'a Tokens,
+    tree: bool,
+    on: impl Fn(bool) -> M,
+) -> Element<'a, M> {
+    let hint = if tree {
+        "flat list: off — click to list files without folders (T)"
     } else {
-        ("Tree", "show directory tree (T)")
+        "flat list: on — click to group files by folder (T)"
     };
     widgets::tip(
         t,
-        widgets::text_button(t, label, None, Some(message)),
+        iced::widget::button(widgets::mono(t, MODE_GLYPH))
+            .padding(iced::Padding::from([1, 5]))
+            .style(style::mode_toggle(t, !tree))
+            .on_press(on(!tree)),
         hint.into(),
     )
 }
+
+/// Glyph of [`mode_button`].
+pub const MODE_GLYPH: &str = "≡";
 
 #[cfg(test)]
 mod tests {

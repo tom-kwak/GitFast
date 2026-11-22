@@ -1404,7 +1404,7 @@ impl App {
                 );
                 lines.push("history ⌘F finds a file · ↑/↓ move · Enter shows the commits that changed it · Esc closes".into());
                 lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());
-                lines.push("working tree ⌘-click / ⇧-click / ⇧↑/↓ selects several files · right-click, Space or d acts on all · Esc clears".into());
+                lines.push("working tree ⌘-click / ⇧-click / ⇧↑/↓ selects several files · ⌘A all · right-click, Space or d acts on all · Esc clears".into());
                 lines.push("file viewer / blame ⌘F find · Enter / ⌘G next · ⇧Enter / ⌘⇧G previous · Esc closes search".into());
                 lines.push(
                     "click a ref for its history · click diff lines to stage just those".into(),

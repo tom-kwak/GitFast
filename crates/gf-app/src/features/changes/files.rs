@@ -52,6 +52,14 @@ pub struct FileLists {
 }
 
 impl FileLists {
+    /// Every listed file, folded or not.
+    pub fn paths(&self, entries: &[StatusEntry]) -> BTreeSet<PathBuf> {
+        self.files
+            .iter()
+            .map(|f| entries[f.entry].path().clone())
+            .collect()
+    }
+
     /// Index files by path so staging does not move a row. A path may have
     /// separate entries when it was deleted in the index and recreated.
     pub fn new(entries: &[StatusEntry]) -> Self {
@@ -389,7 +397,7 @@ impl State {
 
     pub(super) fn files_view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
         let t = cx.tokens;
-        let mode = file_tree::mode_button(t, cx.file_tree, Message::SetTree(!cx.file_tree));
+        let mode = file_tree::mode_button(t, cx.file_tree, Message::SetTree);
         let Some(snap) = cx.snapshot else {
             return widgets::panel_with_action(
                 t,

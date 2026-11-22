@@ -20,6 +20,7 @@ use iced_test::runtime::{self, Action};
 use iced_test::selector::Candidate;
 
 use super::*;
+use crate::widgets::file_tree;
 
 const WINDOW: Size = Size::new(1280.0, 820.0);
 
@@ -1445,9 +1446,9 @@ async fn working_tree_defaults_to_list_and_tree_folds_all_files_in_a_folder() {
         .await,
     )
     .await;
-    assert!(ui.shows("[ Tree ]"));
+    assert!(!ui.app.settings.appearance.working_tree_dirs);
     assert!(!ui.shows("STAGED ("));
-    let _ = ui.click("[ Tree ]").await;
+    let _ = ui.click(file_tree::MODE_GLYPH).await;
     assert!(ui.shows("staged.txt"));
     assert!(ui.shows("lib.rs"));
     assert!((file_status_x(&ui, "b.txt", "A") - file_status_x(&ui, "staged.txt", "A")).abs() < 1.0);
@@ -1475,7 +1476,7 @@ async fn working_tree_defaults_to_list_and_tree_folds_all_files_in_a_folder() {
         .expect("Enter expands the focused folder");
     let _ = ui.send(Message::Changes(moved)).await;
     assert!(ui.shows("staged.txt"));
-    let _ = ui.click("[ List ]").await;
+    let _ = ui.click(file_tree::MODE_GLYPH).await;
     let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
     assert!(!saved.appearance.working_tree_dirs);
     assert!(saved.appearance.history_file_dirs);
@@ -1507,7 +1508,7 @@ async fn working_tree_arrows_skip_open_folders_and_minus_folds_the_current_one()
         .await,
     )
     .await;
-    let _ = ui.click("[ Tree ]").await;
+    let _ = ui.click(file_tree::MODE_GLYPH).await;
     let selected =
         |m: &Option<M>, name: &str| matches!(m, Some(M::Select(path, _)) if path.ends_with(name));
     // Rows: src/ · staged/deep/ · staged.txt · lib.rs · then the root files.
@@ -1597,6 +1598,19 @@ async fn working_tree_shift_click_marks_files_for_one_menu_and_esc_clears_them()
         .await;
     let _ = ui.right_click("x1.txt").await;
     assert!(ui.shows("2 files selected"));
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+
+    // ⌘A in the file list marks every changed file.
+    let _ = ui.send(Message::Key(Shortcut::SelectAll)).await;
+    let snap = ui
+        .app
+        .active_tab()
+        .and_then(|tab| tab.snapshot.clone())
+        .expect("status");
+    let all = snap.change_files.paths(&snap.status.entries).len();
+    assert!(all > 3, "the fixture's own changes too");
+    let _ = ui.right_click("x2.txt").await;
+    assert!(ui.shows(&format!("{all} files selected")));
 }
 
 #[tokio::test]
@@ -1609,7 +1623,7 @@ async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() 
     })
     .await;
     let _ = ui.click("move source file").await;
-    assert!(ui.shows("[ List ]"));
+    assert!(ui.app.settings.appearance.history_file_dirs);
     let labels: Vec<_> = ui
         .targets()
         .into_iter()
@@ -1638,7 +1652,7 @@ async fn history_tree_places_renames_under_the_destination_and_opens_the_diff() 
     );
     let _ = ui.click("moved/deep/target/").await;
     assert!(!ui.shows("lib.rs → lib_new.rs"));
-    let _ = ui.click("[ List ]").await;
+    let _ = ui.click(file_tree::MODE_GLYPH).await;
     assert!(ui.shows("lib_new.rs"));
 }
 
@@ -3424,12 +3438,39 @@ async fn rebase_rows_cannot_move_past_the_ends() {
 }
 
 #[tokio::test]
+async fn commit_button_counts_the_staged_files() {
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            r.write("one.txt", "1\n");
+            r.write("two.txt", "2\n");
+            r.git(&["add", "one.txt", "two.txt"]);
+        })
+        .await,
+    )
+    .await;
+    let staged = ui
+        .app
+        .active_tab()
+        .and_then(|t| t.snapshot.as_deref())
+        .expect("status")
+        .staged_count();
+    assert!(staged >= 2);
+    assert!(ui.shows(&format!("[ Commit {staged} ]")));
+
+    let _ = ui
+        .send(Message::Changes(changes::Message::UnstageAll))
+        .await;
+    ui.settle();
+    assert!(ui.shows("[ Commit ]"), "nothing staged: no count");
+}
+
+#[tokio::test]
 async fn a_flash_does_not_move_the_window_contents() {
     let mut ui = working_tree(Ui::open().await).await;
     let commit = |ui: &Ui| {
         ui.targets()
             .into_iter()
-            .find(|t| t.label == "[ Commit ]")
+            .find(|t| t.label.starts_with("[ Commit"))
             .expect("commit button")
             .at
     };
