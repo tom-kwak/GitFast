@@ -5,8 +5,11 @@ use std::ffi::OsString;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
+use std::cell::RefCell;
+
+use iced::widget::canvas::{self, Geometry, LineJoin, Path as CanvasPath, Stroke};
 use iced::widget::{row, space, text::Wrapping};
-use iced::{Element, Length};
+use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
 use crate::theme::Tokens;
 use crate::widgets;
@@ -208,6 +211,94 @@ pub fn indent(t: &Tokens, depth: usize) -> Length {
     Length::Fixed(t.cols(2 * depth))
 }
 
+/// Line-drawn folder glyph, one text cell high so it sits among the
+/// monospace text: a closed folder, or one whose front tilts open.
+struct FolderIcon {
+    open: bool,
+    color: Color,
+}
+
+/// What the cached geometry was drawn from; the virtual list reuses row
+/// widgets for other folders as it scrolls.
+#[derive(Default)]
+struct IconCache {
+    cache: canvas::Cache,
+    drawn: RefCell<Option<(bool, Color)>>,
+}
+
+impl<M> canvas::Program<M> for FolderIcon {
+    type State = IconCache;
+
+    fn draw(
+        &self,
+        state: &IconCache,
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = (self.open, self.color);
+        if *state.drawn.borrow() != Some(key) {
+            state.cache.clear();
+            *state.drawn.borrow_mut() = Some(key);
+        }
+        vec![state.cache.draw(renderer, bounds.size(), |frame| {
+            // Drawn on a 12×10 grid, centered and scaled to the bounds.
+            let s = (bounds.width / 12.0).min(bounds.height / 10.0);
+            let (ox, oy) = (
+                (bounds.width - 12.0 * s) / 2.0,
+                (bounds.height - 10.0 * s) / 2.0,
+            );
+            let p = |x: f32, y: f32| Point::new(ox + x * s, oy + y * s);
+            let stroke = Stroke::default()
+                .with_color(self.color)
+                .with_width(1.1_f32.max(s * 0.9))
+                .with_line_join(LineJoin::Round);
+            if self.open {
+                let back = CanvasPath::new(|b| {
+                    b.move_to(p(0.6, 9.2));
+                    b.line_to(p(0.6, 1.4));
+                    b.line_to(p(4.2, 1.4));
+                    b.line_to(p(5.4, 2.8));
+                    b.line_to(p(10.0, 2.8));
+                    b.line_to(p(10.0, 4.4));
+                });
+                let front = CanvasPath::new(|b| {
+                    b.move_to(p(0.6, 9.2));
+                    b.line_to(p(2.4, 4.4));
+                    b.line_to(p(11.6, 4.4));
+                    b.line_to(p(9.8, 9.2));
+                    b.close();
+                });
+                frame.stroke(&back, stroke);
+                frame.stroke(&front, stroke);
+            } else {
+                let closed = CanvasPath::new(|b| {
+                    b.move_to(p(0.6, 1.4));
+                    b.line_to(p(4.2, 1.4));
+                    b.line_to(p(5.4, 2.8));
+                    b.line_to(p(11.2, 2.8));
+                    b.line_to(p(11.2, 9.2));
+                    b.line_to(p(0.6, 9.2));
+                    b.close();
+                });
+                frame.stroke(&closed, stroke);
+            }
+        })]
+    }
+}
+
+/// Folder glyph sized to the font, in the folder color.
+fn folder_icon<'a, M: 'a>(t: &Tokens, open: bool) -> Element<'a, M> {
+    canvas::Canvas::new(FolderIcon {
+        open,
+        color: t.folder(),
+    })
+    .width(Length::Fixed(t.font_size.round()))
+    .height(Length::Fixed((t.font_size * 0.85).round()))
+    .into()
+}
+
 pub fn folder<'a, M: Clone + 'a>(
     t: &'a Tokens,
     label: &Path,
@@ -220,6 +311,8 @@ pub fn folder<'a, M: Clone + 'a>(
     let line = row![
         space().width(indent(t, depth)),
         widgets::colored(t, if open { "▾ " } else { "▸ " }, t.folder()),
+        folder_icon(t, open),
+        space().width(Length::Fixed(t.cols(1) * 0.6)),
         // The trailing slash marks a folder even where colors are hard to tell apart.
         widgets::colored(t, format!("{}/", label.display()), t.folder()).wrapping(Wrapping::None),
         widgets::dim(t, format!(" ({count})")).wrapping(Wrapping::None),
