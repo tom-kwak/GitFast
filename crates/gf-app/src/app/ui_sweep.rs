@@ -719,7 +719,18 @@ pub(super) struct Ui {
     pub fixture: Fixture,
     /// More repositories open in other tabs.
     pub others: Vec<Fixture>,
+    /// Whether [`Self::run`] works out what a click changed (the window,
+    /// the app, the repository). Off while the sweep only gets back to a
+    /// screen it already reached once: those clicks are not checked, and
+    /// measuring them was most of the sweep's time.
+    measure: bool,
     _home: tempfile::TempDir,
+}
+
+std::thread_local! {
+    /// Set while [`reach`] rebuilds a screen: the [`Ui`]s made then start
+    /// with [`Ui::measure`] off. (Tests run on one thread each.)
+    static REACHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl Ui {
@@ -760,6 +771,7 @@ impl Ui {
             app,
             fixture,
             others: Vec::new(),
+            measure: !REACHING.get(),
             _home: home,
         }
     }
@@ -773,6 +785,15 @@ impl Ui {
     /// and after (a click must show something).
     async fn run(&mut self, messages: Vec<Message>, look: bool) -> Effects {
         let mut fx = Effects::default();
+        if !self.measure {
+            let mut tasks = VecDeque::new();
+            for m in messages {
+                fx.messages.push(short(&m));
+                tasks.push_back(self.handle_native(m, &mut fx));
+            }
+            self.run_tasks(tasks, &mut fx).await;
+            return fx;
+        }
         let frame = self._home.path().join("frame.png");
         let _ = std::fs::remove_file(self.frame_file(&frame));
         if look {
@@ -870,19 +891,38 @@ impl Ui {
     /// The repository as git sees it: refs, index and working tree, stashes.
     fn repo_state(&self) -> String {
         let r = &self.fixture.repo;
-        [
-            r.git(&["for-each-ref", "--format=%(refname) %(objectname)"]),
-            // Detached (bisect, rebase): no branch, not an error.
-            String::from_utf8_lossy(
-                &r.git_output(&["symbolic-ref", "-q", "--short", "HEAD"])
-                    .stdout,
-            )
-            .into_owned(),
-            r.git(&["status", "--porcelain=v2", "--untracked-files=all"]),
-            r.git(&["stash", "list"]),
-            r.git(&["config", "--local", "--list"]),
+        // The git commands run at the same time: every click runs them twice.
+        let children = [
+            &["for-each-ref", "--format=%(refname) %(objectname)"][..],
+            &["status", "--porcelain=v2", "--untracked-files=all"],
+            &["stash", "list"],
+            &["config", "--local", "--list"],
         ]
-        .join("\n")
+        .map(|args| {
+            let child = r
+                .command()
+                .args(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("run git");
+            (args, child)
+        });
+        // The branch HEAD names (`symbolic-ref`); detached (bisect, rebase):
+        // none, not an error.
+        let head = std::fs::read_to_string(r.path().join(".git/HEAD")).expect("read HEAD");
+        let mut state = vec![
+            head.strip_prefix("ref: ")
+                .unwrap_or_default()
+                .trim_end()
+                .to_owned(),
+        ];
+        for (args, child) in children {
+            let out = child.wait_with_output().expect("run git");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            state.push(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        state.join("\n")
     }
 
     fn simulator(&self) -> iced_test::Simulator<'_, Message> {
@@ -1155,8 +1195,9 @@ where
     }]);
     let mut seen_screens = std::collections::HashSet::new();
     let mut tried = std::collections::HashSet::new();
+    let mut first = true;
     while let Some(screen) = screens.pop_front() {
-        let Some(base) = reach(&build, &screen.path).await else {
+        let Some(base) = reach(&build, &screen.path, std::mem::take(&mut first)).await else {
             continue;
         };
         let targets = base.targets();
@@ -1197,7 +1238,7 @@ where
         drop(base);
         for (target, button, button_name, key) in plan {
             let _ = tried.insert(key.clone());
-            let Some(mut ui) = reach(&build, &screen.path).await else {
+            let Some(mut ui) = reach(&build, &screen.path, false).await else {
                 continue;
             };
             let fx = ui.click_at(&target, button).await;
@@ -1255,20 +1296,32 @@ where
     silent
 }
 
-/// The base screen, then the clicks along `path`.
-async fn reach<F, Fut>(build: &F, path: &Path) -> Option<Ui>
+/// The base screen, then the clicks along `path`; `first` for the sweep's
+/// first build.
+async fn reach<F, Fut>(build: &F, path: &Path, first: bool) -> Option<Ui>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Ui>,
 {
-    let mut ui = build().await;
-    ui.settle();
-    for (label, button) in path {
-        let targets = ui.targets();
-        let target = targets.iter().find(|t| &t.label == label)?.clone();
-        let _ = ui.click_at(&target, *button).await;
+    // Only the first build is measured (it checks what `build` asserts
+    // about its clicks); later ones only get back to the same screen.
+    REACHING.set(!first);
+    let ui = async {
+        let mut ui = build().await;
         ui.settle();
+        for (label, button) in path {
+            let targets = ui.targets();
+            let target = targets.iter().find(|t| &t.label == label)?.clone();
+            let _ = ui.click_at(&target, *button).await;
+            ui.settle();
+        }
+        Some(ui)
     }
+    .await;
+    REACHING.set(false);
+    let mut ui = ui?;
+    // The click the sweep makes next is checked.
+    ui.measure = true;
     Some(ui)
 }
 
@@ -2354,21 +2407,24 @@ async fn sweep_left_changes() {
 async fn drag_selected() -> Ui {
     let mut ui = a_txt_shown().await;
     ui.settle();
-    let lines: Vec<Target> = ui
-        .targets()
-        .into_iter()
-        .filter(|t| {
-            ui.press(t.at, mouse::Button::Left)
-                .iter()
-                .any(|m| matches!(m, Message::LocalDiff(diff_view::Message::LineClicked(..))))
-        })
-        .collect();
+    // The first and last diff lines: pressed from each end, not every
+    // text on screen (each press lays the window out again).
+    let is_line = |t: &&Target| {
+        ui.press(t.at, mouse::Button::Left)
+            .iter()
+            .any(|m| matches!(m, Message::LocalDiff(diff_view::Message::LineClicked(..))))
+    };
+    let targets = ui.targets();
     let (first, last) = (
-        lines.first().expect("diff lines"),
-        lines.last().expect("diff lines"),
+        targets.iter().find(is_line).expect("diff lines"),
+        targets.iter().rev().find(is_line).expect("diff lines"),
     );
     let fx = ui.drag(first.at, last.at).await;
-    assert!(fx.screen_changed, "dragging selects lines: {fx:?}");
+    // Unmeasured while a sweep gets back here (checked on its first build).
+    assert!(
+        !ui.measure || fx.screen_changed,
+        "dragging selects lines: {fx:?}"
+    );
     ui
 }
 
