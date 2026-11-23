@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gf_core::model::{Branch, RefKind, StashEntry, Tag};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, row, space, text_input};
+use iced::widget::{button, column, container, row, space, text_input};
 use iced::{Element, Length, Padding};
 
 use crate::feature::{Cx, Feature, Update};
@@ -207,6 +207,16 @@ const LIST_ID: &str = "gf-refs";
 
 fn row_height(t: &Tokens) -> f32 {
     (t.font_size * 1.8).round()
+}
+
+/// Gap between a header's `▾` and its label.
+const ARROW_GAP: f32 = 6.0;
+
+/// Lead-in of a row under a section header: past the header's `▾` and gap,
+/// so items line up with the label and each section reads as one block;
+/// folders nest two columns further per level.
+fn indent(t: &Tokens, depth: usize) -> iced::widget::Space {
+    space().width(Length::Fixed(t.cols(1 + depth * 2) + ARROW_GAP))
 }
 
 /// One row of the flattened tree.
@@ -530,10 +540,12 @@ impl State {
                     SideRow::Lfs(p) => columns(p),
                     SideRow::Hint(h) => columns(h),
                     SideRow::UnbornBranch(name) => columns(name) + columns("●  (no commits yet)"),
-                    SideRow::Header(..) => 18,
+                    SideRow::Header(..) => 16,
                 })
                 .max()
-                .unwrap_or(0);
+                .unwrap_or(0)
+                // Every row under a header is indented (`indent`).
+                + 2;
             (rows, name_cols)
         })
     }
@@ -780,13 +792,14 @@ impl State {
         } else {
             "▾"
         };
-        let toggle = button(row![dim(t, arrow), dim(t, format!("{label} ({count})"))].spacing(6))
-            .padding(Padding::from([1, 6]))
-            .style(style::row_button(
-                t,
-                self.cursor == Some(Fold::Section(section)),
-            ))
-            .on_press(Message::Toggle(section));
+        let toggle =
+            button(row![dim(t, arrow), dim(t, format!("{label} ({count})"))].spacing(ARROW_GAP))
+                .padding(Padding::from([1, 6]))
+                .style(style::row_button(
+                    t,
+                    self.cursor == Some(Fold::Section(section)),
+                ))
+                .on_press(Message::Toggle(section));
         match add {
             Some((action, hint)) => row![
                 toggle,
@@ -811,7 +824,7 @@ impl State {
         let arrow = if self.is_folded(&fold) { "▸" } else { "▾" };
         let name = path.rsplit('/').next().unwrap_or(path);
         let line = row![
-            space().width(Length::Fixed(t.cols(depth * 2))),
+            indent(t, depth),
             dim(t, arrow),
             colored(t, format!("{name}/"), t.fg).wrapping(Wrapping::None),
             dim(t, format!("({count})")),
@@ -851,7 +864,7 @@ impl State {
             t.branch()
         };
         let mut line = row![
-            space().width(Length::Fixed(t.cols(depth * 2))),
+            indent(t, depth),
             colored(t, marker, marker_color),
             colored(t, leaf, name_color).wrapping(Wrapping::None)
         ]
@@ -907,6 +920,7 @@ impl State {
     fn tag_row<'a>(&self, t: &'a Tokens, tag: &'a Tag) -> Element<'a, Message> {
         let full = tag.name.as_str();
         let line = row![
+            indent(t, 0),
             colored(t, "◆", t.tag()),
             colored(t, tag.name.short(), t.tag()).wrapping(Wrapping::None)
         ]
@@ -935,6 +949,7 @@ impl State {
 
     fn stash_row<'a>(&self, t: &'a Tokens, s: &'a StashEntry) -> Element<'a, Message> {
         let line = row![
+            indent(t, 0),
             colored(t, "≡", t.accent()),
             colored(t, s.message.clone(), t.fg).wrapping(Wrapping::None)
         ]
@@ -965,6 +980,7 @@ impl State {
             S::Conflict => ("✗", t.error(), "merge conflict"),
         };
         let line = row![
+            indent(t, 0),
             colored(t, mark, color),
             colored(t, m.path.display().to_string(), t.fg).wrapping(Wrapping::None),
             dim(
@@ -991,6 +1007,7 @@ impl State {
 
     fn lfs_row<'a>(&self, t: &'a Tokens, pattern: &'a str) -> Element<'a, Message> {
         let line = row![
+            indent(t, 0),
             colored(t, "▣", t.tag()),
             colored(t, pattern.to_owned(), t.fg).wrapping(Wrapping::None)
         ]
@@ -1438,10 +1455,15 @@ impl State {
                     SideRow::Stash(s) => self.stash_row(t, s),
                     SideRow::Submodule(m) => self.submodule_row(t, m),
                     SideRow::Lfs(p) => self.lfs_row(t, p),
-                    SideRow::Hint(h) => widgets::empty_hint(t, *h),
-                    SideRow::UnbornBranch(name) => {
-                        colored(t, format!("  ● {name} (no commits yet)"), t.head()).into()
-                    }
+                    SideRow::Hint(h) => container(row![indent(t, 0), dim(t, *h)])
+                        .padding(Padding::from([4, 6]))
+                        .into(),
+                    SideRow::UnbornBranch(name) => container(row![
+                        indent(t, 0),
+                        colored(t, format!("● {name} (no commits yet)"), t.head())
+                    ])
+                    .padding(Padding::from([1, 6]))
+                    .into(),
                 };
                 match Item::of(&rows[i]) {
                     Some(Item::Pick(sel, _)) => iced::widget::mouse_area(el)
