@@ -3535,6 +3535,55 @@ async fn dragging_the_divider_resizes_the_file_list_and_remembers_it() {
     );
 }
 
+#[tokio::test]
+async fn dragging_the_refs_divider_resizes_the_refs_panel_and_remembers_it() {
+    let mut ui = working_tree(Ui::open().await).await;
+    ui.settle();
+    // The divider is the right edge of the REFS panel: scan for where a
+    // press starts a resize.
+    let y = 200.0;
+    let x = (100..900)
+        .map(|x| x as f32)
+        .find(|&x| {
+            ui.press(Point::new(x, y), mouse::Button::Left)
+                .iter()
+                .any(|m| matches!(m, Message::ResizeRefsStart))
+        })
+        .expect("the refs divider");
+    let before = ui.app.settings.appearance.refs_cols;
+    let fx = ui
+        .drag_through(Point::new(x, y), Point::new(x + 80.0, y))
+        .await;
+    let after = ui.app.settings.appearance.refs_cols;
+    assert!(after > before, "{before} → {after}: {fx:?}");
+    let saved = gf_config::Settings::load(&ui.app.paths.settings_file()).expect("saved");
+    assert!((saved.appearance.refs_cols - after).abs() < f32::EPSILON);
+
+    // A double-click puts it back.
+    ui.settle();
+    let at = Point::new(x + 80.0, y);
+    let messages = {
+        let mut sim = ui.simulator();
+        sim.point_at(at);
+        let click = [
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ];
+        let _ = sim.simulate(
+            std::iter::once(iced::Event::Mouse(mouse::Event::CursorMoved {
+                position: at,
+            }))
+            .chain(click.clone())
+            .chain(click),
+        );
+        sim.into_messages().collect()
+    };
+    let _ = ui.run(messages, false).await;
+    assert!(
+        (ui.app.settings.appearance.refs_cols - gf_config::DEFAULT_REFS_COLS).abs() < f32::EPSILON
+    );
+}
+
 // Fast checks for buttons the sweep found doing nothing (these run with
 // every `cargo test`; the sweeps above are `--ignored`).
 

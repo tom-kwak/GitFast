@@ -756,19 +756,23 @@ impl State {
         };
         let mut badges: Vec<Element<'a, Message>> = tags.into_iter().map(|(e, _)| e).collect();
         badges.push(status);
+        let name = c.name();
+        let shown = format::truncate_columns(&name, name_cols);
+        let where_tip = format!("{} · right-click for actions", format::tilde(&c.tree.path));
+        // A name cut with `…` shows whole in the tooltip.
+        let name_tip = if shown == name {
+            where_tip
+        } else {
+            format!("{name}\n{where_tip}")
+        };
         let first = line(
             t,
             big,
             mark,
             widgets::tip(
                 t,
-                colored(
-                    t,
-                    format::truncate_columns(&c.name(), name_cols),
-                    name_color,
-                )
-                .wrapping(Wrapping::None),
-                format!("{} · right-click for actions", format::tilde(&c.tree.path)),
+                colored(t, shown, name_color).wrapping(Wrapping::None),
+                name_tip,
             ),
             badges,
         );
@@ -797,8 +801,14 @@ impl State {
                 }
                 let room = cols.saturating_sub(marks.iter().map(|(_, n)| n + 1).sum::<usize>());
                 let on_base = self.base.is_some() && c.tree.branch == self.base;
-                let parts = fit_parts(base_parts(s, on_base), room);
+                let all = base_parts(s, on_base);
+                let full: String = all.iter().map(|(p, _)| p.as_str()).collect();
+                let parts = fit_parts(all, room);
                 let mut tip = Vec::new();
+                // A line cut to fit shows whole in the tooltip.
+                if parts.iter().map(|(p, _)| p.as_str()).collect::<String>() != full {
+                    tip.push(full);
+                }
                 if let Some(base) = &s.base {
                     if s.merged() {
                         tip.push(format!("its commits are in {base}: it can go"));
