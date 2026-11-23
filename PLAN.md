@@ -1,183 +1,121 @@
-# gf — Rust Git GUI Client 개발 계획
+# gf — 제품 계획
 
-> 대상: macOS 네이티브 앱(.app / .dmg) 우선, 이후 Windows·Linux 확장
-> 언어: Rust (전 계층)
+> 대상: macOS · Windows 데스크톱 앱(현재), Linux(예정)
+> 언어: Rust (전 계층) · UI: iced 0.14
+>
+> 이 문서는 **제품 방향과 남은 계획**을 담습니다. 구조와 코딩 규칙은 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md), 작업 흐름은 [AGENTS.md](AGENTS.md)를 봅니다. 코드가 참조하는 절 번호(§4-1, §4-2, §10)는 바꾸지 않습니다.
 
 ---
 
-## 1. 핵심 기술 결정
+## 1. 기술 선택
 
-| 영역 | 선택 | 이유 |
-|---|---|---|
-| UI 프레임워크 | **iced** (권장) / 대안: gpui | 순수 Rust, macOS·Windows·Linux 공통 지원, Elm 아키텍처(State/Message/update/view)라 기능을 모듈 단위로 나누기 좋음. 커밋 그래프·diff 같은 커스텀 위젯은 `canvas`/custom widget으로 구현 |
-| Git 쓰기·실행 | **시스템 `git` CLI 호출** | "모든 git 명령어 지원"을 만족하는 유일한 방법. hooks, credential helper, LFS, GPG/SSH signing, `.gitconfig`가 사용자의 터미널과 100% 동일하게 동작 |
-| Git 읽기(고속) | **gix (gitoxide)** | 대형 저장소에서 log/graph/status/blame 조회를 프로세스 스폰 없이 빠르게 처리. 실패 시 CLI로 폴백 |
-| 비동기 | tokio | git 프로세스, HTTP, 파일 감시를 UI 스레드와 분리 |
-| HTTP | reqwest (rustls) | GitLab/GitHub API |
-| 자격증명 저장 | keyring | macOS Keychain / Windows Credential Manager / Linux Secret Service 공통 추상화 |
-| 파일 감시 | notify | 작업 트리 변경 시 status 자동 갱신 |
-| 설정 저장 | serde + toml, directories | OS별 표준 설정 경로 |
-| Diff 하이라이트 | syntect(Oniguruma) + two-face | VS Code와 같은 TextMate 문법·정규식 엔진. 내장 문법 200여 종 + `<config>/syntaxes/`에 VS Code `*.tmLanguage.json`/`*.sublime-syntax`를 넣으면 자동 로드(tmLanguage는 자체 변환기로 sublime-syntax 모델로 변환) |
-| 내장 터미널 | alacritty_terminal (+ 자체 렌더) | 구조화 UI로 표현 못 하는 명령의 최종 폴백 |
-| 패키징 | cargo-packager | .app/.dmg 생성, 이후 .msi/.deb/AppImage까지 동일 도구로 확장 |
-| 로깅 | tracing | 실행된 git 명령/출력 전부를 "명령 로그" 패널에 표시 |
-
-> 사전 준비: 현재 머신에 Rust 툴체인이 없음 → `rustup` 설치 필요.
+| 영역 | 선택 | 상태 | 이유 |
+|---|---|---|---|
+| UI | iced 0.14 (wgpu) | 사용 중 | 순수 Rust, 크로스플랫폼, Elm 구조(State/Message/update/view)라 피처를 모듈로 나누기 좋음. 그래프·diff는 canvas와 자체 위젯 |
+| git 쓰기·실행 | 시스템 `git` CLI | 사용 중 | hooks, credential helper, LFS, 서명, `.gitconfig`가 사용자의 터미널과 같게 동작 |
+| git 조회·ref 편집 | gix (gitoxide) | 사용 중 | 프로세스 없이 빠르게. 결과가 같을 때만 쓰고 안 되면 CLI로 폴백([docs/GIX_MIGRATION.md](docs/GIX_MIGRATION.md)) |
+| 비동기 | tokio | 사용 중 | git 프로세스와 파일 I/O를 UI 스레드에서 분리 |
+| 파일 감시 | notify | 사용 중 | 작업 트리가 바뀌면 필요한 부분만 다시 읽음 |
+| 설정 | serde + toml, directories | 사용 중 | OS별 표준 경로(`GF_HOME`으로 한 폴더에 모을 수 있음) |
+| 구문 강조 | syntect(Oniguruma) + two-face | 사용 중 | VS Code와 같은 TextMate 문법. `<config>/syntaxes/`의 `*.tmLanguage.json`·`*.sublime-syntax`를 자동 로드 |
+| 로깅 | tracing | 사용 중 | 실행한 git 명령과 출력은 명령 로그 패널에 표시 |
+| 패키징 | `scripts/package-macos.sh`(universal .dmg), `scripts/package-windows.ps1`(.zip) | 사용 중 | 설치는 `install.sh` / `install.ps1`, 릴리스는 `release.yml` |
+| HTTP | reqwest (rustls) | M7 예정 | GitLab/GitHub API |
+| 자격 증명 | keyring | M7 예정 | macOS Keychain / Windows Credential Manager. 지금은 git credential helper에 맡김 |
+| 내장 터미널 | alacritty_terminal | M5 예정 | 구조화 UI로 못 하는 명령의 마지막 폴백 |
 
 ---
 
 ## 2. 아키텍처 원칙
 
-1. **UI와 코어 완전 분리** — 코어 crate들은 UI 의존성 0. UI 프레임워크 교체(iced→gpui)나 CLI/테스트 하네스가 코어를 그대로 재사용.
-2. **trait 기반 확장 지점** — Git 백엔드, 호스팅 프로바이더, 기능(Feature) 모듈을 모두 trait으로 정의하고 레지스트리에 등록. 새 기능 = 새 파일/crate 추가 + 등록 한 줄.
-3. **명령 = 데이터** — 모든 git 명령은 `CommandSpec`(이름, 옵션, 인자 스키마, 위험도)으로 기술. UI 폼·커맨드 팔레트·단축키·커스텀 액션이 같은 스펙을 공유.
-4. **모든 실행은 하나의 Runner를 통과** — 로그, 취소, 진행률, 에러 파싱, 위험 명령 확인, Undo 스냅샷을 한 곳에서 처리.
-5. **플랫폼 의존 코드는 `platform` 모듈에 격리** — 메뉴바, Keychain, Finder/에디터 열기 등. `cfg(target_os)` 분기는 여기에만.
+1. **UI와 코어 완전 분리**: 코어 크레이트(gf-core, gf-git, gf-config, gf-watch)는 UI에 의존하지 않습니다. gf-app은 코어를 부르기만 합니다.
+2. **trait 기반 확장 지점**: git 백엔드(영역별 `XxxOps`), 피처(`Feature`), 이후 호스팅 프로바이더를 trait으로 정의합니다. 새 기능은 새 파일/폴더 하나와 연결 몇 줄로 끝납니다.
+3. **모든 실행은 하나의 Runner를 거침**: `GitRunner`가 로그, 취소, 진행률, 에러 진단을 한 곳에서 처리합니다. gix로 한 쓰기도 명령 로그에 남깁니다.
+4. **명령 = 데이터 (M5)**: 모든 git 명령을 `CommandSpec`(이름, 옵션, 인자, 위험도)으로 기술해 폼·팔레트·단축키·커스텀 액션이 같은 스펙을 공유합니다.
+5. **플랫폼 의존 코드는 한 곳에**: gf-app은 `src/platform/`, 하위 크레이트는 `gf_core::tool_path`. 피처 코드에는 `cfg!`가 없습니다.
+6. **성능이 최우선**: 바뀐 것만 다시 읽고, 보이는 것만 그립니다(DEVELOPMENT.md §7).
 
 ---
 
-## 3. Cargo 워크스페이스 구조
+## 3. 워크스페이스
 
-```
-gf/
-├─ Cargo.toml                    # workspace
-├─ crates/
-│  ├─ gf-core/                   # 공통 도메인: 모델(Commit, Branch, Remote, FileStatus…), 에러, 이벤트 버스, ID
-│  ├─ gf-git/                    # Git 백엔드
-│  │  ├─ src/backend.rs          #   trait GitReader / GitWriter
-│  │  ├─ src/cli/                #   CLI 실행기: runner.rs, progress.rs, env.rs(askpass/credential)
-│  │  │  └─ parse/               #   porcelain 파서: status_v2.rs, log.rs, diff.rs, branch.rs, stash.rs, blame.rs …
-│  │  ├─ src/gix/                #   gitoxide 기반 고속 조회
-│  │  └─ src/ops/                #   고수준 연산 (파일 단위 분리)
-│  │     ├─ status.rs  commit.rs  branch.rs  merge.rs  rebase.rs  cherry_pick.rs
-│  │     ├─ stash.rs   tag.rs     remote.rs  fetch_pull_push.rs  reset_revert.rs
-│  │     ├─ submodule.rs  worktree.rs  lfs.rs  bisect.rs  blame.rs  reflog.rs  clean.rs …
-│  ├─ gf-commands/               # 명령 레지스트리
-│  │  ├─ src/spec.rs             #   CommandSpec / OptionSpec / ArgSpec / RiskLevel
-│  │  ├─ src/registry.rs         #   등록·검색 (팔레트용 퍼지 검색)
-│  │  └─ specs/*.toml            #   git 전체 서브커맨드 스펙 (git help -a 기반, 데이터 파일로 관리)
-│  ├─ gf-flow/                   # Git Flow
-│  │  ├─ src/config.rs           #   gitflow.* 설정 (git-flow-avh 호환 키)
-│  │  ├─ src/init.rs             #   초기화
-│  │  └─ src/{feature,release,hotfix,support,bugfix}.rs   # start/finish/publish/track/delete
-│  ├─ gf-hosting/                # 호스팅 추상화
-│  │  ├─ src/provider.rs         #   trait HostingProvider (+ 하위 trait: RepoApi, MergeRequestApi, PipelineApi)
-│  │  ├─ src/model.rs            #   공통 모델: RemoteRepo, MergeRequest, Note, Discussion, Approval, Pipeline
-│  │  └─ src/registry.rs         #   remote URL → provider 자동 매칭
-│  ├─ gf-hosting-gitlab/         # GitLab 구현 (MR 포함, self-hosted base URL 지원)
-│  ├─ gf-hosting-github/         # GitHub 구현 (1차: clone/repo 목록, PR은 trait만 맞춰 확장 예정)
-│  ├─ gf-auth/                   # 계정·토큰(keyring), OAuth(추후), SSH 키 관리, git credential helper 연동
-│  ├─ gf-config/                 # 앱 설정, 저장소 북마크/워크스페이스, 단축키, 테마
-│  ├─ gf-watch/                  # 파일 감시 → 이벤트 버스
-│  └─ gf-app/                    # iced 앱 (바이너리)
-│     ├─ src/main.rs
-│     ├─ src/app.rs              #   루트 State/Message 라우팅
-│     ├─ src/feature.rs          #   trait Feature { id, menu_items, commands, view, update, subscriptions }
-│     ├─ src/features/           #   기능별 모듈 (하나의 폴더 = 하나의 기능)
-│     │  ├─ repo_tabs/  sidebar/  history_graph/  changes/  diff/  commit/
-│     │  ├─ branches/   stash/    tags/  remotes/  submodules/  worktrees/
-│     │  ├─ merge_conflict/  interactive_rebase/  blame/  file_history/  reflog_undo/
-│     │  ├─ git_flow/   clone/    hosting_accounts/  merge_requests/
-│     │  ├─ command_palette/  command_runner/  terminal/  command_log/  settings/
-│     ├─ src/widgets/            #   재사용 위젯: commit_graph, diff_view, virtual_list, split_pane, toast
-│     ├─ src/theme/              #   라이트/다크, 색상 토큰
-│     ├─ src/i18n/               #   ko / en (fluent)
-│     └─ src/platform/           #   macos.rs / windows.rs / linux.rs
-├─ tests/fixtures/               # 테스트용 저장소 생성 스크립트
-└─ packaging/                    # 아이콘, Info.plist, 서명/공증 설정
-```
+크레이트 역할과 gf-app 내부 구조는 [DEVELOPMENT.md §2](docs/DEVELOPMENT.md)에 있습니다.
+`gf-commands`(M5), `gf-flow`(M6), `gf-hosting`·`gf-hosting-gitlab`·`gf-hosting-github`·`gf-auth`(M7)는 빈 자리만 있습니다. 사용을 시작할 때 루트 `Cargo.toml`의 주석을 풉니다.
 
 ---
 
-## 4. "모든 git 명령어" 지원 전략 (3단 구조)
+## 4. "모든 git 명령" 지원 전략 (3단 구조)
 
-| 단계 | 대상 | 방식 |
-|---|---|---|
-| 1. 전용 UI | 일상 명령 (status, add, commit, branch, checkout/switch, merge, rebase, cherry-pick, stash, tag, fetch/pull/push, reset, revert, log, diff, blame, submodule, worktree, lfs, bisect, clean, reflog 등) | 기능 모듈별 전용 화면, 드래그&드롭 |
-| 2. 스펙 기반 자동 폼 | 그 외 모든 서브커맨드 (`git help -a` 전체: gc, fsck, archive, bundle, notes, rerere, sparse-checkout, maintenance, filter-branch, replace, range-diff …) | `specs/*.toml`의 CommandSpec으로 옵션 폼 자동 생성 → 커맨드 팔레트에서 실행 |
-| 3. 폴백 | 스펙에 없는 플래그 조합, 외부 alias, 플러그인 명령 | 내장 터미널 / 직접 명령 입력 (자동완성 지원) |
+| 단계 | 대상 | 방식 | 상태 |
+|---|---|---|---|
+| 1. 전용 UI | 일상 명령(status, add, commit, branch, switch, merge, rebase, cherry-pick, stash, tag, fetch/pull/push, reset, revert, log, diff, blame, submodule, worktree, lfs, bisect, reflog 등) | 피처별 전용 화면 | 대부분 완료(M3·M4) |
+| 2. 스펙 기반 자동 폼 | 나머지 서브커맨드(gc, fsck, archive, bundle, notes, rerere, sparse-checkout, maintenance, range-diff …) | `CommandSpec`으로 옵션 폼 생성 → 커맨드 팔레트에서 실행 | M5 |
+| 3. 폴백 | 스펙에 없는 조합, alias, 플러그인 명령 | `gf ❯` 프롬프트에 직접 입력(지금 동작), 이후 내장 터미널 | 일부 완료 |
 
-- 실행 결과는 항상 **명령 로그 패널**에 실제 git 명령 그대로 노출 → 학습/디버깅에 유용.
-- `RiskLevel::Destructive`(reset --hard, push --force, clean -fd, branch -D 등)는 확인 다이얼로그 + 실행 전 자동 백업 ref 생성.
+- 실행 결과는 항상 **명령 로그**에 실제 git 명령 그대로 남깁니다.
+- 위험한 명령(reset --hard, push --force, clean -fd, branch -D 등)은 확인 다이얼로그를 거치고, 가능한 작업은 undo로 되돌릴 수 있게 합니다.
 
 ---
 
 ## 4-1. 디자인 방향: 터미널 스타일
 
-앱 전체를 **터미널처럼 보이고 느껴지게** 만든다 (M2 테마/위젯 단계에서 적용).
+앱 전체가 **터미널처럼 보이고 느껴지게** 만듭니다.
 
-- **폰트**: 전 화면 고정폭(monospace) 단일 폰트 (예: JetBrains Mono, SF Mono 폴백). 크기 단계 최소화
-- **색상**: 기본 다크 테마, ANSI 16색 기반 팔레트 (추가=green, 삭제=red, 브랜치=cyan, 태그=yellow, HEAD=magenta). 테마는 터미널 컬러 스킴처럼 교체 가능(Dracula, Solarized 등 프리셋)
-- **레이아웃**: 둥근 모서리·그림자·그라디언트 없음. 패널 구분은 1px 선 또는 박스 문자(`│ ─ ┌ ┐`) 느낌. 여백 최소, 정보 밀도 높게
-- **커밋 그래프**: `● │ ├─ ╮ ╯` 같은 문자 기반 그래프 스타일
-- **예외: 파일 트리 폴더 아이콘**: 글자 한 칸 크기의 선 폴더(열림/닫힘)를 canvas로 그린다. 글자처럼 테마 토큰(`t.folder()`) 색과 글꼴 크기를 따른다 (`widgets/file_tree.rs`)
-- **입력**: 하단 프롬프트형 명령줄(`gf ❯ `)을 기본 UI로 두고, 커맨드 팔레트·내장 터미널과 통합. 키보드 우선(vim 스타일 j/k 이동 옵션)
-- **상태 표시**: 상단/하단 status line (브랜치, ahead/behind, 진행 중 작업) — tmux/powerline 느낌
-- **버튼/다이얼로그**: `[ OK ]` `[ Cancel ]` 같은 텍스트형 버튼, 확인 다이얼로그도 TUI 박스 스타일
-- 구현: `gf-app/src/theme/`에 색상·폰트 토큰을 모으고, 모든 위젯은 토큰만 참조 → 스타일 변경이 한 곳에서 끝나도록
+- **폰트**: 전 화면 고정폭 단일 폰트(macOS 시스템 고정폭, Windows Cascadia Mono → Consolas). 크기 단계는 최소로
+- **색상**: 기본 다크, ANSI 16색 기반(추가=green, 삭제=red, 브랜치=cyan, 태그=yellow, HEAD=magenta). 프리셋(`gf-dark`, `gf-light`, `dracula`, `cd-dark`, `cd-light`)을 `:theme`으로 교체
+- **레이아웃**: 둥근 모서리·그림자·그라디언트 없음. 패널 구분은 1px 선이나 박스 문자(`│ ─ ┌ ┐`) 느낌. 여백은 적게, 정보는 촘촘하게
+- **커밋 그래프**: `● │ ├─ ╮ ╯` 같은 문자 기반
+- **예외 — 파일 트리 폴더 아이콘**: 글자 한 칸 크기의 선 폴더(열림/닫힘)를 canvas로 그립니다. 글자처럼 테마 토큰(`t.folder()`) 색과 글꼴 크기를 따릅니다(`widgets/file_tree.rs`)
+- **입력**: 하단 프롬프트(`gf ❯ `)가 기본 명령줄. 키보드 우선이지만 마우스도 1급(§4-2)
+- **상태 표시**: 상태줄에 브랜치, ahead/behind, 진행 중 작업
+- **버튼·다이얼로그**: `[ OK ]` `[ Cancel ]` 같은 텍스트 버튼, TUI 박스 스타일 다이얼로그
+- 색·폰트 토큰은 `gf-app/src/theme/`에 모으고, 모든 위젯은 토큰만 참조합니다
 
 ## 4-2. 사용자 상호작용 원칙 (모든 UI 작업에 적용)
 
-터미널 "느낌"이지만 사용성은 일반 GUI 이상이어야 한다.
+터미널 "느낌"이지만 사용성은 일반 GUI 이상이어야 합니다.
 
-1. **마우스와 키보드 모두 1급** — 모든 동작은 클릭으로도, 단축키/명령줄로도 가능. 터미널 스타일이라고 키보드 전용으로 만들지 않는다
-2. **발견 가능성** — 단축키는 버튼 라벨·툴팁·상태줄 힌트에 함께 표시 (`[ Open ⌘O ]`). `:help`와 `?`로 전체 목록. 명령줄은 자동완성·히스토리(↑/↓) 제공
-3. **빈 상태를 안내로** — 저장소가 없으면 최근 저장소 목록, 폴더 열기 버튼, 드래그&드롭 안내를 보여준다. 빈 목록에는 "무엇을 하면 채워지는지" 한 줄 안내
-4. **즉각적인 피드백** — 실행 중 작업은 스피너/진행률, 완료·실패는 상태줄과 명령 로그에 즉시 표시. 오류 메시지는 git 원문 + 다음 행동 제안
-5. **안전장치 (공통 확인 다이얼로그)** — 삭제·변경 작업은 반드시 `App::confirm(Confirm::…)`로 확인한다 (`gf-app/src/app/dialogs.rs`). 새 기능도 같은 헬퍼를 재사용
-   - `Confirm::delete` (빨강 ⚠): 데이터를 지우는 작업(discard, 브랜치·태그·stash 삭제, force push). Enter로 실행 불가, 클릭 필수, 건너뛰기 불가
-   - `Confirm::change` (노랑 ?): 작업 트리·HEAD·원격을 바꾸는 작업(checkout, stash apply/pop, pull, push, 태그 push, amend). 무엇이 바뀌는지와 되돌릴 수 있는지 명시, "다시 묻지 않기" 선택 가능(`:confirm reset`으로 복원)
-   - 잃을 것이 없을 때는 `Confirm::change(..).skip_if(..)`로 묻지 않고 바로 실행(여전히 `App::confirm`을 거침). 예: 로컬 브랜치 checkout은 HEAD가 브랜치에 있고, merge·rebase·bisect 중이 아니고, 변경(ignored 제외)이 없으면 바로 전환(⌘Z로 복귀). 원격 브랜치 checkout은 로컬 브랜치를 새로 만들므로 항상 확인
-   - 확인 없이 실행: stage/unstage(hunk·줄 포함)처럼 자주 쓰고 즉시 되돌릴 수 있는 작업, 사용자가 명령줄에 직접 입력한 git 명령
-6. **포커스·상태 유지** — 탭 전환·새로고침 후에도 선택, 스크롤, 접힘 상태 유지. 앱 재시작 시 열린 탭 복원
-7. **큰 클릭 영역과 hover 표시** — 행 전체 클릭 가능, hover 시 배경 강조. 밀도 높은 레이아웃이어도 오클릭이 없도록
-8. **익숙한 관례 따르기** — macOS 단축키(⌘O/⌘W/⌘1–9 등), git 용어 그대로 사용, 색 의미 일관 (초록=추가, 빨강=삭제)
-9. **폴더 드래그&드롭으로 저장소 열기**, 경로 입력 시 `~` 확장
-
----
-
-## 5. 상용 툴에서 가져올 기능 (SourceTree / GitKraken / Fork / Tower / Sublime Merge / SmartGit 참고)
-
-**보기·탐색**
-- 커밋 그래프 (레인 색상, 브랜치/태그 배지, 가상 스크롤로 10만+ 커밋 대응)
-- 커밋 검색 (메시지, 작성자, SHA, 파일 경로, `-S` pickaxe 내용 검색)
-- 파일 히스토리, Blame (커밋 단위 이동), 이미지 diff
-- diff: side-by-side / inline, 단어 단위 하이라이트, 공백 무시, 구문 강조
-- 멀티 저장소 탭, 저장소 그룹(워크스페이스), 즐겨찾기
-
-**편집·작업**
-- Hunk / 라인 단위 stage·unstage·discard
-- 커밋: amend, 서명(GPG/SSH), 커밋 템플릿, Conventional Commits 도우미, Co-author
-- 인터랙티브 리베이스 GUI (드래그로 순서 변경, squash/fixup/reword/drop)
-- 드래그&드롭: 브랜치→브랜치(merge/rebase), 커밋→브랜치(cherry-pick)
-- 3-way 머지 충돌 해결 에디터 (ours/theirs/both, 블록 단위 선택) + 외부 머지툴 연동
-- Stash: 부분 stash, 미리보기, apply/pop/branch
-- **Undo/Redo** (reflog 기반, 최근 작업 되돌리기)
-- Bisect 마법사, Submodule/Worktree/LFS 관리 화면
-
-**편의**
-- 커맨드 팔레트 (⌘⇧P), 전역 단축키 커스터마이즈
-- 자동 fetch(주기 설정), 원격 변경 알림 배지
-- 커스텀 액션 (사용자 정의 스크립트/명령을 메뉴·단축키에 등록)
-- 외부 에디터/터미널/Finder 열기
-- 다크/라이트 테마, 한국어/영어
+1. **마우스와 키보드 모두 1급**: 모든 동작은 클릭으로도, 단축키·명령줄로도 할 수 있습니다
+2. **발견 가능성**: 단축키를 버튼 라벨·툴팁·상태줄에 함께 표시합니다(`[ Open ⌘O ]`, Windows는 `Ctrl+O`). `:help`로 전체 목록, 명령줄은 자동완성·히스토리(↑/↓)
+3. **빈 상태를 안내로**: 저장소가 없으면 최근 저장소, 폴더 열기 버튼, 드래그&드롭 안내. 빈 목록에는 "무엇을 하면 채워지는지" 한 줄
+4. **즉각적인 피드백**: 실행 중에는 스피너·진행률, 완료·실패는 상태줄과 명령 로그에 바로. 오류는 git 원문 + 다음 행동 제안
+5. **안전장치(공통 확인 다이얼로그)**: 삭제·변경 작업은 반드시 `App::confirm(Confirm::…)`로 확인합니다(`gf-app/src/app/dialogs.rs`). 새 기능도 같은 헬퍼를 씁니다
+   - `Confirm::delete`(빨강 ⚠): 데이터를 지우는 작업(discard, 브랜치·태그·stash 삭제, force push). Enter로 실행 불가, 클릭 필수, 건너뛰기 불가
+   - `Confirm::change`(노랑 ?): 작업 트리·HEAD·원격을 바꾸는 작업(checkout, stash apply/pop, 통합이 필요한 pull, 태그 push, amend). 무엇이 바뀌는지와 되돌릴 수 있는지 적고, "다시 묻지 않기"를 고를 수 있음(`:confirm reset`으로 복원)
+   - 잃을 것이 없을 때는 `Confirm::change(..).skip_if(..)`로 묻지 않고 바로 실행합니다(여전히 `App::confirm`을 거침). 예: 로컬 브랜치 checkout은 HEAD가 브랜치에 있고, merge·rebase·bisect 중이 아니고, 변경(ignored 제외)이 없으면 바로 전환(⌘Z로 복귀). 원격 브랜치 checkout은 로컬 브랜치를 새로 만드므로 항상 확인
+   - 일반 Pull은 fast-forward만 바로 실행하고, 갈라졌거나 로컬 파일과 겹치면 확인 후 통합합니다. 일반 Push는 바로 실행하고, 거절 가능성이 알려졌거나 원격 ref를 강제로 바꾸는 설정이면 확인합니다
+   - 확인 없이 실행: stage/unstage(hunk·줄 포함)처럼 자주 쓰고 바로 되돌릴 수 있는 작업, 사용자가 명령줄에 직접 입력한 git 명령
+6. **포커스·상태 유지**: 탭 전환·새로고침 후에도 선택, 스크롤, 접힘 상태 유지. 재시작하면 열린 탭 복원
+7. **큰 클릭 영역과 hover 표시**: 행 전체 클릭, hover 시 배경 강조. 촘촘해도 오클릭이 없게
+8. **익숙한 관례**: 플랫폼 단축키(⌘O/⌘W/⌘1–9, Windows는 Ctrl), git 용어 그대로, 색 의미 일관(초록=추가, 빨강=삭제)
+9. **폴더 드래그&드롭으로 저장소 열기**, 경로 입력에서 `~` 확장(Windows는 `C:\x`, `\\server\share`도)
 
 ---
 
-## 6. Git Flow
+## 5. 아직 없는 기능 후보
 
-- **CLI(git-flow-avh) 설치 불필요** — 순수 git 명령 조합으로 자체 구현.
-- 설정은 `git config gitflow.*` 키를 **git-flow-avh와 동일하게** 저장 → 터미널에서 git-flow를 쓰는 팀원과 상호 호환.
+상용 툴(SourceTree, GitKraken, Fork, Tower, Sublime Merge, SmartGit)을 참고한 목록 중 아직 구현하지 않은 것입니다. 이미 있는 기능은 [README](README.md) "Features"에 있습니다.
+
+- **보기**: 이미지 diff, 저장소 그룹(워크스페이스)
+- **편집**: 커밋 템플릿·Conventional Commits 도우미·Co-author, 외부 머지툴 연동, 드래그&드롭으로 merge/rebase/cherry-pick
+- **편의**: 커맨드 팔레트(⌘⇧P), 단축키 커스터마이즈, 자동 fetch와 원격 변경 배지, 커스텀 액션(사용자 스크립트를 메뉴·단축키에 등록), 한국어/영어 UI
+
+---
+
+## 6. Git Flow (M6)
+
+- git-flow CLI 없이 순수 git 명령 조합으로 구현합니다.
+- 설정은 `git config gitflow.*` 키를 **git-flow-avh와 같게** 저장해 터미널에서 git-flow를 쓰는 팀원과 호환합니다.
 - 기능
-  - `init`: master/develop 브랜치명, prefix(feature/ release/ hotfix/ support/ bugfix/), version tag prefix 설정 다이얼로그
+  - `init`: master/develop 이름, prefix(feature/ release/ hotfix/ support/ bugfix/), 버전 태그 prefix
   - feature / bugfix / release / hotfix / support: start · finish · publish · track · delete
   - finish 옵션: squash, no-ff, keep branch, 태그 메시지, push 여부
-  - 사이드바에 Flow 전용 섹션 (진행 중인 feature/release/hotfix 그룹 표시)
-- 확장성: 전략을 `trait BranchingModel`로 추상화 → 이후 GitHub Flow, GitLab Flow, trunk-based 템플릿 추가 가능.
+  - 사이드바에 진행 중인 feature/release/hotfix 그룹
+- 전략은 `trait BranchingModel`로 추상화해 GitHub Flow, trunk-based 등을 나중에 추가할 수 있게 합니다.
 
 ---
 
-## 7. Git 서버 연동
+## 7. Git 서버 연동 (M7)
 
 ### 7.1 공통 trait
 ```rust
@@ -188,68 +126,64 @@ trait HostingProvider: RepoApi + MergeRequestApi + PipelineApi {
 trait RepoApi        { list_repos, search_repos, get_repo, clone_urls(ssh/https) }
 trait MergeRequestApi{ list, get, create, update, merge, close, approve/unapprove,
                        diffs, discussions/notes(라인 코멘트 포함), resolve_thread, assign_reviewers }
-trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }   // MR 화면 상태 표시용
+trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }
 ```
-- 기능 미지원 프로바이더는 `Unsupported` 에러 반환 → UI에서 해당 메뉴 자동 비활성화(Capabilities 플래그).
+- 지원하지 않는 기능은 `Unsupported`를 돌려주고, UI는 해당 메뉴를 비활성화합니다(Capabilities 플래그).
 
 ### 7.2 계정
-- Personal Access Token 등록 (1차), OAuth Device Flow (2차)
-- self-hosted GitLab: base URL 입력, 사내 CA 인증서 옵션
-- 토큰은 keyring(Keychain)에만 저장, 설정 파일에는 계정 메타데이터만
+- Personal Access Token(1차), OAuth Device Flow(2차)
+- self-hosted GitLab: base URL, 사내 CA 인증서 옵션
+- 토큰은 keyring에만 저장하고, 설정 파일에는 계정 메타데이터만 둡니다
 
 ### 7.3 Clone
-- URL 직접 입력 또는 연결된 계정의 저장소 목록 검색 → 선택
-- SSH/HTTPS 선택, 대상 경로, 브랜치, depth(shallow), 재귀 submodule, LFS
-- 진행률(`--progress` 파싱) 표시, 취소 가능
-- HTTPS clone 시 저장된 토큰을 **GIT_ASKPASS 헬퍼**로 안전하게 주입 (URL에 토큰 박지 않음)
+- URL 입력 또는 연결된 계정의 저장소 검색 → 선택
+- SSH/HTTPS, 대상 경로, 브랜치, depth, 재귀 submodule, LFS
+- 진행률(`--progress`) 표시, 취소 가능
+- HTTPS 토큰은 **GIT_ASKPASS 헬퍼**로 주입합니다(URL에 토큰을 넣지 않음)
 
 ### 7.4 GitLab MR (1차 완성 대상)
 - 목록: 내가 만든 / 리뷰 요청 / 전체, 상태·라벨·작성자 필터
-- 생성: 현재 브랜치 → 대상 브랜치, 제목/설명 템플릿, 리뷰어·담당자·라벨·마일스톤, draft, 머지 후 브랜치 삭제/squash 옵션
+- 생성: 현재 브랜치 → 대상 브랜치, 템플릿, 리뷰어·담당자·라벨·마일스톤, draft, 머지 후 브랜치 삭제/squash
 - 상세: 설명, 커밋, 변경 파일 diff(앱 diff 뷰 재사용), 파이프라인 상태
 - 리뷰: 라인 코멘트, 스레드 답글/해결, approve
-- 머지: merge / squash / rebase 옵션, 파이프라인 성공 시 머지
+- 머지: merge / squash / rebase, 파이프라인 성공 시 머지
 - MR 브랜치 로컬 체크아웃
 
 ### 7.5 GitHub
 - 1차: 계정 연결, 저장소 목록, clone
-- PR 기능은 `MergeRequestApi` 구현만 추가하면 UI가 그대로 동작하도록 설계 (사용자 검증 후 확장)
+- PR은 `MergeRequestApi` 구현만 추가하면 UI가 그대로 동작하게 설계합니다
 
 ---
 
-## 8. 단계별 마일스톤
+## 8. 마일스톤
 
-| 단계 | 목표 | 주요 산출물 |
+| 단계 | 목표 | 상태 |
 |---|---|---|
-| **M0 기반** ✅ | 워크스페이스·CI 골격 | rustup, workspace, gf-core, tracing, 테스트 fixture, GitHub Actions(macOS) |
-| **M1 Git 코어** ✅ | CLI Runner + 파서 | 취소/진행률/로그 Runner, status v2·log·diff·branch 파서, gix 조회, 단위테스트 |
-| **M2 앱 셸** ✅ | 빈 앱 실행 | iced 윈도우, Feature trait, 저장소 열기/탭, 사이드바, 명령 로그 패널, 테마 |
-| **M3 일상 작업** ✅ | SourceTree 수준 기본기 | 변경사항/hunk·라인 stage, 커밋, diff 뷰, 커밋 그래프, 브랜치/태그/stash, fetch/pull/push, 파일 감시 |
-| **M4 고급 작업** ✅ | 상용툴 차별 기능 | merge/rebase/cherry-pick + 충돌 해결, 인터랙티브 리베이스, blame/파일 히스토리, Undo, submodule/worktree/LFS, bisect |
-| **M5 전 명령 지원** | "모든 명령" 달성 | CommandSpec 전체 작성, 자동 폼, 커맨드 팔레트, 내장 터미널, 커스텀 액션 |
-| **M6 Git Flow** | Flow 지원 | init 다이얼로그, start/finish/publish, Flow 사이드바 |
-| **M7 호스팅** | Clone + GitLab MR | gf-auth, gf-hosting, GitLab 구현(repo/MR/pipeline), Clone 다이얼로그, MR 화면, GitHub repo/clone |
-| **M8 배포** | macOS 배포 | cargo-packager .app/.dmg, 코드서명·공증, 자동 업데이트, ko/en |
-| **M9 크로스플랫폼** | Windows/Linux | platform 모듈 구현, CI 매트릭스, 설치 패키지 |
+| **M0 기반** | 워크스페이스, gf-core, tracing, 테스트 fixture, CI | ✅ |
+| **M1 Git 코어** | Runner(취소·진행률·로그), porcelain 파서, gix 조회 | ✅ |
+| **M2 앱 셸** | iced 창, Feature trait, 저장소 탭, 사이드바, 명령 로그, 테마 | ✅ |
+| **M3 일상 작업** | hunk·줄 stage, 커밋, diff, 커밋 그래프, 브랜치/태그/stash, fetch/pull/push, 파일 감시 | ✅ |
+| **M4 고급 작업** | merge/rebase/cherry-pick + 충돌 해결, interactive rebase, blame/파일 히스토리, undo, submodule/worktree/LFS, bisect, worktrees 패널 | ✅ |
+| **M5 전 명령 지원** | CommandSpec, 자동 폼, 커맨드 팔레트, 내장 터미널, 커스텀 액션 | 다음 |
+| **M6 Git Flow** | init 다이얼로그, start/finish/publish, Flow 사이드바 | |
+| **M7 호스팅** | gf-auth, gf-hosting, GitLab(repo/MR/pipeline), Clone 다이얼로그, GitHub repo/clone | |
+| **M8 macOS 배포** | universal .dmg, `install.sh`, 태그 기반 릴리스 워크플로 ✅ · 남음: 코드 서명·공증, 자동 업데이트, ko/en | 일부 |
+| **M9 크로스플랫폼** | Windows x64(0.0.8부터, zip + `install.ps1`, CI 매트릭스) ✅ · 남음: Windows 실기 점검(한글 IME, DPI·다중 모니터), 코드 서명·MSI·winget, Linux | 일부 |
 
-각 단계는 이전 단계에만 의존하며, M6(Flow)과 M7(호스팅)은 M3 완료 후 병렬 진행 가능.
+M6(Flow)과 M7(호스팅)은 서로 독립이라 병렬로 진행할 수 있습니다.
 
 ---
 
 ## 9. 테스트·품질
 
-- **gf-git**: 임시 디렉터리에 실제 git 저장소를 만들어 시나리오 테스트 (충돌, rebase, submodule 등). 파서는 실제 git 출력 스냅샷 테스트(insta).
-- **gf-flow**: 시나리오별 브랜치/태그 결과 검증, git-flow-avh와 설정 키 호환성 테스트.
-- **gf-hosting-***: wiremock으로 API 모킹, 실 GitLab 대상 통합 테스트는 opt-in(환경변수 토큰).
-- **gf-app**: update 로직(State+Message)은 UI 없이 단위 테스트 가능 — Elm 구조의 장점.
-- 성능 기준: 10만 커밋 저장소에서 그래프 첫 화면 < 500ms, status 갱신 < 200ms.
-- `cargo clippy -D warnings`, `cargo fmt`, `cargo deny`(라이선스/취약점) CI 게이트.
+- **gf-git**: 임시 저장소(`gf-test-support::TestRepo`)로 시나리오 테스트(충돌, rebase, submodule, undo 등). 파서는 실제 git 출력으로 단위 테스트. gix 구현은 CLI와 결과를 비교하는 계약 테스트(`tests/gix_contract.rs`)
+- **gf-app**: update 로직은 UI 없이 단위 테스트. 실제 App을 창 없이 조작하는 회귀 테스트와 UI 스윕(모든 버튼이 무언가를 하는지)
+- **성능 기준**: 10만 커밋 저장소에서 그래프 첫 화면 < 500ms, status 갱신 < 200ms. 메모리는 `tools/mem-bench`로 측정
+- **CI 게이트**: macOS·Windows에서 `cargo fmt --check`, `clippy -D warnings`, `cargo test`. `main`으로 가는 PR과 릴리스는 UI 스윕까지. 의존성 라이선스·취약점은 `cargo deny`
 
 ---
 
 ## 10. 결정이 필요한 항목
 
-1. **UI 프레임워크**: iced(권장, 안정적·문서 풍부·크로스플랫폼) vs gpui(Zed 엔진, 최고 성능·macOS 최적이나 API가 불안정하고 문서 부족)
-2. 앱 이름 / 번들 ID (현재 가칭 `gf`)
-3. 라이선스 (오픈소스 여부 → 의존성 선택에 영향)
-4. 첫 배포 최소 macOS 버전 (권장: 13 Ventura 이상)
+1. 앱 이름 / 번들 ID: 현재 가칭 `gf`(설정 경로 `dev.gf.gf`)
+2. 라이선스: 오픈소스 여부(의존성 선택에 영향, `deny.toml`)

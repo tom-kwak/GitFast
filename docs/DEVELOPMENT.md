@@ -1,19 +1,20 @@
 # gf 개발 지침서 (피처 단위 개발)
 
 사람이든 AI든 이 문서만 읽고 피처 하나를 끝까지 구현할 수 있도록 쓴 문서입니다.
-제품 방향과 마일스톤은 [PLAN.md](../PLAN.md)를 기준으로 합니다. 이 문서와 PLAN.md가 다르면 **실제 코드가 기준**입니다.
+작업 흐름(브랜치, 커밋 메시지, 언어)은 [AGENTS.md](../AGENTS.md), 제품 방향과 마일스톤은 [PLAN.md](../PLAN.md)를 따릅니다. 문서끼리 또는 문서와 코드가 다르면 **실제 코드가 기준**입니다.
 
 ---
 
 ## 0. 작업 시작 전 체크리스트
 
-1. `PLAN.md`에서 §2 아키텍처 원칙, §4-1 터미널 스타일, §4-2 상호작용 원칙, §8 마일스톤을 읽습니다.
+1. `PLAN.md`에서 §2 아키텍처 원칙, §4-1 터미널 스타일, §4-2 상호작용 원칙을 읽습니다.
 2. 이 문서의 §2 구조, §3 피처 템플릿, §7 성능 규칙을 읽습니다.
 3. 비슷한 기존 피처를 하나 골라 그대로 따라 합니다.
    - 상태가 있는 목록 → `features/changes`
    - 순수 뷰 → `features/op_banner`
    - 메뉴 → `features/context_menu`
-4. 툴체인 경로(macOS Homebrew rustup)를 잡습니다: `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`
+   - 우클릭 메뉴와 확인 작업이 많은 패널 → `features/worktrees` + `app/worktree_ops.rs`
+4. 툴체인 경로를 잡습니다([AGENTS.md](../AGENTS.md) "툴체인").
 
 ## 1. 완료 및 커밋 기준
 
@@ -43,7 +44,7 @@ cargo test --workspace
 | 크레이트 | 역할 | 규칙 |
 |---|---|---|
 | `gf-core` | 도메인 모델(`model::{Commit, Oid, Branch, StatusEntry, FileDiff…}`), `GfError`/`Result`, 이벤트 버스(`CoreEvent`, `EventBus`) | UI 의존성 금지 |
-| `gf-git` | git 백엔드. `backend/`는 영역별 인터페이스(trait)와 `CliBackend`, `ops/*.rs`는 영역별 타입·파서·CLI 구현, `routes.rs`는 명령별 백엔드 선택, `gix_reader.rs`는 gix 조회 | 명령별 백엔드는 [GIX_MIGRATION.md](GIX_MIGRATION.md) 표를 따릅니다. 모든 명령은 CLI 구현을 가집니다 |
+| `gf-git` | git 백엔드. `backend/`는 영역별 인터페이스(trait)와 `CliBackend`, `backend/gix_*.rs`는 gix 구현, `ops/*.rs`는 영역별 타입·파서·CLI 구현, `routes.rs`는 명령별 백엔드 선택, `cli/`는 실행기(`GitRunner`)와 porcelain 파서 | 명령별 백엔드는 [GIX_MIGRATION.md](GIX_MIGRATION.md) 표를 따릅니다. 모든 명령은 CLI 구현을 가집니다 |
 | `gf-config` | 설정(`Settings`), 경로(`AppPaths`) | serde + toml |
 | `gf-watch` | 파일 감시 → `CoreEvent` | |
 | `gf-test-support` | 테스트용 임시 저장소 | |
@@ -60,6 +61,8 @@ src/
 ├─ repo_tab.rs       저장소 탭별 상태(RepoTab, Snapshot)
 ├─ undo.rs           undo/redo 기록(Step, History — git dir의 gf/undo.json에 저장)
 ├─ git_actions.rs    git 실행 헬퍼
+├─ badges.rs         커밋별 브랜치·태그 배지(로드할 때 한 번 계산)
+├─ logging.rs        tracing 설정(stderr + 날짜별 로그 파일)
 ├─ platform/         운영체제별 차이를 모두 모은 곳(§4-1)
 │  ├─ mod.rs         홈 폴더, 경로 구분자, 파일 관리자(reveal), 브라우저, 창 설정
 │  └─ keys.rs        단축키 표기: macOS `⌘⇧K` → 그 외 `Ctrl+Shift+K`
@@ -70,7 +73,13 @@ src/
 │  ├─ advanced.rs    merge/rebase/cherry-pick/bisect
 │  ├─ undoing.rs     ⌘Z/⌘⇧Z: 가드 확인 → (확인창) → 복원, undo 목록
 │  ├─ dialogs.rs     공통 확인 다이얼로그(Confirm, Purpose)
-│  └─ focus.rs       키 라우팅(메뉴→다이얼로그→입력창→패널), 패널 테두리
+│  ├─ focus.rs       키 라우팅(메뉴→다이얼로그→입력창→패널), 패널 테두리
+│  ├─ worktree_ops.rs  worktrees 패널의 Output 처리(열기, 제거, merge into base …)
+│  ├─ branch_delete.rs 여러 ref를 골라 한 번에 삭제
+│  ├─ reveal.rs      blame 등에서 커밋을 히스토리에서 찾아 선택·스크롤
+│  ├─ settings.rs    설정 화면·프롬프트 → 공유 설정
+│  ├─ ui_sweep.rs    헤드리스 앱 드라이버(`Ui`)와 UI 스윕(§1, §8)
+│  └─ regression_tests.rs, keyboard_tests.rs   실제 App으로 돌리는 회귀 테스트
 ├─ features/<name>/mod.rs   피처 하나 = 폴더 하나
 ├─ widgets/          재사용 위젯(virtual_list, pointer, graph_canvas, format …)
 ├─ theme/            색·폰트 토큰(Tokens), 스타일 함수(style.rs), 프리셋
@@ -182,7 +191,12 @@ mod tests { /* update/nav 단위 테스트 */ }
 - git·도구 실행 환경은 `gf_core::tool_path`에 있습니다. git을 동기로 부를 때는 `tool_path::git_command()`(설정의 git 경로 + 확장 PATH + Windows 콘솔 창 숨김)를 씁니다. 새 서브프로세스를 만들면 `hide_console`을 거칩니다.
   - 예외: tokio `Command`를 쓰는 gf-git runner는 `hide_console`(std 전용)을 쓸 수 없어 `#[cfg(windows)]`로 `CREATE_NO_WINDOW`를 직접 넣고, gf-test-support는 테스트 헬퍼라 `cfg`를 직접 씁니다.
 - 저장소 안 경로를 화면에 쓸 때는 `widgets::format::repo_path`(항상 `/`)를 씁니다. `Path::join` 결과의 `display()`는 Windows에서 `\`가 섞입니다.
-- 테스트도 두 OS에서 돌아야 합니다: `/tmp` 같은 고정 경로 대신 `tempfile`을 쓰고, 플랫폼 전용 테스트에는 `#[cfg(...)]`와 이유 주석을 붙입니다. CI는 macOS와 Windows에서 돕니다.
+- 테스트도 두 OS에서 돌아야 합니다: `/tmp` 같은 고정 경로 대신 `tempfile`을 쓰고, 플랫폼 전용 테스트에는 `#[cfg(...)]`와 이유 주석을 붙입니다. CI는 macOS와 Windows에서 돕니다. UI 스윕은 macOS에서만 돕니다.
+- Windows에서 알아둘 차이
+  - 실행 비트는 항상 `false`로 기록되고, undo의 심볼릭 링크 복원은 `Unsupported`입니다.
+  - `GIT_EDITOR`·`GIT_SEQUENCE_EDITOR`는 Git for Windows의 내장 sh로 실행됩니다. 에디터 명령을 바꾸면 백슬래시·한글·공백 경로에서 interactive rebase(reword/squash)를 확인합니다.
+  - 폴더를 실제 경로로 바꿀 때는 `std::fs::canonicalize` 대신 `platform::canonicalize`를 씁니다. Windows의 `\\?\` 접두어를 지워서 git·탭의 경로와 같아집니다(테스트는 `gf_test_support::without_verbatim_prefix`).
+- Windows 개발 환경: Visual Studio Build Tools 2022(C++ 데스크톱 개발, onig 빌드에 필요), rustup stable, Git for Windows. 저장소는 짧은 경로에 두고 `core.longpaths true`, `core.autocrlf false`를 켭니다(줄끝은 `.gitattributes`가 정합니다).
 
 ## 5. 키보드 (패널 포커스 모델)
 
@@ -254,8 +268,12 @@ gf는 성능이 가장 중요합니다. 새 코드는 아래 규칙을 지킵니
 
 ## 8. 테스트 작성법
 
-- **gf-app**: UI 없이 `State::update` / `nav`를 호출하고 `Update.output` 또는 `Moved.message`를 `matches!`로 검사합니다.
+- **gf-app 피처**: UI 없이 `State::update` / `nav`를 호출하고 `Update.output` 또는 `Moved.message`를 `matches!`로 검사합니다.
   - 토큰이 필요하면 `crate::theme::preset("gf-dark")`를 씁니다.
+- **App 전체(회귀 테스트)**: `ui_sweep::Ui`로 실제 `App`을 창 없이 띄워 사용자처럼 조작하고 git 결과를 확인합니다.
+  - `Ui::open_with(|repo| …)`로 fixture 저장소를 준비하고, `ui.click("label")`·`ui.send(Message::…)`로 조작하고, `ui.shows(..)`·`ui.flash()`로 확인합니다.
+  - 저장소를 바꾸는 동작은 `app/regression_tests.rs`, 키 라우팅은 `app/keyboard_tests.rs`(`Message::KeyInput`)에 둡니다. 기존 기능을 바꾸기 전에 지금 동작을 고정하는 테스트를 먼저 추가합니다.
+- **gf-git**: 파서는 실제 git 출력으로 단위 테스트하고, 시나리오는 `crates/gf-git/tests/`에서 `gf-test-support`의 `TestRepo`로 테스트합니다. gix 구현은 `tests/gix_contract.rs`에서 CLI와 결과가 같은지 비교합니다.
 - **경로 비교**: `p.as_path() == Path::new("x")`처럼 씁니다. clippy `cmp_owned`를 피하기 위해서입니다.
 - **테스트 이름**은 동작을 문장으로 씁니다. 예: `arrows_skip_headers_and_space_stages`.
 
@@ -270,7 +288,7 @@ gf는 성능이 가장 중요합니다. 새 코드는 아래 규칙을 지킵니
 
 ```
 작업: <피처/수정 한 줄>
-참고: docs/DEVELOPMENT.md(§7 성능 규칙 포함), PLAN.md §<번호>, 비슷한 기존 피처 <경로>
+참고: AGENTS.md, docs/DEVELOPMENT.md(§7 성능 규칙 포함), PLAN.md §<번호>, 비슷한 기존 피처 <경로>
 범위: <건드릴 파일/크레이트>, 범위 밖은 수정 금지
 완료 기준: §1 명령 3개 통과 + 새 로직 테스트 + 화면 확인 여부 보고
 금지: 커밋/푸시, 확인 다이얼로그 생략, 토큰 외 색상
