@@ -153,6 +153,30 @@ async fn gitlab_login_clone_push_logout_fetch() {
     let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
     assert!(ui.app.settings.accounts.is_empty());
     assert!(!stored().contains(&server.token), "forgotten");
+
+    // The open clone's server is offered; a wrong token is tried on it
+    // and refused before it is kept.
+    assert!(ui.shows("─ NOT LOGGED IN"));
+    let _ = ui
+        .send(Message::Settings(settings_view::Message::LogInTo(
+            server.label(),
+        )))
+        .await;
+    fill_login(&mut ui, &server.label(), &server.user, "glpat-wrong-token").await;
+    let dialog = login_dialog(&ui);
+    assert!(
+        dialog
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("refused")),
+        "{:?}",
+        dialog.error
+    );
+    assert!(!stored().contains("glpat-wrong-token"), "not kept");
+    assert!(ui.app.settings.accounts.is_empty());
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    assert!(ui.app.dialog.is_none());
+
     let _ = ui.send(Message::Key(Shortcut::Settings)).await;
     assert!(!ui.app.settings_open);
 

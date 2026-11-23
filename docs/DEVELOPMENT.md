@@ -77,7 +77,7 @@ src/
 │  ├─ worktree_ops.rs  worktrees 패널의 Output 처리(열기, 제거, merge into base …)
 │  ├─ branch_delete.rs 여러 ref를 골라 한 번에 삭제
 │  ├─ reveal.rs      blame 등에서 커밋을 히스토리에서 찾아 선택·스크롤
-│  ├─ settings.rs    설정 화면·프롬프트 → 공유 설정, 서버 로그인(ACCOUNTS)과 인증 실패 시 로그인 후 재실행
+│  ├─ settings.rs    설정 화면(섹션별) → 공유 설정, 서버 로그인(ACCOUNTS: 토큰 상태·확인)과 인증 실패 시 로그인 후 재실행
 │  ├─ clone.rs       open 창의 URL clone(폴더 묻기 → 백그라운드 clone, 상태 줄 진행률·Esc 취소 → 탭으로 열기)
 │  ├─ ui_sweep.rs    헤드리스 앱 드라이버(`Ui`)와 UI 스윕(§1, §8)
 │  └─ regression_tests.rs, keyboard_tests.rs   실제 App으로 돌리는 회귀 테스트

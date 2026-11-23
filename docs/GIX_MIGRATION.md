@@ -81,7 +81,7 @@ gf-git/src/
 | BisectOps / LfsOps | 전부 | CLI | 미구현 |
 | MaintenanceOps | commit-graph 작성(없을 때만) | CLI | 저장소 파일을 쓰는 작업이라 git이 만든 것과 같아야 함 |
 | (Repository::run) | 프롬프트의 임의 git 명령 | CLI | "모든 git 명령" 경로 |
-| (ops::credential) | 로그인 저장·삭제(`credential approve`/`reject`), helper 확인(`config --get-urlmatch credential.helper`) | CLI | 저장소 없이 실행. 토큰은 사용자의 credential helper가 보관하므로 git이 해야 함 |
+| (ops::credential) | 로그인 저장·삭제(`credential approve`/`reject`), 토큰 유무(`credential fill`, 프롬프트 없이), 토큰 확인(`ls-remote --heads`), helper 확인·설정(`config --get-urlmatch`/`--global credential.helper`) | CLI | 저장소 없이 실행. 토큰은 사용자의 credential helper가 보관하므로 git이 해야 함 |
 
 ## 3. 단계
 

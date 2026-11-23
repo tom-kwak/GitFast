@@ -3678,6 +3678,7 @@ async fn settings_from_the_welcome_screen_apply_and_remember_the_theme() {
     let _ = ui.click("[ Settings ⌘, ]").await;
     assert!(ui.app.settings_open);
     assert!(ui.shows(concat!("v", env!("CARGO_PKG_VERSION"))));
+    let _ = ui.click("APPEARANCE").await;
     for name in ["gf-light", "cd-dark", "cd-light"] {
         let _ = ui.click(name).await;
         assert_eq!(ui.app.tokens.name, name);
@@ -3705,15 +3706,28 @@ async fn settings_keys_change_the_theme_without_navigating_the_repository() {
     let active = ui.app.pane();
     let _ = ui.send(Message::Key(Shortcut::Settings)).await;
     assert!(ui.app.settings_open);
-    let _ = ui
-        .send(Message::KeyInput(focus::KeyInput {
+    let key = |key| {
+        Message::KeyInput(focus::KeyInput {
             shortcut: None,
             menu: None,
-            nav: Some(Nav::plain(Key::Up)),
-        }))
-        .await;
+            nav: Some(Nav::plain(key)),
+        })
+    };
+    // ↑/↓ pick the section, ←/→ the theme on APPEARANCE.
+    let _ = ui.send(key(Key::Down)).await;
+    assert_eq!(
+        ui.app.settings_page.section,
+        settings_view::Section::Appearance
+    );
+    let _ = ui.send(key(Key::Left)).await;
     assert_eq!(ui.app.tokens.name, "cd-light");
     assert_eq!(ui.app.pane(), active);
+    let _ = ui.send(Message::Key(Shortcut::SelectTab(4))).await;
+    assert_eq!(
+        ui.app.settings_page.section,
+        settings_view::Section::Confirmations
+    );
+    assert_eq!(ui.app.active, 0, "⌘5 did not switch tabs");
 
     let _ = ui.send(Message::Key(Shortcut::Escape)).await;
     assert!(!ui.app.settings_open);
@@ -4233,7 +4247,7 @@ async fn logging_in_from_settings_saves_the_token_with_git_and_logging_out_forge
     let store = with_store_helper(&mut ui);
     let _ = ui.click("[ Settings ⌘, ]").await;
     assert!(ui.shows("─ ACCOUNTS"));
-    let _ = ui.click("[ + Log in ]").await;
+    let _ = ui.click("[ + Add account ]").await;
     assert!(ui.app.dialog.is_some(), "the log-in dialog opens");
 
     fill_login(
@@ -4287,7 +4301,7 @@ async fn without_a_credential_helper_the_login_dialog_stays_with_the_reason() {
     let mut ui = Ui::welcome().await;
     let _ = ui.send(Message::Key(Shortcut::Settings)).await;
     let _ = ui
-        .send(Message::Settings(settings_view::Message::LogIn))
+        .send(Message::Settings(settings_view::Message::AddAccount))
         .await;
     fill_login(&mut ui, "github.com", "me", "tok").await;
     let dialog = ui.app.dialog.as_ref().expect("still open");
@@ -4318,7 +4332,7 @@ async fn the_login_dialog_offers_the_open_tab_s_https_server() {
     .await;
     let _ = ui.send(Message::Key(Shortcut::Settings)).await;
     let _ = ui
-        .send(Message::Settings(settings_view::Message::LogIn))
+        .send(Message::Settings(settings_view::Message::AddAccount))
         .await;
     let dialog = ui.app.dialog.as_ref().expect("dialog");
     assert_eq!(dialog.fields[0].value, "git.example.com:8443");
@@ -4329,9 +4343,16 @@ async fn the_login_dialog_offers_the_open_tab_s_https_server() {
         .collect();
     assert_eq!(
         offered,
-        ["git.example.com:8443"],
-        "SSH remotes are left out"
+        [
+            "git.example.com:8443",
+            "github.com",
+            "gitlab.com",
+            "bitbucket.org"
+        ],
+        "the tab's HTTPS server first, then the big services"
     );
+    let github = &dialog.fields[0].suggestions[1];
+    assert_eq!(github.hint, "GitHub", "not offered as the SSH remote");
 
     // An empty or SSH server is refused in place.
     fill_login(&mut ui, "git@github.com:team/app.git", "me", "tok").await;
@@ -4643,4 +4664,133 @@ async fn a_clone_from_the_open_window_the_server_refuses_logs_in_and_clones_agai
     assert!(dest.join(".git").is_dir(), "cloned again");
     assert!(ui.app.cloning.is_none());
     assert_eq!(ui.app.tabs.len(), 1, "and opened");
+}
+
+#[tokio::test]
+async fn settings_accounts_show_the_saved_token_and_notice_when_it_is_gone() {
+    let mut ui = Ui::welcome().await;
+    let store = with_store_helper(&mut ui);
+    let _ = ui.click("[ Settings ⌘, ]").await;
+    assert!(ui.shows("No accounts yet"));
+    let _ = ui.click("[ + Add account ]").await;
+    fill_login(&mut ui, "gitlab.example.com", "me", "tok").await;
+    assert!(ui.app.dialog.is_none());
+
+    assert!(ui.shows("GitLab"), "the service is told by the host");
+    assert!(ui.shows("✓ token saved"));
+    assert!(ui.shows("[ Get token ↗ ]"));
+    assert!(ui.shows("credential helper `store`"));
+
+    // The token disappears outside gf (expired and erased by git, or
+    // removed by hand): reopening the screen says so.
+    std::fs::write(&store, "").expect("clear the store");
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    assert!(ui.shows("⚠ no saved token"));
+    let _ = ui.click("[ Log in again ]").await;
+    let dialog = ui.app.dialog.as_ref().expect("log-in dialog");
+    assert_eq!(dialog.fields[0].value, "gitlab.example.com");
+    assert_eq!(dialog.fields[1].value, "me");
+    assert!(
+        dialog.body.iter().any(
+            |l| l.contains("https://gitlab.example.com/-/user_settings/personal_access_tokens")
+        ),
+        "{:?}",
+        dialog.body
+    );
+}
+
+#[tokio::test]
+async fn settings_list_servers_the_open_tabs_use_and_log_in_to_one_in_a_click() {
+    let mut ui = Ui::open_with(|r| {
+        r.git(&[
+            "remote",
+            "add",
+            "hub",
+            "https://git.example.com/team/app.git",
+        ]);
+        r.git(&["remote", "add", "ssh", "git@github.com:team/app.git"]);
+    })
+    .await;
+    let _ = example_server(&mut ui);
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    assert!(ui.shows("─ NOT LOGGED IN"));
+    assert!(ui.shows("─ SSH"));
+    assert!(ui.shows("github.com"));
+    let _ = ui.click("[ Log in ]").await;
+    let dialog = ui.app.dialog.as_ref().expect("log-in dialog");
+    assert_eq!(dialog.fields[0].value, "git.example.com");
+
+    // The login is tried on the tab's remote there before it is kept.
+    fill_login(&mut ui, "git.example.com", "me", "tok").await;
+    assert!(ui.app.dialog.is_none());
+    assert!(
+        ui.flash().contains("the server took the token"),
+        "{}",
+        ui.flash()
+    );
+    assert!(!ui.shows("─ NOT LOGGED IN"), "now an account");
+    assert!(ui.shows("used by"));
+}
+
+#[tokio::test]
+async fn settings_offer_to_set_a_credential_helper_when_git_has_none() {
+    let Some((helper, name)) = crate::platform::CREDENTIAL_HELPER else {
+        return;
+    };
+    let mut ui = Ui::welcome().await;
+    let config = ui._home.path().join("gitconfig");
+    std::fs::write(&config, "").expect("gitconfig");
+    ui.app.runner = ui
+        .app
+        .runner
+        .clone()
+        .with_env([("GIT_CONFIG_GLOBAL", config.clone().into_os_string())]);
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    assert!(ui.shows("⚠ git has no credential helper"));
+    let _ = ui.click(&format!("[ Use {name} ]")).await;
+    let dialog = ui.app.dialog.as_ref().expect("asks first");
+    assert_eq!(dialog.severity, dialog::Severity::Change);
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let written = std::fs::read_to_string(&config).expect("config");
+    assert!(written.contains(helper), "{written}");
+    assert!(!ui.shows("⚠ git has no credential helper"));
+}
+
+#[tokio::test]
+async fn settings_change_tools_font_size_fetch_and_confirmations_by_clicking() {
+    let mut ui = Ui::welcome().await;
+    ui.app.settings.confirm.skip = vec!["checkout".into(), "stash-pop".into()];
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+
+    let _ = ui.click("TOOLS").await;
+    let _ = ui.click("[ Change ]").await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(0, "cursor".into())))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(ui.app.settings.worktrees.editor, "cursor");
+    assert!(ui.shows("runs `cursor <folder>`"));
+
+    let _ = ui.click("APPEARANCE").await;
+    let size = ui.app.settings.appearance.font_size;
+    let _ = ui.click("[ + ]").await;
+    assert_eq!(ui.app.settings.appearance.font_size, size + 1);
+    assert!((ui.app.tokens.font_size - f32::from(size + 1)).abs() < f32::EPSILON);
+
+    let _ = ui.click("GIT").await;
+    let _ = ui.click("gix").await;
+    assert!(ui.app.settings.git.gix_fetch);
+
+    let _ = ui.click("CONFIRMATIONS").await;
+    assert!(ui.shows("stash pop"));
+    let _ = ui.click("[ Ask again ]").await;
+    assert_eq!(ui.app.settings.confirm.skip, ["stash-pop"]);
+    let _ = ui.click("[ Ask again for all ]").await;
+    assert!(ui.app.settings.confirm.skip.is_empty());
+    assert!(ui.shows("every change asks first"));
+
+    let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
+    assert_eq!(saved.worktrees.editor, "cursor");
+    assert!(saved.git.gix_fetch);
 }

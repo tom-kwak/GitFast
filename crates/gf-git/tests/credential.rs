@@ -7,7 +7,10 @@
 use std::path::{Path, PathBuf};
 
 use gf_git::GitRunner;
-use gf_git::ops::credential::{Login, NO_HELPER, credential_helper, forget_login, store_login};
+use gf_git::ops::credential::{
+    Login, NO_HELPER, credential_helper, forget_login, has_login, set_credential_helper,
+    store_login,
+};
 
 struct Home {
     _dir: tempfile::TempDir,
@@ -143,4 +146,61 @@ async fn line_breaks_never_reach_git() {
             .is_err()
     );
     assert_eq!(home.stored(), "");
+}
+
+#[tokio::test]
+async fn a_saved_token_is_found_until_it_is_forgotten() {
+    let home = Home::new(Some("store --file={store}"));
+    let runner = home.runner();
+    assert!(
+        !has_login(&runner, "https", "github.com", "me")
+            .await
+            .unwrap()
+    );
+    store_login(&runner, &login("github.com", "me", "tok"))
+        .await
+        .unwrap();
+    assert!(
+        has_login(&runner, "https", "github.com", "me")
+            .await
+            .unwrap()
+    );
+    // Someone else on the same server has none.
+    assert!(
+        !has_login(&runner, "https", "github.com", "you")
+            .await
+            .unwrap()
+    );
+    forget_login(&runner, "https", "github.com", "me")
+        .await
+        .unwrap();
+    assert!(
+        !has_login(&runner, "https", "github.com", "me")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn without_a_helper_no_token_is_found_and_none_is_asked_for() {
+    let home = Home::new(None);
+    assert!(
+        !has_login(&home.runner(), "https", "github.com", "me")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn the_credential_helper_can_be_set_for_the_user() {
+    let home = Home::new(None);
+    let runner = home.runner();
+    set_credential_helper(&runner, "cache").await.unwrap();
+    assert_eq!(
+        credential_helper(&runner, "https", "github.com")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("cache")
+    );
 }

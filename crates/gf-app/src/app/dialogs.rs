@@ -150,6 +150,10 @@ pub enum Purpose {
     Clone,
     /// Forget the login (`settings.accounts`) in git's credential helper.
     LogOut(gf_config::Account),
+    /// Set git's global `credential.helper` so logins can be kept.
+    UseCredentialHelper(String),
+    /// Field: one of the TOOLS settings (Settings → TOOLS).
+    SetTool(super::settings::Tool),
     SkipOperation,
     AbortOperation,
     /// Undo (or redo) the next step; the check box stashes first.
@@ -910,6 +914,8 @@ impl App {
             Purpose::RunGit(args) => self.run_git(args),
             Purpose::Clone => self.run_clone(&value(0), &value(1)),
             Purpose::LogOut(account) => self.log_out(account),
+            Purpose::UseCredentialHelper(helper) => self.use_credential_helper(helper),
+            Purpose::SetTool(tool) => self.set_tool(tool, &value(0)),
             Purpose::Squash { repo, ids } => {
                 let message = super::advanced::commit_message(&value(0), &value(1));
                 self.run_squash(repo, ids, message, check(0))
@@ -1164,6 +1170,7 @@ fn validate(purpose: &Purpose, values: &[String]) -> Option<String> {
             }
         }
         Purpose::LogIn(_) => super::settings::check_login(values),
+        Purpose::SetTool(tool) => super::settings::check_tool(*tool, first),
         Purpose::Clone => super::clone::check_clone(values),
         Purpose::Publish { .. } if first.is_empty() => Some("choose a remote".into()),
         Purpose::AddWorktree { .. } if worktree_folder_name(first).is_empty() => {

@@ -154,6 +154,17 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The credential helper to offer when git has none, so logins are
+/// kept: (`credential.helper` value, what the user knows it as). Linux
+/// has no helper every system ships.
+pub const CREDENTIAL_HELPER: Option<(&str, &str)> = if cfg!(target_os = "macos") {
+    Some(("osxkeychain", "macOS Keychain"))
+} else if cfg!(windows) {
+    Some(("manager", "Git Credential Manager"))
+} else {
+    None
+};
+
 /// The system terminal's name, for menu items ("open in Terminal").
 pub const TERMINAL: &str = if cfg!(target_os = "macos") {
     "Terminal"

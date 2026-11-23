@@ -174,6 +174,70 @@ pub async fn forget_login(
     Ok(())
 }
 
+/// Asks git without ever prompting: no terminal (the runner's
+/// `GIT_TERMINAL_PROMPT=0`), no askpass program, no helper window.
+fn quiet(cmd: GitCommand) -> GitCommand {
+    cmd.env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+        .env("GCM_INTERACTIVE", "never")
+}
+
+/// Whether git's credential helper still has a token for this login.
+/// git erases one the server refused, so `false` usually means it expired
+/// or was revoked (or was removed by hand).
+pub async fn has_login(
+    runner: &GitRunner,
+    protocol: &str,
+    host: &str,
+    username: &str,
+) -> Result<bool> {
+    check_value("the server", host)?;
+    check_value("the user name", username)?;
+    let out = runner
+        .run(
+            &quiet(global(&[
+                "-c",
+                "credential.interactive=false",
+                "credential",
+                "fill",
+            ]))
+            .stdin(credential_input(protocol, host, username, None))
+            .read_only()
+            .allow_failure(),
+        )
+        .await?;
+    Ok(out.success()
+        && out
+            .stdout_str()
+            .lines()
+            .any(|l| l.strip_prefix("password=").is_some_and(|p| !p.is_empty())))
+}
+
+/// Checks a saved login against the server by listing `url`'s branches
+/// (`git ls-remote --heads`). git erases the login itself when the server
+/// refuses it.
+pub async fn verify_login(runner: &GitRunner, url: &str) -> Result<()> {
+    runner
+        .run(&quiet(global(&["ls-remote", "--heads", "--", url])).read_only())
+        .await?;
+    Ok(())
+}
+
+/// Sets git's credential helper for every repository of this user
+/// (`git config --global credential.helper <helper>`).
+pub async fn set_credential_helper(runner: &GitRunner, helper: &str) -> Result<()> {
+    check_value("the helper", helper)?;
+    runner
+        .run(&global(&[
+            "config",
+            "--global",
+            "credential.helper",
+            helper,
+        ]))
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

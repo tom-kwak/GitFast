@@ -226,11 +226,13 @@ pub enum Message {
     /// then run what the server refused before, if anything.
     LoggedIn(
         gf_config::Account,
-        Result<String, String>,
+        Result<settings::LoginSaved, String>,
         Option<Box<settings::Retry>>,
     ),
     /// A login was removed from git's credential helper, or not.
     LoggedOut(gf_config::Account, Result<(), String>),
+    /// Something the settings screen reads in the background.
+    SettingsProbed(settings::Probed),
     /// Show the open-repository window (⌘O, `+ open`).
     OpenPicker,
     /// An animation frame (only subscribed to while something animates).
@@ -412,6 +414,8 @@ pub struct App {
     code_dialog: Option<code_view::State>,
     code_dialog_request: u64,
     settings_open: bool,
+    /// The settings screen's section and what it read in the background.
+    settings_page: settings_view::Page,
     /// Open-repository window (modal, under a confirmation it asks for).
     picker: Option<repo_picker::State>,
     /// Tabs by last use, for ⌃⇥.
@@ -527,6 +531,7 @@ impl App {
             code_dialog: None,
             code_dialog_request: 0,
             settings_open: false,
+            settings_page: settings_view::Page::default(),
             picker: None,
             mru: tab_switcher::Mru::default(),
             switcher: None,
@@ -698,6 +703,10 @@ impl App {
             Message::Settings(m) => self.on_settings(m),
             Message::LoggedIn(account, result, retry) => self.logged_in(account, result, retry),
             Message::LoggedOut(account, result) => self.logged_out(account, result),
+            Message::SettingsProbed(probed) => {
+                self.settings_probed(probed);
+                Task::none()
+            }
             Message::CodeDialog(m) => self.on_code_view(m),
             Message::PathRevealed(result) => {
                 if let Err(e) = result {
@@ -1754,6 +1763,10 @@ impl App {
             return match k {
                 Shortcut::Settings | Shortcut::Escape => self.toggle_settings(),
                 Shortcut::Quit => iced::exit(),
+                Shortcut::SelectTab(i) => match settings_view::Section::nth(i) {
+                    Some(section) => self.show_settings_section(section),
+                    None => Task::none(),
+                },
                 _ => Task::none(),
             };
         }
@@ -2068,9 +2081,7 @@ impl App {
                     .code_dialog
                     .as_ref()
                     .map(|code| code.view(cx).map(Message::CodeDialog)),
-                _ if self.settings_open => {
-                    Some(settings_view::view(t, &self.settings.accounts).map(Message::Settings))
-                }
+                _ if self.settings_open => Some(self.settings_view(t).map(Message::Settings)),
                 (None, Some(p), _) => Some(p.view(cx).map(Message::Picker)),
                 _ if self.switcher.is_some() => Some(
                     tab_switcher::view(
