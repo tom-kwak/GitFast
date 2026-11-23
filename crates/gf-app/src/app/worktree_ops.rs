@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use iced::Task;
 
 use super::dialogs::{Confirm, Purpose, worktree_label};
-use super::{App, Message};
+use super::{App, Message, Shortcut};
 use crate::features::command_log::NoteKind;
 use crate::features::dialog::{Dialog, Suggestion};
 use crate::features::diff_view::DiffSource;
@@ -151,6 +151,7 @@ impl App {
                 guessed,
             } => self.base_branch_dialog(branch, base, guessed),
             Output::New => self.new_worktree_dialog(),
+            Output::Collapse => self.on_shortcut(Shortcut::ToggleRefs),
             Output::Menu { show, menu } => {
                 let task = show.map_or_else(Task::none, |rev| {
                     self.on_sidebar(sidebar::Output::ShowRevision(Some(rev)))

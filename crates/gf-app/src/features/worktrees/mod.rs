@@ -209,6 +209,8 @@ pub enum Message {
     New,
     Prune,
     Cleanup,
+    /// `«`: hide the panel.
+    Collapse,
     Scrolled(ScrollPos),
     Loaded(Box<Loaded>),
 }
@@ -270,6 +272,8 @@ pub enum Output {
     },
     Prune,
     New,
+    /// Hide the refs panel (⌘B).
+    Collapse,
     /// A card's menu; `show` is the history to show first (the card was
     /// just selected by the right-click).
     Menu {
@@ -1044,6 +1048,7 @@ impl Feature for State {
             Message::Act(a) => self.output_for(a).map_or_else(Update::none, Update::output),
             Message::New => Update::output(Output::New),
             Message::Prune => Update::output(Output::Prune),
+            Message::Collapse => Update::output(Output::Collapse),
             Message::Cleanup => {
                 let trees = self.finished();
                 match self.base.clone() {
@@ -1096,6 +1101,13 @@ impl Feature for State {
             t.accent(),
             "new worktree  n",
             Message::New,
+        ));
+        actions = actions.push(widgets::icon_button(
+            t,
+            "«",
+            t.accent(),
+            "hide worktrees ⌘B",
+            Message::Collapse,
         ));
         let title = "WORKTREES".to_owned();
         if cx.snapshot.is_none() {
