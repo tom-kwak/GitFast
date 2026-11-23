@@ -1200,7 +1200,7 @@ mod tests {
             .expect("annotated");
         let after = load(Some(after), Parts::ALL).await.expect("refresh");
         let names: Vec<_> = after.tags.iter().map(|t| t.name.short()).collect();
-        assert_eq!(names, ["v1", "v2"]);
+        assert_eq!(names, ["v2", "v1"], "newest version first");
         assert!(after.badges.values().flatten().any(|b| b.label == "◆ v2"));
     }
 
@@ -1291,7 +1291,8 @@ mod tests {
         let more = load(Some(listed), Parts::ALL).await.expect("load");
         assert_eq!(
             more.pending_tags.clone().expect("known").names,
-            ["mine", "on-side"]
+            ["on-side", "mine"],
+            "in the tag list's order"
         );
 
         // Pushed through gf: recorded, no longer counted.

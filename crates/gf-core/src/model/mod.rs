@@ -9,6 +9,7 @@ mod remote;
 mod repo;
 mod stash;
 mod status;
+mod tag_order;
 
 pub use commit::{Commit, Signature, Timestamp};
 pub use diff::{DiffLine, FileChange, FileDiff, Hunk, LineKind};
@@ -18,3 +19,4 @@ pub use remote::Remote;
 pub use repo::{RepoHandle, RepoId};
 pub use stash::StashEntry;
 pub use status::{ChangeKind, ConflictKind, HeadInfo, StatusEntry, StatusReport};
+pub use tag_order::sort_newest_first as sort_tags_newest_first;

@@ -342,14 +342,21 @@ async fn tags() {
         .await
         .unwrap();
     r.create_tag("light", Some("HEAD"), None).await.unwrap();
+    r.create_tag("v1.10", None, None).await.unwrap();
+    r.create_tag("v1.9", None, None).await.unwrap();
     let tags = r.tags().await.unwrap();
-    assert_eq!(tags.len(), 2);
+    let names: Vec<_> = tags.iter().map(|t| t.name.short()).collect();
+    assert_eq!(
+        names,
+        ["v1.10", "v1.9", "v1.0", "light"],
+        "newest version first"
+    );
     assert!(
         tags.iter()
             .any(|t| t.message.as_deref() == Some("Release 1.0\n\nnotes"))
     );
     r.delete_tag("light").await.unwrap();
-    assert_eq!(r.tags().await.unwrap().len(), 1);
+    assert_eq!(r.tags().await.unwrap().len(), 3);
 }
 
 // ---------------------------------------------------------------- stash
