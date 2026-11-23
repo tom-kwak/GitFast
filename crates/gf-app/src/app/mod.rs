@@ -22,6 +22,10 @@ mod dialogs;
 mod focus;
 #[cfg(test)]
 mod keyboard_tests;
+/// Memory benchmark, kept with its instructions in `tools/mem-bench/`.
+#[cfg(all(test, feature = "mem-bench"))]
+#[path = "../../../../tools/mem-bench/bench.rs"]
+mod mem_bench;
 mod ops;
 mod outputs;
 #[cfg(test)]
