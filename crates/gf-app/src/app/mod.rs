@@ -344,6 +344,14 @@ pub enum Message {
     ResizeListDone,
     /// Double-click on the divider: back to the default width.
     ResizeListReset,
+    /// The refs panel divider is pressed: a drag starts.
+    ResizeRefsStart,
+    /// The refs panel divider moved `dx` pixels from where the drag started.
+    ResizeRefs(f32),
+    /// The refs panel divider is released: remember the width.
+    ResizeRefsDone,
+    /// Double-click on the refs panel divider: back to the default width.
+    ResizeRefsReset,
     GitFinished {
         repo: Option<RepoId>,
         args: Vec<String>,
@@ -359,6 +367,8 @@ pub struct App {
     tokens: Tokens,
     /// List width when the divider drag started (see `ResizeList`).
     list_drag_start: Option<f32>,
+    /// Refs panel width when the divider drag started (see `ResizeRefs`).
+    refs_drag_start: Option<f32>,
     bus: EventBus,
     runner: GitRunner,
     tabs: Vec<RepoTab>,
@@ -471,6 +481,7 @@ impl App {
             settings,
             tokens,
             list_drag_start: None,
+            refs_drag_start: None,
             bus,
             runner,
             tabs: Vec::new(),
@@ -1257,7 +1268,7 @@ impl App {
                     .list_drag_start
                     .get_or_insert(self.settings.appearance.list_cols);
                 self.settings.appearance.list_cols =
-                    resized_list_cols(start, dx, self.tokens.cols(1));
+                    resized_cols(start, dx, self.tokens.cols(1), MIN_LIST_COLS, MAX_LIST_COLS);
                 Task::none()
             }
             Message::ResizeListDone => {
@@ -1267,6 +1278,28 @@ impl App {
             }
             Message::ResizeListReset => {
                 self.settings.appearance.list_cols = gf_config::DEFAULT_LIST_COLS;
+                self.save_settings();
+                Task::none()
+            }
+            Message::ResizeRefsStart => {
+                self.refs_drag_start = Some(self.settings.appearance.refs_cols);
+                Task::none()
+            }
+            Message::ResizeRefs(dx) => {
+                let start = *self
+                    .refs_drag_start
+                    .get_or_insert(self.settings.appearance.refs_cols);
+                self.settings.appearance.refs_cols =
+                    resized_cols(start, dx, self.tokens.cols(1), MIN_REFS_COLS, MAX_REFS_COLS);
+                Task::none()
+            }
+            Message::ResizeRefsDone => {
+                self.refs_drag_start = None;
+                self.save_settings();
+                Task::none()
+            }
+            Message::ResizeRefsReset => {
+                self.settings.appearance.refs_cols = gf_config::DEFAULT_REFS_COLS;
                 self.save_settings();
                 Task::none()
             }
@@ -1854,7 +1887,7 @@ impl App {
                         ]
                         .spacing(2),
                     )
-                    .width(Length::Fixed(t.font_size * 22.0))
+                    .width(Length::Fixed(t.cols(1) * appearance.refs_cols))
                     .into()
                 } else {
                     widgets::collapsed_strip(
@@ -1882,7 +1915,17 @@ impl App {
                 }
                 let main: Element<'_, Message> =
                     main.push(main_area(t, tab, cx, active, appearance)).into();
-                row![left, main].spacing(4).height(Length::Fill).into()
+                if appearance.show_refs {
+                    // The divider takes the place of the gap.
+                    let divider =
+                        widgets::splitter::Splitter::new(Message::ResizeRefs, t.border, t.accent())
+                            .on_press(Message::ResizeRefsStart)
+                            .on_release(Message::ResizeRefsDone)
+                            .on_reset(Message::ResizeRefsReset);
+                    row![left, divider, main].height(Length::Fill).into()
+                } else {
+                    row![left, main].spacing(4).height(Length::Fill).into()
+                }
             }
         };
 
@@ -2079,14 +2122,17 @@ impl App {
 /// (character columns).
 const MIN_LIST_COLS: f32 = 18.0;
 const MAX_LIST_COLS: f32 = 120.0;
+/// Narrowest and widest the refs panel can be dragged (character columns).
+const MIN_REFS_COLS: f32 = 26.0;
+const MAX_REFS_COLS: f32 = 80.0;
 
 /// How long the app is busy before the status line says `working`.
 const BUSY_SHOWN_AFTER: Duration = Duration::from_millis(400);
 
-/// The list width after dragging the divider `dx` pixels from a drag that
-/// started at `start` columns.
-fn resized_list_cols(start: f32, dx: f32, col_px: f32) -> f32 {
-    (start + dx / col_px).clamp(MIN_LIST_COLS, MAX_LIST_COLS)
+/// The width after dragging a divider `dx` pixels from a drag that started
+/// at `start` columns, kept within `min..=max` columns.
+fn resized_cols(start: f32, dx: f32, col_px: f32, min: f32, max: f32) -> f32 {
+    (start + dx / col_px).clamp(min, max)
 }
 
 /// The file list beside the diff, the divider to resize it and the diff:
@@ -2453,11 +2499,36 @@ mod tests {
     #[test]
     fn dragging_the_divider_follows_the_cursor_within_limits() {
         // 8px columns: 80px right of the start is 10 columns wider.
-        assert!((resized_list_cols(34.0, 80.0, 8.0) - 44.0).abs() < f32::EPSILON);
-        assert!((resized_list_cols(34.0, -1000.0, 8.0) - MIN_LIST_COLS).abs() < f32::EPSILON);
-        assert!((resized_list_cols(34.0, 5000.0, 8.0) - MAX_LIST_COLS).abs() < f32::EPSILON);
+        assert!(
+            (resized_cols(34.0, 80.0, 8.0, MIN_LIST_COLS, MAX_LIST_COLS) - 44.0).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (resized_cols(34.0, -1000.0, 8.0, MIN_LIST_COLS, MAX_LIST_COLS) - MIN_LIST_COLS).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (resized_cols(34.0, 5000.0, 8.0, MIN_LIST_COLS, MAX_LIST_COLS) - MAX_LIST_COLS).abs()
+                < f32::EPSILON
+        );
         // Coming back from past a limit lands where the cursor is.
-        assert!((resized_list_cols(34.0, -16.0, 8.0) - 32.0).abs() < f32::EPSILON);
+        assert!(
+            (resized_cols(34.0, -16.0, 8.0, MIN_LIST_COLS, MAX_LIST_COLS) - 32.0).abs()
+                < f32::EPSILON
+        );
+        // The refs panel has its own range.
+        assert!(
+            (resized_cols(36.0, 80.0, 8.0, MIN_REFS_COLS, MAX_REFS_COLS) - 46.0).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (resized_cols(36.0, -1000.0, 8.0, MIN_REFS_COLS, MAX_REFS_COLS) - MIN_REFS_COLS).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (resized_cols(36.0, 5000.0, 8.0, MIN_REFS_COLS, MAX_REFS_COLS) - MAX_REFS_COLS).abs()
+                < f32::EPSILON
+        );
     }
     use keyboard::key::{Code, Key, Named, Physical};
 
