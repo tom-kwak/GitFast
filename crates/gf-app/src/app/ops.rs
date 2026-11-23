@@ -270,14 +270,26 @@ pub fn load_history(tab: &mut RepoTab, revision: String) -> Task<Message> {
     tab.history_request = tab.history_request.wrapping_add(1);
     let request = tab.history_request;
     let file_revision = tab.history.file_revision.clone();
+    // The next page of the revision shown reads only the commits past it.
+    let shown = tab.history.revision_history(&revision).cloned();
+    let badges = tab
+        .snapshot
+        .as_ref()
+        .map(|s| s.badges.clone())
+        .unwrap_or_default();
     Task::perform(
         {
             let revision = revision.clone();
             async move {
                 let history = if let Some((path, start)) = file_revision {
-                    History::load_path(&repo, path, start.map(|oid| oid.to_string()), limit).await
+                    let start = start.map(|oid| oid.to_string());
+                    History::load_path(&repo, path, start, limit, &badges).await
+                } else if let Some(shown) = shown {
+                    shown
+                        .load_more(&repo, vec![revision], false, limit, &badges)
+                        .await
                 } else {
-                    History::load(&repo, vec![revision], false, limit).await
+                    History::load(&repo, vec![revision], false, limit, &badges).await
                 };
                 history.map(Arc::new).map_err(|e| e.to_string())
             }

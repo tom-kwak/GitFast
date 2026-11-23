@@ -74,29 +74,67 @@ struct Above {
 /// wide history (hundreds of lanes) would otherwise keep hundreds of
 /// segments per row.
 pub fn layout(commits: &[Commit], colors: usize, max_lanes: usize) -> Vec<GraphRow> {
-    walk(commits, colors, max_lanes, None)
+    Layout::new(colors, max_lanes).rows(commits)
 }
 
 /// Each row as box-drawing glyphs, terminal style (for tests and
 /// debugging).
 pub fn layout_text(commits: &[Commit], colors: usize) -> Vec<String> {
     let mut texts = Vec::with_capacity(commits.len());
-    walk(commits, colors, usize::MAX, Some(&mut texts));
+    Layout::new(colors, usize::MAX).walk(commits, Some(&mut texts));
     texts
 }
 
-fn walk(
-    commits: &[Commit],
+/// The lanes open after the rows laid out so far. [`Layout::rows`] lays out
+/// the commits that come next in the same order — the next page of a
+/// history — as if they had been laid out together with the first ones.
+#[derive(Debug, Clone, Default)]
+pub struct Layout {
+    lanes: Vec<Option<Lane>>,
+    next_color: usize,
     colors: usize,
     max_lanes: usize,
+}
+
+impl Layout {
+    /// No rows yet; `colors` and `max_lanes` as for [`layout`].
+    pub fn new(colors: usize, max_lanes: usize) -> Self {
+        Self {
+            lanes: Vec::new(),
+            next_color: 0,
+            colors: colors.max(1),
+            max_lanes,
+        }
+    }
+
+    /// Rows of `commits`, continuing from the rows laid out before.
+    pub fn rows(&mut self, commits: &[Commit]) -> Vec<GraphRow> {
+        self.walk(commits, None)
+    }
+
+    fn walk(&mut self, commits: &[Commit], texts: Option<&mut Vec<String>>) -> Vec<GraphRow> {
+        let Self {
+            lanes,
+            next_color,
+            colors,
+            max_lanes,
+        } = self;
+        walk(lanes, next_color, *colors, *max_lanes, commits, texts)
+    }
+}
+
+fn walk(
+    lanes: &mut Vec<Option<Lane>>,
+    next_color: &mut usize,
+    colors: usize,
+    max_lanes: usize,
+    commits: &[Commit],
     mut texts: Option<&mut Vec<String>>,
 ) -> Vec<GraphRow> {
     let colors = colors.max(1);
-    let mut lanes: Vec<Option<Lane>> = Vec::new();
-    let mut next_color = 0usize;
     let mut new_color = || {
-        let c = next_color % colors;
-        next_color += 1;
+        let c = *next_color % colors;
+        *next_color += 1;
         c
     };
     let mut rows = Vec::with_capacity(commits.len());
@@ -472,5 +510,27 @@ mod tests {
                 .iter()
                 .any(|e| e.from_lane == 3 && e.to_lane == 0)
         );
+    }
+
+    #[test]
+    fn a_layout_continues_where_the_last_page_ended() {
+        let commits = [
+            commit(9, &[8, 5]),
+            commit(8, &[7]),
+            commit(6, &[4]),
+            commit(7, &[4, 3]),
+            commit(5, &[3]),
+            commit(4, &[2]),
+            commit(3, &[2]),
+            commit(2, &[1]),
+            commit(1, &[]),
+        ];
+        let whole = layout(&commits, 3, 2);
+        for split in 0..=commits.len() {
+            let mut l = Layout::new(3, 2);
+            let mut rows = l.rows(&commits[..split]);
+            rows.extend(l.rows(&commits[split..]));
+            assert_eq!(rows, whole, "split at {split}");
+        }
     }
 }

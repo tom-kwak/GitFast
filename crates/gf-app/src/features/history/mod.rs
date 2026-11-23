@@ -30,7 +30,6 @@ use crate::nav::{self, Key, Moved, Nav};
 use crate::repo_tab::{HISTORY_PAGE, History, Snapshot};
 use crate::theme::{Tokens, style};
 use crate::widgets::graph_canvas;
-use crate::widgets::memo::{self, Memo};
 use crate::widgets::virtual_list::{self, ScrollPos, columns, virtual_list};
 use crate::widgets::{self, colored, dim, format, mono};
 
@@ -72,8 +71,6 @@ pub struct State {
     revision_limit: usize,
     /// The next page was requested and has not arrived yet.
     loading_more: bool,
-    /// Lanes and widest summary of the history shown (see `view`).
-    widths: Memo<(memo::Id, memo::Id), (usize, usize)>,
     /// A commit to select and scroll to once a longer history arrives.
     reveal_pending: Option<Oid>,
     search: Option<search::State>,
@@ -478,6 +475,13 @@ impl State {
         self.revision.as_deref()
     }
 
+    /// History loaded for `revision`, when that is the one shown.
+    pub fn revision_history(&self, revision: &str) -> Option<&Arc<History>> {
+        self.data
+            .as_ref()
+            .filter(|_| self.revision.as_deref() == Some(revision))
+    }
+
     /// The commit whose tree should supply file-search candidates.
     pub fn loaded(&mut self, revision: &str, data: Arc<History>) {
         // Ignore results for a revision the user already navigated away from.
@@ -561,6 +565,12 @@ struct SummaryLine {
 /// The badges of `c` (each label cut at [`BADGE_COLS`]) and its summary,
 /// cut with `…` where the line would pass `budget` columns.
 /// `usize::MAX` measures the line uncut.
+/// Columns of `c`'s summary line with all the room it wants: what the list
+/// needs to show the whole of it.
+pub(crate) fn summary_cols(c: &Commit, badges: Option<&Vec<Badge>>) -> usize {
+    summary_line(c, badges, usize::MAX).cols
+}
+
 fn summary_line(c: &Commit, badges: Option<&Vec<Badge>>, budget: usize) -> SummaryLine {
     let mut parts: Vec<(String, Option<badges::Kind>)> = Vec::new();
     if let Some(refs) = badges {
@@ -1100,21 +1110,9 @@ impl Feature for State {
         }
 
         let decor = &snap.badges;
-        // Walks every commit: once per history / refs change, not per frame.
-        let key = (
-            memo::identity(history, history.commits.len()),
-            memo::identity(snap, snap.branches.len() + snap.tags.len()),
-        );
-        let (lanes, widest) = self.widths.get(key, || {
-            let lanes = history.graph.iter().map(|g| g.width).max().unwrap_or(1);
-            let widest = history
-                .commits
-                .iter()
-                .map(|c| summary_line(c, decor.get(&c.id), usize::MAX).cols)
-                .max()
-                .unwrap_or(0);
-            (lanes, widest)
-        });
+        // Worked out while the history loaded (walking every commit here
+        // took 50 ms on the first frame of an 80 000-commit history).
+        let (lanes, widest) = (history.lanes, history.widest);
         let graph_px = graph_canvas::width_for(lanes);
         // graph, hash, marker, author, date + gaps and padding: all but the summary.
         let fixed_px = graph_px + t.cols(8 + AUTHOR_COLS + DATE_COLS) + 5.0 * 6.0 + 12.0;

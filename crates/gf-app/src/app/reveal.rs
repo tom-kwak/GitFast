@@ -382,7 +382,7 @@ mod tests {
             );
         }
         // side is only in the all-branches history, at the same row there.
-        let all = crate::repo_tab::History::load(&r, Vec::new(), true, 1000)
+        let all = crate::repo_tab::History::load(&r, Vec::new(), true, 1000, &Default::default())
             .await
             .expect("history");
         for id in &side {
@@ -478,10 +478,15 @@ mod tests {
             let tab = app.active_tab_mut().expect("tab");
             tab.history.set_revision(Some("refs/heads/side".into()));
             let r = tab.repo.clone();
-            let side =
-                crate::repo_tab::History::load(&r, vec!["refs/heads/side".into()], false, 1000)
-                    .await
-                    .expect("side");
+            let side = crate::repo_tab::History::load(
+                &r,
+                vec!["refs/heads/side".into()],
+                false,
+                1000,
+                &Default::default(),
+            )
+            .await
+            .expect("side");
             tab.history
                 .loaded("refs/heads/side", std::sync::Arc::new(side));
         }

@@ -14,6 +14,7 @@ use gf_git::{
 };
 use gf_watch::RepoWatcher;
 
+use crate::badges::Badges;
 use crate::features::{changes, commit_box, diff_view, history, sidebar, worktrees};
 
 /// Commits per history page: the list starts with this many and loads
@@ -29,30 +30,45 @@ pub struct History {
     pub graph: Vec<GraphRow>,
     /// More commits exist past `commits` (the load hit its limit).
     pub more: bool,
+    /// The graph's lanes after the last row: the next page continues it.
+    pub(crate) layout: graph::Layout,
+    /// Most lanes a row touches (the graph column's width).
+    pub lanes: usize,
+    /// Columns of the widest summary line, badges included (see
+    /// [`history::summary_cols`]): the list's width, worked out here off
+    /// the UI thread rather than by walking every commit in `view`.
+    pub widest: usize,
 }
 
 impl History {
+    /// The history of `commits` without badges (tests).
+    #[cfg(test)]
     pub fn new(commits: Vec<Commit>) -> Self {
-        let graph = graph::layout(
-            &commits,
-            LANE_COLORS,
-            crate::widgets::graph_canvas::MAX_LANES,
-        );
+        Self::with_badges(commits, &Badges::default())
+    }
+
+    /// The history of `commits` with branch and tag badges `badges`.
+    fn with_badges(commits: Vec<Commit>, badges: &Badges) -> Self {
+        let mut layout = graph::Layout::new(LANE_COLORS, crate::widgets::graph_canvas::MAX_LANES);
+        let graph = layout.rows(&commits);
         Self {
+            lanes: lanes(&graph),
+            widest: widest(&commits, badges),
             commits,
             graph,
             more: false,
+            layout,
         }
     }
 
     /// The first `limit` commits of `commits`; `more` when there were
     /// more than that.
-    fn limited(mut commits: Vec<Commit>, limit: usize) -> Self {
+    fn limited(mut commits: Vec<Commit>, limit: usize, badges: &Badges) -> Self {
         let more = commits.len() > limit;
         commits.truncate(limit);
         Self {
             more,
-            ..Self::new(commits)
+            ..Self::with_badges(commits, badges)
         }
     }
 
@@ -62,6 +78,7 @@ impl History {
         path: PathBuf,
         revision: Option<String>,
         limit: usize,
+        badges: &Badges,
     ) -> gf_core::Result<Self> {
         let query = LogQuery {
             revisions: revision.into_iter().collect(),
@@ -71,7 +88,7 @@ impl History {
             max_count: Some(limit + 1),
             ..LogQuery::default()
         };
-        Ok(Self::limited(repo.log(&query).await?, limit))
+        Ok(Self::limited(repo.log(&query).await?, limit, badges))
     }
 
     /// Up to `limit` commits of `revisions` (HEAD when empty) or of all
@@ -82,6 +99,7 @@ impl History {
         revisions: Vec<String>,
         all_refs: bool,
         limit: usize,
+        badges: &Badges,
     ) -> gf_core::Result<Self> {
         let query = LogQuery {
             revisions,
@@ -90,8 +108,79 @@ impl History {
             order: LogOrder::Topo,
             ..LogQuery::default()
         };
-        Ok(Self::limited(repo.log(&query).await?, limit))
+        Ok(Self::limited(repo.log(&query).await?, limit, badges))
     }
+
+    /// The same history as [`Self::load`] with `limit`, reading only the
+    /// commits past the ones already loaded: a page is as quick at the
+    /// 80 000th commit as at the first, where a whole load would print every
+    /// commit again. `self` must have been loaded for the same `revisions`
+    /// and refs; the walk is checked to go on from its last commit, and
+    /// anything else (refs moved meanwhile) loads the whole history again.
+    pub async fn load_more(
+        &self,
+        repo: &Repository,
+        revisions: Vec<String>,
+        all_refs: bool,
+        limit: usize,
+        badges: &Badges,
+    ) -> gf_core::Result<Self> {
+        let have = self.commits.len();
+        let Some(last) = self.commits.last().filter(|_| self.more && limit > have) else {
+            return Self::load(repo, revisions, all_refs, limit, badges).await;
+        };
+        let wanted = limit - have;
+        let query = LogQuery {
+            revisions: revisions.clone(),
+            all_refs,
+            // From the last commit loaded (the check), then one extra to
+            // tell whether there is more.
+            skip: have - 1,
+            max_count: Some(wanted + 2),
+            order: LogOrder::Topo,
+            ..LogQuery::default()
+        };
+        let mut page = repo.log(&query).await?;
+        if page.first().map(|c| &c.id) != Some(&last.id) {
+            tracing::debug!("history moved under the next page; loading it whole");
+            return Self::load(repo, revisions, all_refs, limit, badges).await;
+        }
+        page.remove(0);
+        let more = page.len() > wanted;
+        page.truncate(wanted);
+        let mut layout = self.layout.clone();
+        let rows = layout.rows(&page);
+        let lanes = self.lanes.max(lanes(&rows));
+        let widest = self.widest.max(widest(&page, badges));
+        let mut commits = Vec::with_capacity(have + page.len());
+        commits.extend_from_slice(&self.commits);
+        commits.extend(page);
+        let mut graph = Vec::with_capacity(commits.len());
+        graph.extend_from_slice(&self.graph);
+        graph.extend(rows);
+        Ok(Self {
+            commits,
+            graph,
+            more,
+            layout,
+            lanes,
+            widest,
+        })
+    }
+}
+
+/// Most lanes any of `rows` touches (at least one).
+fn lanes(rows: &[GraphRow]) -> usize {
+    rows.iter().map(|g| g.width).max().unwrap_or(1)
+}
+
+/// Columns of the widest summary line of `commits`.
+fn widest(commits: &[Commit], badges: &Badges) -> usize {
+    commits
+        .iter()
+        .map(|c| history::summary_cols(c, badges.get(&c.id)))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Which parts of a [`Snapshot`] a refresh reads again; the rest is kept
@@ -273,8 +362,10 @@ pub struct Snapshot {
     pub stashes: Vec<StashEntry>,
     /// Shared between snapshots while its refs do not move.
     pub history: Arc<History>,
-    /// What the history was loaded for (see [`history_key`]).
+    /// The refs the history was loaded for (see [`history_key`]).
     pub(crate) history_key: u64,
+    /// How many commits the history was loaded for.
+    pub(crate) history_limit: usize,
     /// `+added −removed` per file for the working tree list.
     pub lines: LineStats,
     /// For a branch without upstream: commits no remote has yet (what a
@@ -355,8 +446,9 @@ fn count_bytes(len: u64, path: &Path) -> Option<LineCounts> {
     })
 }
 
-/// Everything the history list depends on: when it is the same as last
-/// time, the commits and their graph are reused instead of read again.
+/// Everything the history list depends on but its length: when it is the
+/// same as last time, the commits and their graph are reused instead of
+/// read again, and a longer history only reads the commits past them.
 /// `git log --all` also walks `refs/stash`, hence the stashes.
 fn history_key(
     head: Option<&Oid>,
@@ -364,11 +456,10 @@ fn history_key(
     tags: &[Tag],
     stashes: &[StashEntry],
     all_branches: bool,
-    limit: usize,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (head, all_branches, limit).hash(&mut h);
+    (head, all_branches).hash(&mut h);
     for b in branches {
         (b.name.as_str(), &b.target).hash(&mut h);
     }
@@ -603,21 +694,27 @@ impl Snapshot {
                 &snap.tags,
                 &snap.stashes,
                 all_branches,
-                history_limit,
             )
         } else {
             snap.history_key
         };
         // Only a refresh that read the refs knows where they are now (a
         // status-only one sees a new HEAD before the branch it moved).
-        let history = parts.history || (refs_part && key != snap.history_key);
+        let history = parts.history
+            || (refs_part && (key != snap.history_key || history_limit != snap.history_limit));
         if history {
-            snap.history = Arc::new(
-                History::load(&repo, Vec::new(), all_branches, history_limit)
+            let loaded = if key == snap.history_key {
+                // Same refs: a longer history (next page) reads only the
+                // commits past the loaded ones.
+                snap.history
+                    .load_more(&repo, Vec::new(), all_branches, history_limit, &snap.badges)
                     .await
-                    .map_err(err)?,
-            );
+            } else {
+                History::load(&repo, Vec::new(), all_branches, history_limit, &snap.badges).await
+            };
+            snap.history = Arc::new(loaded.map_err(err)?);
             snap.history_key = key;
+            snap.history_limit = history_limit;
         }
         snap.loaded = Parts {
             status: status_part,
@@ -1430,5 +1527,110 @@ mod tests {
         r.record_remote_tags("origin").await.expect("relist");
         let fresh = load(Some(stale), Parts::ALL).await.expect("load");
         assert!(fresh.pending_tags.as_ref().expect("known").names.is_empty());
+    }
+
+    /// Topic branches off `main`, half of them merged back: a graph with
+    /// several lanes open at a time.
+    fn branchy_repo() -> gf_test_support::TestRepo {
+        let repo = gf_test_support::TestRepo::new();
+        for i in 0..30 {
+            repo.write("f.txt", &format!("{i}\n"));
+            repo.commit_all(&format!("main {i}"));
+            if i % 5 == 0 {
+                repo.git(&["branch", &format!("topic{i}")]);
+            }
+        }
+        for i in (0..30).step_by(5) {
+            let topic = format!("topic{i}");
+            repo.git(&["switch", "-q", &topic]);
+            repo.write(format!("{topic}.txt"), "work\n");
+            repo.commit_all(&format!("{topic} work"));
+            repo.git(&["switch", "-q", "main"]);
+            if i % 10 == 0 {
+                repo.git(&["merge", "-q", "--no-ff", "--no-edit", &topic]);
+            }
+        }
+        repo
+    }
+
+    async fn open(repo: &gf_test_support::TestRepo) -> Repository {
+        let runner = gf_git::GitRunner::new()
+            .with_cleared_env()
+            .with_env(repo.env());
+        Repository::open(repo.path(), runner).await.expect("open")
+    }
+
+    fn same_history(a: &History, b: &History) {
+        let ids = |h: &History| h.commits.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(a), ids(b));
+        assert_eq!(a.graph, b.graph);
+        assert_eq!(a.more, b.more);
+        assert_eq!((a.lanes, a.widest), (b.lanes, b.widest));
+    }
+
+    #[tokio::test]
+    async fn a_longer_history_reads_on_from_the_loaded_one() {
+        let repo = branchy_repo();
+        let r = open(&repo).await;
+        for all in [false, true] {
+            for limit in [40, 100] {
+                let whole = History::load(&r, Vec::new(), all, limit, &Badges::default())
+                    .await
+                    .expect("whole");
+                let mut paged = History::load(&r, Vec::new(), all, 7, &Badges::default())
+                    .await
+                    .expect("page");
+                while paged.more && paged.commits.len() < limit {
+                    let next = (paged.commits.len() + 7).min(limit);
+                    paged = paged
+                        .load_more(&r, Vec::new(), all, next, &Badges::default())
+                        .await
+                        .expect("more");
+                }
+                same_history(&paged, &whole);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_next_page_of_a_moved_history_loads_it_whole() {
+        let repo = branchy_repo();
+        let r = open(&repo).await;
+        let first = History::load(&r, Vec::new(), false, 5, &Badges::default())
+            .await
+            .expect("page");
+        repo.write("f.txt", "moved\n");
+        repo.commit_all("moved on");
+        let next = first
+            .load_more(&r, Vec::new(), false, 10, &Badges::default())
+            .await
+            .expect("more");
+        let whole = History::load(&r, Vec::new(), false, 10, &Badges::default())
+            .await
+            .expect("whole");
+        same_history(&next, &whole);
+        assert_eq!(next.commits[0].summary, "moved on");
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_with_a_higher_limit_extends_its_history() {
+        let repo = branchy_repo();
+        let r = open(&repo).await;
+        let first = Snapshot::load(r.clone(), None, Parts::RELOAD, true, 10)
+            .await
+            .expect("first");
+        let longer = Snapshot::load(r.clone(), Some(first), Parts::HISTORY, true, 20)
+            .await
+            .expect("longer");
+        let whole = History::load(&r, Vec::new(), true, 20, &longer.badges)
+            .await
+            .expect("whole");
+        same_history(&longer.history, &whole);
+        // The widest line is one with branch badges (`topic…`), not a
+        // bare summary.
+        let bare = History::load(&r, Vec::new(), true, 20, &Badges::default())
+            .await
+            .expect("bare");
+        assert!(longer.history.widest > bare.widest);
     }
 }
