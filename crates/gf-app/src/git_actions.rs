@@ -67,7 +67,7 @@ pub fn created_repository(args: &[String], cwd: &Path) -> Option<PathBuf> {
 
 /// Directory name git derives from a clone URL: last path component without
 /// a trailing `.git` (`git@host:team/app.git` → `app`).
-fn humanish_name(url: &str) -> Option<String> {
+pub fn humanish_name(url: &str) -> Option<String> {
     let trimmed = url.trim_end_matches('/').trim_end_matches("/.git");
     let last = trimmed.rsplit(['/', ':']).next()?;
     let name = last.strip_suffix(".git").unwrap_or(last);
@@ -86,7 +86,7 @@ pub fn hint_for_error(args: &[String], error: &str) -> Option<&'static str> {
     }
     if error.contains("Authentication failed") || error.contains("could not read Username") {
         return Some(
-            "authentication failed — set up an SSH key or a credential helper; account login arrives with the hosting integration",
+            "authentication failed — HTTPS: log in under Settings (⌘,) → ACCOUNTS; SSH: add your key to ssh-agent",
         );
     }
     if error.contains("non-fast-forward") || error.contains("fetch first") {
@@ -167,7 +167,7 @@ const RULES: &[Rule] = &[
         "The remote refused your credentials (or none were available).",
         &[
             "SSH remote: add your key to ssh-agent (`ssh-add`) and to the host account.",
-            "HTTPS remote: store a token with a credential helper (osxkeychain).",
+            "HTTPS remote: log in with a token under Settings (⌘,) → ACCOUNTS.",
             "Check access with `ssh -T git@<host>` in a terminal.",
         ],
     ),
@@ -460,6 +460,63 @@ pub fn diagnose(error: &str) -> Diagnosis {
         .map_or(UNKNOWN, |r| r.diagnosis.clone())
 }
 
+/// Whether `text` is a URL git can clone from a server: `https://`,
+/// `http://`, `ssh://`, `git://`, or the scp form `user@host:path`.
+pub fn is_clone_url(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return false;
+    }
+    let schemes = ["https://", "http://", "ssh://", "git://"];
+    if let Some(rest) = schemes.iter().find_map(|s| {
+        text.get(..s.len())
+            .filter(|p| p.eq_ignore_ascii_case(s))
+            .map(|_| &text[s.len()..])
+    }) {
+        return rest.split('/').next().is_some_and(|host| !host.is_empty());
+    }
+    text.split_once(':').is_some_and(|(user_host, path)| {
+        user_host
+            .split_once('@')
+            .is_some_and(|(user, host)| !user.is_empty() && !host.is_empty())
+            && !user_host.contains('/')
+            && !path.is_empty()
+            && !path.starts_with('/')
+    })
+}
+
+/// Whether git failed because an HTTPS server wants a (better) login:
+/// no credentials to send, or the ones sent were refused.
+pub fn needs_login(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    [
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "invalid username or password",
+        "terminal prompts disabled",
+    ]
+    .iter()
+    .any(|n| lower.contains(n))
+}
+
+/// The server an HTTPS login failure names (`Authentication failed for
+/// 'https://github.com/a/b.git/'`, `could not read Username for
+/// 'https://github.com'`), as the log-in dialog writes it.
+pub fn auth_server(error: &str) -> Option<String> {
+    let start = error.find("https://").or_else(|| error.find("http://"))?;
+    let url: String = error[start..]
+        .chars()
+        .take_while(|c| !matches!(c, '\'' | '"' | ' ' | '\n'))
+        .collect();
+    let (protocol, host) = gf_git::ops::credential::server_of(&url)?;
+    Some(if protocol == "https" {
+        host
+    } else {
+        format!("{protocol}://{host}")
+    })
+}
+
 /// Reads git's refusal to check out a branch another worktree has:
 /// `fatal: 'topic' is already used by worktree at '/work/topic'` (older git:
 /// `is already checked out at '…'`). Returns the branch and that worktree's
@@ -507,6 +564,52 @@ pub fn error_excerpt(error: &str, max: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clone_urls_are_told_from_paths() {
+        for url in [
+            "https://github.com/team/app.git",
+            "HTTPS://github.com/team/app",
+            "http://10.0.0.5/a.git",
+            "ssh://git@github.com/team/app.git",
+            "git://example.com/app.git",
+            "git@github.com:team/app.git",
+            " git@gitlab.example.com:group/sub/app.git ",
+        ] {
+            assert!(is_clone_url(url), "{url}");
+        }
+        for text in [
+            "",
+            "~/work/app",
+            "/tmp/repo",
+            "app",
+            "https://",
+            "git@github.com:",
+            "C:/work/app",
+            "a b@host:x",
+            "file:///tmp/repo",
+        ] {
+            assert!(!is_clone_url(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn login_failures_name_their_server() {
+        let e = "`git push` failed with exit code Some(128): remote: Invalid username or token.\n\
+                 fatal: Authentication failed for 'https://github.com/a/b.git/'";
+        assert!(needs_login(e));
+        assert_eq!(auth_server(e).as_deref(), Some("github.com"));
+        let e = "fatal: could not read Username for 'https://git.example.com:8443': \
+                 terminal prompts disabled";
+        assert!(needs_login(e));
+        assert_eq!(auth_server(e).as_deref(), Some("git.example.com:8443"));
+        let e = "fatal: Authentication failed for 'http://10.0.0.5/a.git/'";
+        assert_eq!(auth_server(e).as_deref(), Some("http://10.0.0.5"));
+        let ssh = "git@github.com: Permission denied (publickey).";
+        assert!(!needs_login(ssh));
+        assert_eq!(auth_server(ssh), None);
+        assert!(!needs_login("! [rejected] main -> main (fetch first)"));
+    }
 
     #[test]
     fn diagnoses_common_failures() {

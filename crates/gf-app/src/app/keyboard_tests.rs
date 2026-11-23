@@ -427,17 +427,25 @@ async fn arrows_in_the_picker_do_not_open_anything() {
 // ---------------------------------------------------------- settings
 
 #[tokio::test]
-async fn arrows_in_the_settings_cycle_the_theme_and_escape_closes_them() {
+async fn arrows_in_the_settings_pick_a_section_and_a_theme_and_escape_closes_them() {
+    use crate::features::settings_view::Section;
     let mut ui = Ui::welcome().await;
     chord(&mut ui, Shortcut::Settings).await;
     assert!(ui.app.settings_open);
+    assert_eq!(ui.app.settings_page.section, Section::Accounts);
     let before = ui.app.tokens.name;
 
+    // ←/→ only change the theme on APPEARANCE.
+    press(&mut ui, Key::Right).await;
+    assert_eq!(ui.app.tokens.name, before);
     press(&mut ui, Key::Down).await;
-    let next = ui.app.tokens.name;
-    assert_ne!(next, before, "↓ picks the next theme");
+    assert_eq!(ui.app.settings_page.section, Section::Appearance);
+    press(&mut ui, Key::Right).await;
+    assert_ne!(ui.app.tokens.name, before, "→ picks the next theme");
+    press(&mut ui, Key::Left).await;
+    assert_eq!(ui.app.tokens.name, before, "← goes back");
     press(&mut ui, Key::Up).await;
-    assert_eq!(ui.app.tokens.name, before, "↑ goes back");
+    assert_eq!(ui.app.settings_page.section, Section::Accounts);
 
     chord(&mut ui, Shortcut::Escape).await;
     assert!(!ui.app.settings_open);

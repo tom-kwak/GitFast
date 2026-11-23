@@ -18,6 +18,7 @@
 
 mod advanced;
 mod branch_delete;
+mod clone;
 mod dialogs;
 mod focus;
 #[cfg(test)]
@@ -148,11 +149,22 @@ pub enum OpKind {
         tags: Option<crate::repo_tab::PendingTags>,
     },
     Pull(gf_git::PullMode),
+    /// Another operation that talks to a server (run again after logging
+    /// in when the server refuses it).
+    Remote(RemoteOp),
     /// Undoing (or redoing) a step: it moves to the other stack once this
     /// succeeds.
     Undo {
         redo: bool,
     },
+}
+
+/// Operations besides fetch/pull/push that reach a server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteOp {
+    PushTag { remote: String, name: String },
+    UpdateSubmodules,
+    LfsPull,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -210,6 +222,17 @@ pub enum Message {
     Switcher(tab_switcher::Message),
     TabList(tab_list::Message),
     Settings(settings_view::Message),
+    /// A login was saved in git's credential helper (its name), or not;
+    /// then run what the server refused before, if anything.
+    LoggedIn(
+        gf_config::Account,
+        Result<settings::LoginSaved, String>,
+        Option<Box<settings::Retry>>,
+    ),
+    /// A login was removed from git's credential helper, or not.
+    LoggedOut(gf_config::Account, Result<(), String>),
+    /// Something the settings screen reads in the background.
+    SettingsProbed(settings::Probed),
     /// Show the open-repository window (⌘O, `+ open`).
     OpenPicker,
     /// An animation frame (only subscribed to while something animates).
@@ -255,6 +278,10 @@ pub enum Message {
     DiffFinished(RepoId, diff_view::Role, diff_view::Completion),
     AmendTextLoaded(RepoId, Option<String>),
     SyncProgress(Progress),
+    CloneProgress(Progress),
+    CloneDone(Box<clone::CloneDone>),
+    /// `[ cancel ]` beside the clone in the status line.
+    CancelClone,
     OpDone {
         repo: RepoId,
         label: String,
@@ -387,6 +414,8 @@ pub struct App {
     code_dialog: Option<code_view::State>,
     code_dialog_request: u64,
     settings_open: bool,
+    /// The settings screen's section and what it read in the background.
+    settings_page: settings_view::Page,
     /// Open-repository window (modal, under a confirmation it asks for).
     picker: Option<repo_picker::State>,
     /// Tabs by last use, for ⌃⇥.
@@ -404,6 +433,8 @@ pub struct App {
     /// Interactive rebase plan being edited (modal).
     /// Running fetch/pull/push and its cancel handle.
     sync: Option<(toolbar::Sync, CancellationToken)>,
+    /// A clone from the open window, shown in the status line.
+    cloning: Option<clone::Cloning>,
     /// Keyed by worktree git directory so a running switch survives closing its tab.
     checkouts: HashMap<PathBuf, Checkout>,
     stage_files: HashMap<PathBuf, ops::FileStages>,
@@ -500,6 +531,7 @@ impl App {
             code_dialog: None,
             code_dialog_request: 0,
             settings_open: false,
+            settings_page: settings_view::Page::default(),
             picker: None,
             mru: tab_switcher::Mru::default(),
             switcher: None,
@@ -508,6 +540,7 @@ impl App {
             menu: None,
             pointer: crate::widgets::pointer::Pointer::default(),
             sync: None,
+            cloning: None,
             checkouts: HashMap::new(),
             stage_files: HashMap::new(),
             deleting_branches: HashSet::new(),
@@ -668,6 +701,12 @@ impl App {
             }
             Message::TabList(m) => self.on_tab_list(m),
             Message::Settings(m) => self.on_settings(m),
+            Message::LoggedIn(account, result, retry) => self.logged_in(account, result, retry),
+            Message::LoggedOut(account, result) => self.logged_out(account, result),
+            Message::SettingsProbed(probed) => {
+                self.settings_probed(probed);
+                Task::none()
+            }
             Message::CodeDialog(m) => self.on_code_view(m),
             Message::PathRevealed(result) => {
                 if let Err(e) = result {
@@ -1147,6 +1186,12 @@ impl App {
                 }
                 Task::none()
             }
+            Message::CloneProgress(p) => self.clone_progress(p),
+            Message::CloneDone(done) => self.clone_done(*done),
+            Message::CancelClone => {
+                self.cancel_clone();
+                Task::none()
+            }
             Message::SyncProgress(p) => {
                 if let Some((sync, _)) = self.sync.as_mut() {
                     sync.progress = Some(p);
@@ -1584,6 +1629,10 @@ impl App {
                 self.picker = None;
                 Task::batch([self.restore_focus(), self.update(Message::Open(path))])
             }
+            Output::Clone(url) => {
+                self.picker = None;
+                self.clone_dialog(url)
+            }
             Output::SwitchTab(i) => {
                 self.picker = None;
                 Task::batch([self.restore_focus(), self.select_tab(i)])
@@ -1714,6 +1763,10 @@ impl App {
             return match k {
                 Shortcut::Settings | Shortcut::Escape => self.toggle_settings(),
                 Shortcut::Quit => iced::exit(),
+                Shortcut::SelectTab(i) => match settings_view::Section::nth(i) {
+                    Some(section) => self.show_settings_section(section),
+                    None => Task::none(),
+                },
                 _ => Task::none(),
             };
         }
@@ -1797,6 +1850,9 @@ impl App {
                 if let Some((_, token)) = &self.sync {
                     token.cancel();
                     self.flash(NoteKind::Info, "cancelling…");
+                    return Task::none();
+                }
+                if self.cancel_clone() {
                     return Task::none();
                 }
                 // A file's history picked in Find: Esc goes back, like `×`.
@@ -1984,7 +2040,10 @@ impl App {
             .push(status_line::view(
                 t,
                 tab,
-                self.shows_busy(checkout.is_some()).then_some((
+                // A clone has its own line (its git counts as running too).
+                (self.shows_busy(checkout.is_some())
+                    && (self.cloning.is_none() || checkout.is_some()))
+                .then_some((
                     spinner,
                     checkout.map(|c| {
                         let target = &c.target;
@@ -1994,6 +2053,10 @@ impl App {
                             .unwrap_or(target)
                     }),
                 )),
+                self.cloning.as_ref().map(|c| status_line::Running {
+                    text: format!("{spinner} {}", c.status()),
+                    on_cancel: Message::CancelClone,
+                }),
                 self.flash.as_ref(),
                 tab.map(|tab| status_line::UndoBar {
                     undo: tab.undo.next(false).map(|s| s.label.clone()),
@@ -2018,7 +2081,7 @@ impl App {
                     .code_dialog
                     .as_ref()
                     .map(|code| code.view(cx).map(Message::CodeDialog)),
-                _ if self.settings_open => Some(settings_view::view(t).map(Message::Settings)),
+                _ if self.settings_open => Some(self.settings_view(t).map(Message::Settings)),
                 (None, Some(p), _) => Some(p.view(cx).map(Message::Picker)),
                 _ if self.switcher.is_some() => Some(
                     tab_switcher::view(
@@ -2110,7 +2173,8 @@ impl App {
             let every = Duration::from_secs(self.settings.worktrees.poll_secs.max(1));
             subs.push(iced::time::every(every).map(|_| Message::WorktreePoll));
         }
-        if self.busy() {
+        // A clone shows its own progress (not `working`), but turns too.
+        if self.busy() || self.cloning.is_some() {
             subs.push(iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick));
         } else if !self.tabs.is_empty() {
             // Keeps relative times (e.g. `⟳ fetch (5m)`) current while idle.

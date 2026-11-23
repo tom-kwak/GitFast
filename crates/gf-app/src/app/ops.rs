@@ -996,14 +996,24 @@ impl App {
                 let can_ask = self.dialog.is_none()
                     && self.code_dialog.is_none()
                     && self.rebase_editor().is_none();
-                let asked = match &kind {
-                    OpKind::Push {
-                        branch: Some(branch),
-                        to: None,
-                        tags,
-                        ..
-                    } if can_ask && e.contains(gf_git::CONFIGURED_PUSH_REWRITES) => {
-                        tasks.push(self.confirm(Confirm::delete(
+                // An HTTPS server that wants a login: ask for it, then run
+                // the same push/pull/fetch again.
+                let wants_login = can_ask
+                    && git_actions::needs_login(&e)
+                    && git_actions::auth_server(&e).is_some();
+                let asked = if wants_login {
+                    let retry = super::settings::retry_after_login(&kind, &label, id);
+                    tasks.push(self.ask_login_for(&label, &e, retry));
+                    true
+                } else {
+                    match &kind {
+                        OpKind::Push {
+                            branch: Some(branch),
+                            to: None,
+                            tags,
+                            ..
+                        } if can_ask && e.contains(gf_git::CONFIGURED_PUSH_REWRITES) => {
+                            tasks.push(self.confirm(Confirm::delete(
                             "Push may overwrite remote refs",
                             vec![
                                 "Git is configured to force updates, delete refs or mirror the remote.".into(),
@@ -1018,65 +1028,69 @@ impl App {
                                 allow_configured_rewrites: true,
                             },
                         )));
-                        true
-                    }
-                    OpKind::Push {
-                        branch,
-                        to,
-                        offer_force: true,
-                        ..
-                    } if can_ask
-                        && (e.contains("non-fast-forward") || e.contains("fetch first")) =>
-                    {
-                        // Overwrites commits on the remote: a deletion.
-                        let ask = self.confirm(Confirm::delete(
-                            "Push rejected",
-                            vec![
-                                "The remote branch has commits you don't have.".into(),
-                                "Usually: pull first, then push again.".into(),
-                                "Force-with-lease overwrites the remote branch, but only if".into(),
-                                "nobody pushed since your last fetch.".into(),
-                            ],
-                            "Force push (with lease)",
-                            Purpose::ForcePush {
-                                branch: branch.clone(),
-                                to: to.clone(),
-                            },
-                        ));
-                        tasks.push(ask);
-                        true
-                    }
-                    OpKind::Pull(
-                        PullMode::FastForwardOnly | PullMode::FastForwardWithAutostash,
-                    ) if can_ask
-                        && (e.contains("Not possible to fast-forward")
-                            || e.contains("divergent")
-                            || e.contains("reconcile")) =>
-                    {
-                        let ask = self.confirm(
-                            Confirm::change(
-                                "pull-strategy",
-                                "Branches have diverged",
+                            true
+                        }
+                        OpKind::Push {
+                            branch,
+                            to,
+                            offer_force: true,
+                            ..
+                        } if can_ask
+                            && (e.contains("non-fast-forward") || e.contains("fetch first")) =>
+                        {
+                            // Overwrites commits on the remote: a deletion.
+                            let ask = self.confirm(Confirm::delete(
+                                "Push rejected",
                                 vec![
-                                    "Your branch and its upstream both have new commits.".into(),
-                                    "Choose how to combine them:".into(),
+                                    "The remote branch has commits you don't have.".into(),
+                                    "Usually: pull first, then push again.".into(),
+                                    "Force-with-lease overwrites the remote branch, but only if"
+                                        .into(),
+                                    "nobody pushed since your last fetch.".into(),
                                 ],
-                                "Pull",
-                                Purpose::PullStrategy(id),
-                            )
-                            .always()
-                            .check(
-                                "rebase my commits on top (instead of a merge commit)",
-                                false,
-                            ),
-                        );
-                        tasks.push(ask);
-                        true
-                    }
-                    OpKind::Pull(PullMode::FastForwardOnly)
-                        if can_ask && e.contains("local changes") && e.contains("overwritten") =>
-                    {
-                        let ask = self.confirm(
+                                "Force push (with lease)",
+                                Purpose::ForcePush {
+                                    branch: branch.clone(),
+                                    to: to.clone(),
+                                },
+                            ));
+                            tasks.push(ask);
+                            true
+                        }
+                        OpKind::Pull(
+                            PullMode::FastForwardOnly | PullMode::FastForwardWithAutostash,
+                        ) if can_ask
+                            && (e.contains("Not possible to fast-forward")
+                                || e.contains("divergent")
+                                || e.contains("reconcile")) =>
+                        {
+                            let ask = self.confirm(
+                                Confirm::change(
+                                    "pull-strategy",
+                                    "Branches have diverged",
+                                    vec![
+                                        "Your branch and its upstream both have new commits."
+                                            .into(),
+                                        "Choose how to combine them:".into(),
+                                    ],
+                                    "Pull",
+                                    Purpose::PullStrategy(id),
+                                )
+                                .always()
+                                .check(
+                                    "rebase my commits on top (instead of a merge commit)",
+                                    false,
+                                ),
+                            );
+                            tasks.push(ask);
+                            true
+                        }
+                        OpKind::Pull(PullMode::FastForwardOnly)
+                            if can_ask
+                                && e.contains("local changes")
+                                && e.contains("overwritten") =>
+                        {
+                            let ask = self.confirm(
                             Confirm::change(
                                 "pull-autostash",
                                 "Local changes overlap the pull",
@@ -1089,10 +1103,11 @@ impl App {
                             )
                             .always(),
                         );
-                        tasks.push(ask);
-                        true
+                            tasks.push(ask);
+                            true
+                        }
+                        _ => false,
                     }
-                    _ => false,
                 };
                 let mut lines = vec![e.clone()];
                 if let Some(hint) = git_actions::hint_for_error(&[], &e) {
@@ -1239,7 +1254,17 @@ impl App {
                     NoteKind::Error,
                     format!("✗ {} — see log", truncate(&title, 40)),
                 );
-                tasks.push(self.show_failure(&title, &e));
+                // An HTTPS server wants a login: ask, then run it again.
+                if git_actions::needs_login(&e) && git_actions::auth_server(&e).is_some() {
+                    let retry = super::settings::Retry {
+                        label: title.clone(),
+                        purpose: super::dialogs::Purpose::RunGit(args),
+                        values: Vec::new(),
+                    };
+                    tasks.push(self.ask_login_for(&title, &e, Some(retry)));
+                } else {
+                    tasks.push(self.show_failure(&title, &e));
+                }
             }
         }
         if let Some(id) = repo {

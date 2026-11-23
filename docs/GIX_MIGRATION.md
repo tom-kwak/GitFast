@@ -81,6 +81,7 @@ gf-git/src/
 | BisectOps / LfsOps | 전부 | CLI | 미구현 |
 | MaintenanceOps | commit-graph 작성(없을 때만) | CLI | 저장소 파일을 쓰는 작업이라 git이 만든 것과 같아야 함 |
 | (Repository::run) | 프롬프트의 임의 git 명령 | CLI | "모든 git 명령" 경로 |
+| (ops::credential) | 로그인 저장·삭제(`credential approve`/`reject`), 토큰 유무(`credential fill`, 프롬프트 없이), 토큰 확인(`ls-remote --heads`), helper 확인·설정(`config --get-urlmatch`/`--global credential.helper`) | CLI | 저장소 없이 실행. 토큰은 사용자의 credential helper가 보관하므로 git이 해야 함 |
 
 ## 3. 단계
 
@@ -94,6 +95,7 @@ gf-git/src/
 | **P4** 선택 기능 ✅ | fetch를 gix로(설정 `git.gix_fetch`, `:gix-fetch on`) | 같은 원격 변경을 두 clone에 CLI·gix로 각각 fetch해 ref가 같은지 비교(새 커밋·새 브랜치·prune·강제 갱신·태그 자동 추적·도달 불가 태그 제외·remote HEAD 생성·`--all`), 객체 연결성 검사, 취소·대체 경로 테스트. 실제 HTTPS·SSH 원격과 인증 도우미로는 아직 확인하지 않음 |
 | **P5** 조회 C ✅ | worktree_status, default_base, undo capture. 저장소 열기는 `rev-parse` 2번 → 1번(CLI 유지: 경로 표기가 git과 같아야 함) | 계약 테스트 통과(주 트리·연결 트리·base 기록/생성 기록/추측·detached·충돌·origin/HEAD 없음, capture의 index·파일·심볼릭 링크·실행 비트·주석 태그·stash·config·충돌 stage·unborn·submodule). 새 테스트는 gix가 `Unsupported`로 빠지면 실패하는 `served`로 확인 |
 | 보류 | commit, checkout, reset, merge 계열, stash 쓰기, push/pull, blame, bisect, LFS | gix의 해당 crate가 "usable" 이상이 되면 다시 검토 |
+| 보류 | clone | 2026-11-24 측정(gix 0.90, git 2.50.1, 같은 결과 확인): `file://`로 git 소스 저장소(커밋 8.3만·파일 4,876개) 9.0초 → 4.45초. git `index-pack`이 받은 뒤 델타를 푸는 약 4초가 사라짐. 로컬 GitLab HTTP의 델타 없는 150MB 저장소는 4.5초로 같음. 보류 이유: submodule을 받지 않고 hook을 실행하지 않음, `http://`에는 토큰을 보내지 않음(빌드 기능 `http-client-insecure-credentials` 필요), 로그인 재시도가 git 오류 문구에 맞춰져 있음, checkout 중 중단이 `Ok`로 돌아옴, pack을 gf 프로세스 안에서 풂. 이를 피하려면 gix 우선·git 대체 경로가 필요해 구조가 복잡해짐 |
 
 ### gix fetch가 git과 다른 점 (P4)
 

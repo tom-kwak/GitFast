@@ -21,7 +21,7 @@
 | 로깅 | tracing | 사용 중 | 실행한 git 명령과 출력은 명령 로그 패널에 표시 |
 | 패키징 | `scripts/package-macos.sh`(아키텍처별 .dmg: arm64·x86_64), `scripts/package-windows.ps1`(.zip) | 사용 중 | 설치는 `install.sh` / `install.ps1`, 릴리스는 `release.yml` |
 | HTTP | reqwest (rustls) | M7 예정 | GitLab/GitHub API |
-| 자격 증명 | keyring | M7 예정 | macOS Keychain / Windows Credential Manager. 지금은 git credential helper에 맡김 |
+| 자격 증명 | git credential helper | 사용 중 | 설정 → ACCOUNTS에서 HTTPS 토큰으로 로그인하면 `git credential approve`로 사용자의 helper(macOS Keychain / Windows Credential Manager)에 저장. gf는 토큰을 보관하지 않고 계정 메타데이터만 설정에 둠. API용 keyring은 M7에서 필요하면 검토 |
 | 내장 터미널 | alacritty_terminal | M5 예정 | 구조화 UI로 못 하는 명령의 마지막 폴백 |
 
 ---
@@ -133,13 +133,21 @@ trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }
 ### 7.2 계정
 - Personal Access Token(1차), OAuth Device Flow(2차)
 - self-hosted GitLab: base URL, 사내 CA 인증서 옵션
-- 토큰은 keyring에만 저장하고, 설정 파일에는 계정 메타데이터만 둡니다
+- ✅ 설정 → ACCOUNTS: 서버·사용자·토큰으로 로그인/로그아웃. 토큰은 git credential helper에 저장하고(`gf_git::ops::credential`), 설정 파일에는 계정 메타데이터(`settings.accounts`)만 둡니다
+  - 계정마다 서비스(호스트로 추정: GitHub·GitLab·Bitbucket·Gitea·Azure), helper에 토큰이 남아 있는지(`git credential fill`, 만료·폐기로 git이 지웠으면 ⚠와 [ Log in again ]), 그 서버를 쓰는 열린 저장소를 보여 줍니다
+  - 열린 저장소가 쓰지만 로그인하지 않은 HTTPS 서버는 NOT LOGGED IN에 [ Log in ]으로, SSH 서버는 따로 보여 줍니다. [ Get token ↗ ]은 서비스의 토큰 생성 페이지를 필요한 scope와 함께 엽니다
+  - 설정에서 로그인하면 열린 저장소의 그 서버 remote에 `git ls-remote`로 토큰을 확인하고, 서버가 거절하면 저장하지 않고 다이얼로그에 이유를 보입니다
+  - git에 credential helper가 없으면 플랫폼 helper(macOS Keychain, Git Credential Manager)를 확인 후 `--global`로 설정하는 버튼을 보입니다
+- ✅ 설정 화면: 왼쪽 섹션 목록(ACCOUNTS·APPEARANCE·TOOLS·CONFIRMATIONS, ↑/↓·⌘1–⌘4). git을 못 찾으면 모든 섹션 위에 경고를 보입니다. APPEARANCE는 테마(←/→)·글꼴 크기, TOOLS는 worktree용 편집기·터미널·새 worktree 폴더, CONFIRMATIONS는 "다시 묻지 않기"로 건너뛴 확인을 항목별로 되돌립니다
+- ✅ 서버에 접속하는 작업이 HTTPS 인증 실패로 끝나면 실패 알림 대신 그 서버로 채운 로그인 다이얼로그를 띄우고, 로그인하면 같은 작업을 다시 실행합니다: fetch·pull·push(publish·force push 포함)·태그 push·submodule update·LFS pull·프롬프트의 git 명령·clone. 브랜치 삭제(원격 포함)는 로그인만 받고 다시 실행하지 않습니다. SSH 키 거부는 기존 실패 알림
+- 남음: 호스팅 API로 토큰 확인(열린 저장소가 없는 서버), OAuth Device Flow
 
 ### 7.3 Clone
+- ✅ open 창(⌘O)에 URL(`https://…`, `git@host:path`)을 입력하면 clone 항목이 뜨고, 폴더를 물은 뒤 백그라운드에서 clone해서 탭으로 엽니다(`app/clone.rs`). 진행률은 상태 줄에 보이고 Esc·`[ cancel ]`로 취소하며, 실패·취소 시 clone이 만든 폴더를 지웁니다. 남음: 연결된 계정의 저장소 검색, 브랜치·depth·submodule 옵션
 - URL 입력 또는 연결된 계정의 저장소 검색 → 선택
 - SSH/HTTPS, 대상 경로, 브랜치, depth, 재귀 submodule, LFS
 - 진행률(`--progress`) 표시, 취소 가능
-- HTTPS 토큰은 **GIT_ASKPASS 헬퍼**로 주입합니다(URL에 토큰을 넣지 않음)
+- HTTPS 토큰은 ACCOUNTS 로그인으로 credential helper에 저장된 것을 git이 그대로 씁니다(URL에 토큰을 넣지 않음)
 
 ### 7.4 GitLab MR (1차 완성 대상)
 - 목록: 내가 만든 / 리뷰 요청 / 전체, 상태·라벨·작성자 필터
