@@ -38,6 +38,8 @@ use crate::widgets::{self, colored, dim, format, mono};
 pub const LIST_ID: &str = "gf-history-list";
 /// Ref badges shown per commit before collapsing into `+N`.
 const MAX_BADGES: usize = 2;
+/// Badges folded into `+N` that the row's hover lists before `… and N more`.
+const HINT_MAX_REFS: usize = 8;
 /// Start loading the next page this close (px) to the end of the list.
 const NEAR_END_PX: f32 = 200.0;
 
@@ -655,19 +657,33 @@ fn commit_row<'a>(
     .into()
 }
 
-/// What hovering a row's summary shows: the full text of whatever ends in
-/// `…` — the summary when it did not fit the column (`summary_cut`), a
-/// badge label past [`BADGE_COLS`]. `None` when nothing was cut. The
-/// message body is in the detail box (`▸ details`).
+/// What hovering a row's summary shows, top to bottom:
+/// - the full label of a shown badge cut at [`BADGE_COLS`],
+/// - the badges folded into `+N`, one a line (at most [`HINT_MAX_REFS`], then
+///   `… and N more`),
+/// - after a blank line, the summary when it did not fit the column
+///   (`summary_cut`).
+///
+/// `None` when nothing was cut or folded. Every ref and the message body are
+/// in the detail box (`▸ details`).
 fn row_hint(c: &Commit, badges: Option<&Vec<Badge>>, summary_cut: bool) -> Option<String> {
-    let mut lines: Vec<&str> = badges
-        .into_iter()
-        .flat_map(|refs| refs.iter().take(MAX_BADGES))
+    let refs = badges.map_or(&[][..], Vec::as_slice);
+    let (shown, hidden) = refs.split_at(refs.len().min(MAX_BADGES));
+    let mut lines: Vec<String> = shown
+        .iter()
         .map(|b| b.label.as_str())
         .filter(|l| columns(l) > BADGE_COLS)
+        .map(str::to_owned)
         .collect();
+    lines.extend(hidden.iter().take(HINT_MAX_REFS).map(|b| b.label.clone()));
+    if hidden.len() > HINT_MAX_REFS {
+        lines.push(format!("… and {} more", hidden.len() - HINT_MAX_REFS));
+    }
     if summary_cut {
-        lines.push(&c.summary);
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(c.summary.clone());
     }
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
@@ -853,8 +869,14 @@ fn batch_bar<'a>(t: &'a Tokens, commits: &[Commit]) -> Element<'a, Message> {
 }
 
 /// Bar under the list for the selected commit: id, actions and a details
-/// toggle; with details open, also author, date and the full message.
-fn detail<'a>(t: &'a Tokens, c: &'a Commit, open: bool) -> Element<'a, Message> {
+/// toggle; with details open, also author, date, every ref on the commit
+/// (the row folds all but [`MAX_BADGES`]) and the full message.
+fn detail<'a>(
+    t: &'a Tokens,
+    c: &'a Commit,
+    refs: Option<&'a Vec<Badge>>,
+    open: bool,
+) -> Element<'a, Message> {
     let bar = row![
         colored(t, c.id.short(), t.warning()),
         mono(t, c.summary.clone())
@@ -902,6 +924,14 @@ fn detail<'a>(t: &'a Tokens, c: &'a Commit, open: bool) -> Element<'a, Message> 
         col = col.push(dim(
             t,
             format!("Committed by {} <{}>", c.committer.name, c.committer.email),
+        ));
+    }
+    for (i, b) in refs.into_iter().flatten().enumerate() {
+        let head = if i == 0 { "Refs:   " } else { "        " };
+        col = col.push(colored(
+            t,
+            format!("{head}{}", b.label),
+            badge_color(t, b.kind),
         ));
     }
     col = col.push(mono(t, format!("\n    {}", c.summary)));
@@ -1137,7 +1167,7 @@ impl Feature for State {
             .as_ref()
             .and_then(|s| history.commits.iter().find(|c| &c.id == s))
         {
-            content = content.push(detail(t, c, self.show_details));
+            content = content.push(detail(t, c, decor.get(&c.id), self.show_details));
         }
         let count = history.commits.len();
         let more = if history.more { "+" } else { "" };
@@ -1428,20 +1458,61 @@ mod tests {
     }
 
     #[test]
-    fn only_text_cut_with_an_ellipsis_shows_on_hover() {
+    fn only_cut_or_folded_text_shows_on_hover() {
         let c = commits(1).remove(0);
         let badge = |l: &str| Badge {
             label: l.into(),
             kind: badges::Kind::Branch,
         };
         let long = "b".repeat(BADGE_COLS + 1);
-        // `+1` is not cut text: no hover for it.
-        let refs = vec![badge("a"), badge("b"), badge("c")];
+        // Everything shown whole: no hover.
+        let refs = vec![badge("a"), badge("b")];
         assert_eq!(row_hint(&c, Some(&refs), false), None);
         let refs = vec![badge("a"), badge(&long)];
         assert_eq!(row_hint(&c, Some(&refs), false), Some(long.clone()));
         let line = summary_line(&c, Some(&refs), usize::MAX);
         assert!(line.parts[1].0.ends_with("…) "));
+    }
+
+    #[test]
+    fn the_hover_lists_the_refs_folded_into_plus_n() {
+        let mut c = commits(1).remove(0);
+        let badge = |l: &str| Badge {
+            label: l.into(),
+            kind: badges::Kind::Tag,
+        };
+        // `+1`: the folded ref's name, nothing else.
+        let refs = vec![badge("a"), badge("b"), badge("◆ v1")];
+        assert_eq!(row_hint(&c, Some(&refs), false), Some("◆ v1".into()));
+
+        // Folded refs, a blank line, then the cut summary.
+        c.summary = "whole summary".into();
+        let refs = vec![badge("a"), badge("b"), badge("◆ v1"), badge("◆ v2")];
+        assert_eq!(
+            row_hint(&c, Some(&refs), true),
+            Some("◆ v1\n◆ v2\n\nwhole summary".into())
+        );
+
+        // A cut shown label comes first, in full, ahead of the folded ones.
+        let long = "b".repeat(BADGE_COLS + 1);
+        let refs = vec![badge(&long), badge("b"), badge("c")];
+        assert_eq!(row_hint(&c, Some(&refs), false), Some(format!("{long}\nc")));
+    }
+
+    #[test]
+    fn a_long_fold_is_capped_with_the_number_left_out() {
+        let c = commits(1).remove(0);
+        let refs: Vec<Badge> = (0..MAX_BADGES + HINT_MAX_REFS + 6)
+            .map(|i| Badge {
+                label: format!("◆ v{i}"),
+                kind: badges::Kind::Tag,
+            })
+            .collect();
+        let hint = row_hint(&c, Some(&refs), false).expect("hint");
+        let lines: Vec<_> = hint.lines().collect();
+        assert_eq!(lines.len(), HINT_MAX_REFS + 1);
+        assert_eq!(lines[0], format!("◆ v{MAX_BADGES}"));
+        assert_eq!(lines[HINT_MAX_REFS], "… and 6 more");
     }
 
     fn ids(out: Option<Output>) -> Vec<Oid> {
