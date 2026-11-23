@@ -17,9 +17,9 @@
   <img alt="Windows 10+" src="https://img.shields.io/badge/Windows-10%2B%20x64-blue">
 </p>
 
-> **New in 0.0.8:** gf runs on Windows (install it from PowerShell with one
-> line, [Windows](#windows) below), and a **Worktrees view** shows every
-> working tree of a repository at a glance ([Features](#features)).
+> **New in 0.0.9:** history on big repositories loads much faster and uses a
+> fraction of the memory, large diffs wait until asked, and the refs panel
+> can be resized ([What's new](#whats-new-in-009)).
 
 ## Install
 
@@ -94,33 +94,32 @@ gf works through your system `git`, and uses
 [gitoxide](https://github.com/GitoxideLabs/gitoxide) for some operations,
 falling back to `git` when gitoxide cannot handle one.
 
-## What's new in 0.0.8
+## What's new in 0.0.9
 
-- **Windows version**: gf runs on Windows 10 1809+ and 11 (x64), installed
-  with one PowerShell line ([Windows](#windows)). Shortcuts use Ctrl
-  (`Ctrl+Shift+Z`), files open in File Explorer, and text is drawn in
-  Cascadia Mono.
-- gf finds Git for Windows even when it is not on `PATH`, and the start
-  screen says how to get git when it cannot start it.
-- The open-repository window takes Windows paths (`C:\src\gf`,
-  `\\server\share`).
-- **Worktrees view**: see all working trees of a repository as cards and act
-  on them from the right-click menu, including merging a tree's branch into
-  its base. The base is the branch the tree was made from (gf remembers it),
-  not always `main`.
-- **Safer undo / redo**: undoing pushed commits warns first, a restore is all
-  or nothing, and the redo stack survives a restart.
+- **Faster, lighter history**: loading more commits reads only the next
+  page, and the graph keeps only what it draws. On git.git (83k commits)
+  scrolling to the end takes 18 s instead of 49 s, in 135 MB instead of
+  about 1 GB.
+- **Large diffs wait until asked**: past 20,000 lines or 1 MiB a notice shows
+  instead (Enter draws it); past 32 MiB the diff is refused.
+- **Refs panel**: drag to resize, rows indented under their section, full
+  names in tooltips. The worktrees panel closes like REFS and either reopens
+  from the closed strip.
+- Checking out a branch held by another worktree offers that worktree's tab.
+- Tags list newest version first; hovering `+N` in the history lists the
+  folded refs.
+- Fixed undo and reflog resets on git 2.43.
 
-[Release notes](https://github.com/tom-kwak/GitFast/releases/tag/release-0.0.8)
+[Release notes](https://github.com/tom-kwak/GitFast/releases/tag/release-0.0.9)
 
 ## Releases
 
 A release is a tag `release-<version>` on a commit in `main`, where
 `<version>` matches the workspace version in the tagged commit's `Cargo.toml`.
-For example, tag the commit with workspace version `0.0.8`:
+For example, tag the commit with workspace version `0.0.9`:
 
 ```bash
-git tag release-0.0.8 && git push origin release-0.0.8
+git tag release-0.0.9 && git push origin release-0.0.9
 ```
 
 Pushing the tag starts the release workflow if the tagged commit is already
