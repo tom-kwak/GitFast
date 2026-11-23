@@ -5,9 +5,9 @@
 <h1 align="center">gf</h1>
 
 <p align="center">
-  <b>gf</b> is short for <b>Git Fast</b>: a Git GUI for macOS and Windows that stays
-  fast on huge repositories. Written in Rust with
-  <a href="https://github.com/iced-rs/iced">iced</a>.
+  <b>Git Fast.</b> A Git GUI anyone can pick up in a minute,<br>
+  and fast enough that you never wait for it.<br>
+  Faster, easier, and clearer to read than any other Git GUI client.
 </p>
 
 <p align="center">
@@ -17,28 +17,57 @@
   <img alt="Windows 10+" src="https://img.shields.io/badge/Windows-10%2B%20x64-blue">
 </p>
 
-## Why gf
+## The numbers
 
-- **Fast on big repositories.** The full history of git.git (83k commits) scrolls
-  to the end in 18 s using 135 MB. Huge diffs wait until you ask for them, so
-  they never freeze the window.
-- **Made for the keyboard.** Every action has a shortcut, and a `gf ❯` command
-  line runs any git command. Looks like a terminal, works like a GUI.
-- **Nothing hidden.** gf runs your own `git`, and the command log (`⌘J`) shows
-  every command it ran, with output, exit status and time.
-- **Made for parallel work.** The worktrees panel shows one card per working
-  tree (branch, uncommitted changes, ahead/behind), so you can see at a glance
-  what each of your AI agents is doing.
-- **Safe to try things.** `⌘Z` undoes commits, resets and other steps, with an
-  undo history.
+**git.git, 83,000 commits, scrolled to the very last one** ([how it is measured](tools/mem-bench/README.md))
 
-Also: a text commit graph with file history, staging by checkbox, blame,
-conflict resolution, interactive rebase, syntax-highlighted diffs and one tab
-per repository.
+| | first gf | gf 0.0.9 |
+|---|---:|---:|
+| Time to scroll the whole history | 92 s | **18 s** |
+| Memory for the whole history | 1,090 MB | **117 MB** |
+| Peak memory while scrolling | 2.2 GB | **238 MB** |
+| Opening the repository | 18.8 MB | **4.0 MB** |
+
+**Everyday git commands, git CLI → gf** ([benchmark](docs/GIX_MIGRATION.md#5-검증), a 40k-commit repository with submodules)
+
+| | `git` | gf | |
+|---|---:|---:|---:|
+| status | 44.4 ms | **13.5 ms** | 3.3× |
+| changed lines (numstat) | 28.9 ms | **5.5 ms** | 5.3× |
+| history, 1,000 commits | 16.7 ms | **5.6 ms** | 3.0× |
+| branches | 8.0 ms | **1.1 ms** | 7.3× |
+| unpushed count | 13.1 ms | **0.5 ms** | 26× |
+| stashes | 5.9 ms | **0.01 ms** | 590× |
+
+**How:** Rust, a GPU-drawn UI ([iced](https://github.com/iced-rs/iced)), and reads
+done in process with [gitoxide](https://github.com/GitoxideLabs/gitoxide) instead
+of starting `git` each time. gitoxide is used only where its answer is
+identical to git's, checked by contract tests; everything else, and every
+write, goes through your own `git`.
+
+## Worktrees, made simple
+
+Run several branches side by side (one per AI agent, say) and see them all at once.
+
+- **One card per tree:** branch, uncommitted files, and
+  `from develop · 3 ahead · 1 behind`.
+- **`+`** makes a tree. Right-click to open it, compare it, or **merge it back**.
+- **`clean N`** removes every tree already merged. One click.
+
+## Undo, like in any editor
+
+`⌘Z` takes it back. `⌘⇧Z` brings it again. The undo history lists every step.
+
+- Commits, resets, checkouts, pulls, discarded changes, stashes, branch and
+  tag deletes, conflict resolutions, LFS and submodule changes.
+- Redo survives a restart, and saved copies survive `git gc`.
+- Already pushed? gf warns you before undoing.
+
+So go ahead and try things. A wrong click is one `⌘Z` away from fixed.
 
 ## Install
 
-macOS (Terminal) and Windows (Git Bash):
+macOS (Terminal) · Windows (Git Bash):
 
 ```bash
 curl -fsSL https://github.com/tom-kwak/GitFast/releases/latest/download/install.sh | bash
@@ -50,29 +79,18 @@ Windows (PowerShell):
 irm https://github.com/tom-kwak/GitFast/releases/latest/download/install.ps1 | iex
 ```
 
-Run it again to update. Needs macOS 11+ or Windows 10+ (x64), and **Git 2.43.1+**.
-Prefer a manual download? See [Releases](https://github.com/tom-kwak/GitFast/releases).
-gf is not code-signed yet, so Windows SmartScreen may warn once ("More info" →
-"Run anyway"). Linux is planned.
-
-To try a pre-release (`0.0.9-rc.1`), use the `install.sh` / `install.ps1` from
-its release page, for example
-`.../releases/download/release-0.0.9-rc.1/install.sh`.
+macOS 11+ (Apple silicon, Intel) · Windows 10+ x64 · Git 2.43.1+. Run again to update.
 
 ## Releasing
 
-Tag a commit in `main` with `release-<version>` (the version in `Cargo.toml`):
-
 ```bash
-git tag release-0.0.9 && git push origin release-0.0.9
+git tag release-0.0.9 && git push origin release-0.0.9   # version from Cargo.toml
 ```
 
-The [release workflow](.github/workflows/release.yml) runs the checks and the
-UI sweep (skipped when they already passed on the same code), builds the macOS
-(Apple silicon, Intel) and Windows packages and publishes them with the notes
-from `docs/release-notes/<version>.md`. A version with a suffix (`0.0.9-rc.1`)
-is a pre-release.
+The [release workflow](.github/workflows/release.yml) checks, builds and publishes
+the macOS and Windows packages with `docs/release-notes/<version>.md`.
+`0.0.9-rc.1` style versions become pre-releases, each with its own `install.sh`.
 
 ## Development
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [PLAN.md](PLAN.md).
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · [PLAN.md](PLAN.md)
