@@ -187,6 +187,14 @@ pub enum DiffSource {
         count: usize,
         contiguous: bool,
     },
+    /// Everything that differs between the checked-out commit (`from`) and
+    /// another branch's tip (`to`); `base`/`other` are the names to show.
+    Compare {
+        base: String,
+        other: String,
+        from: Oid,
+        to: Oid,
+    },
 }
 
 /// `git hash-object -t tree /dev/null`: the parent of a root commit.
@@ -198,15 +206,18 @@ impl DiffSource {
     pub fn role(&self) -> Role {
         match self {
             Self::WorkTree(_) | Self::Staged(_) | Self::Untracked(_) => Role::Local,
-            Self::Commit(_) | Self::Stash { .. } | Self::Range { .. } => Role::Commit,
+            Self::Commit(_) | Self::Stash { .. } | Self::Range { .. } | Self::Compare { .. } => {
+                Role::Commit
+            }
         }
     }
 
     fn end_revision(&self) -> Option<&Oid> {
         match self {
-            Self::Commit(oid) | Self::Stash { id: oid, .. } | Self::Range { to: oid, .. } => {
-                Some(oid)
-            }
+            Self::Commit(oid)
+            | Self::Stash { id: oid, .. }
+            | Self::Range { to: oid, .. }
+            | Self::Compare { to: oid, .. } => Some(oid),
             _ => None,
         }
     }
@@ -246,6 +257,11 @@ impl DiffSource {
                 Revision(to.to_string()),
                 ["From", "To"],
             ),
+            Self::Compare { from, to, .. } => (
+                Revision(from.to_string()),
+                Revision(to.to_string()),
+                ["Current", "Branch"],
+            ),
         }
     }
 
@@ -269,6 +285,13 @@ impl DiffSource {
                 },
                 Vec::new(),
             ),
+            Self::Compare { from, to, .. } => (
+                DiffTarget::Range {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                },
+                Vec::new(),
+            ),
         }
     }
 
@@ -278,6 +301,7 @@ impl DiffSource {
             Self::WorkTree(p) | Self::Staged(p) | Self::Untracked(p) => p.display().to_string(),
             Self::Commit(_) => String::new(),
             Self::Stash { index, .. } => format!("stash@{{{index}}}"),
+            Self::Compare { base, other, .. } => format!("{base} → {other}"),
             Self::Range {
                 count, contiguous, ..
             } => {
@@ -630,7 +654,10 @@ impl State {
                 || (self.error.is_none()
                     && matches!(
                         source,
-                        DiffSource::Commit(_) | DiffSource::Stash { .. } | DiffSource::Range { .. }
+                        DiffSource::Commit(_)
+                            | DiffSource::Stash { .. }
+                            | DiffSource::Range { .. }
+                            | DiffSource::Compare { .. }
                     )))
     }
 
