@@ -1399,7 +1399,7 @@ mod tests {
         let more = load(Some(listed), Parts::ALL).await.expect("load");
         assert_eq!(
             more.pending_tags.clone().expect("known").names,
-            ["on-side", "mine"],
+            ["mine", "on-side"],
             "in the tag list's order"
         );
 

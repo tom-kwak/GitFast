@@ -4,7 +4,8 @@
 //! `v1.9.0`. Names that read as versions (`v1.2.3`, `1.10`, `2.0.0-rc.1`)
 //! sort here by semantic-version precedence instead, so the latest release
 //! comes first and a pre-release sits below its release. Every other name
-//! follows the versions, in natural order (`build-10` above `build-9`).
+//! follows the versions in name order, numbers by value (`build-9` above
+//! `build-10`).
 //!
 //! The order is computed from names only, so it is the same for both git
 //! backends and does not move when a tag is re-created.
@@ -13,24 +14,26 @@ use std::cmp::{Ordering, Reverse};
 
 use super::Tag;
 
-/// Sorts tags for display: versions newest first, then other names.
+/// Sorts tags for display: versions newest first, then other names in
+/// name order.
 pub fn sort_newest_first(tags: &mut [Tag]) {
-    tags.sort_by_cached_key(|t| Reverse(Key::new(t.name.short())));
+    tags.sort_by_cached_key(|t| Key::new(t.name.short()));
 }
 
-/// Ascending order of a tag name; lists use it reversed.
+/// Display order of a tag name (ascending).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
-    // Variant order matters: every other name ranks below every version.
-    // The name breaks ties (`v1.0` and `1.0.0`) so the order is stable.
+    // Variant order matters: every version ranks above every other name.
+    // Versions go newest first; the name breaks ties (`v1.0` and `1.0.0`)
+    // so the order is stable.
+    Version(Reverse<Version>, Reverse<String>),
     Other(Vec<Chunk>, String),
-    Version(Version, String),
 }
 
 impl Key {
     fn new(name: &str) -> Self {
         match Version::parse(name) {
-            Some(v) => Self::Version(v, name.to_owned()),
+            Some(v) => Self::Version(Reverse(v), Reverse(name.to_owned())),
             None => Self::Other(chunks(name), name.to_owned()),
         }
     }
@@ -212,10 +215,14 @@ mod tests {
     }
 
     #[test]
-    fn other_names_follow_versions_in_natural_order() {
+    fn other_names_follow_versions_in_name_order() {
         assert_eq!(
             sorted(&["build-9", "v1.0.0", "light", "build-10", "release/v2.0.0"]),
-            ["v1.0.0", "release/v2.0.0", "light", "build-10", "build-9"]
+            ["v1.0.0", "build-9", "build-10", "light", "release/v2.0.0"]
+        );
+        assert_eq!(
+            sorted(&["light", "beta", "alpha"]),
+            ["alpha", "beta", "light"]
         );
     }
 
@@ -238,7 +245,7 @@ mod tests {
     fn huge_numbers_fall_back_to_natural_order() {
         assert_eq!(
             sorted(&["99999999999999999999999", "100000000000000000000000"]),
-            ["100000000000000000000000", "99999999999999999999999"]
+            ["99999999999999999999999", "100000000000000000000000"]
         );
     }
 }
