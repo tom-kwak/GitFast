@@ -31,6 +31,10 @@ where
     let a = f(Backend::Cli(cli)).await;
     let b = f(Backend::Gix(gix)).await;
     match (a, b) {
+        // gix declining (`Unsupported`) is the contract's fallback signal:
+        // the router then uses the CLI. It happens on machines whose git
+        // config has `url.<base>.insteadOf`, which gix does not model.
+        (_, Err(gf_core::GfError::Unsupported(_))) => {}
         (Ok(a), Ok(b)) => assert_eq!(b, a, "{what}: gix (left) differs from git CLI (right)"),
         (a, b) => panic!("{what}: cli {a:?} vs gix {b:?}"),
     }
