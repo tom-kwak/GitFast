@@ -7,6 +7,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::backend::{CliBackend, DiffOps};
 use crate::cli::parse::diff::{DIFF_FORMAT_ARGS, parse_diff};
+use crate::cli::{GitOutput, RunOptions};
 
 /// Which version supplies the contents of a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +19,27 @@ pub enum FileVersion {
 
 /// Maximum size of a complete file preview across all file versions.
 pub const FILE_PREVIEW_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Most bytes of `git diff` output read for one diff. A larger diff is not
+/// read past this ([`GfError::DiffTooLarge`]): parsed, it would hold several
+/// times as much memory, and nobody reads that many lines.
+pub const DIFF_LIMIT: usize = 32 * 1024 * 1024;
+
+/// Runs a diff command, stopping git once its output passes [`DIFF_LIMIT`].
+async fn read_diff(backend: &CliBackend, cmd: crate::cli::GitCommand) -> Result<GitOutput> {
+    let opts = RunOptions {
+        max_stdout: Some(DIFF_LIMIT),
+        ..RunOptions::default()
+    };
+    backend
+        .runner()
+        .run_with(&cmd.read_only(), opts)
+        .await
+        .map_err(|e| match e {
+            GfError::OutputTooLarge { limit } => GfError::DiffTooLarge { limit },
+            e => e,
+        })
+}
 
 fn checked_preview(bytes: Vec<u8>) -> Result<Vec<u8>> {
     if bytes.len() > FILE_PREVIEW_LIMIT {
@@ -170,8 +192,8 @@ impl DiffOps for CliBackend {
             }
             DiffTarget::WorkTree | DiffTarget::Staged | DiffTarget::Untracked(_) => {}
         }
-        let out = self.read(self.command(args).paths(&opts.paths)).await?;
-        parse_diff(&out)
+        let out = read_diff(self, self.command(args).paths(&opts.paths)).await?;
+        parse_diff(&out.stdout)
     }
 
     async fn numstat(
@@ -194,8 +216,15 @@ impl CliBackend {
         let mut args: Vec<String> = vec!["diff".into(), "--no-index".into()];
         args.extend(DIFF_FORMAT_ARGS.iter().map(|s| (*s).to_owned()));
         args.extend(["--".into(), null.into()]);
-        let cmd = self.command(args).arg(path).read_only().allow_failure();
-        let out = self.runner().run(&cmd).await?;
+        // A file past the limit makes a diff past it too: skip running git.
+        if let Ok(meta) = tokio::fs::metadata(self.cwd().join(path)).await
+            && meta.is_file()
+            && meta.len() > DIFF_LIMIT as u64
+        {
+            return Err(GfError::DiffTooLarge { limit: DIFF_LIMIT });
+        }
+        let cmd = self.command(args).arg(path).allow_failure();
+        let out = read_diff(self, cmd).await?;
         // `--no-index` exits 1 when the files differ, which is the normal case.
         if out.exit_code != Some(0) && out.exit_code != Some(1) {
             return Err(gf_core::GfError::GitCommand {

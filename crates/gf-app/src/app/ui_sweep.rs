@@ -2206,6 +2206,42 @@ async fn oversized_file_shows_preview_limit_and_cannot_be_copied() {
 }
 
 #[tokio::test]
+async fn a_large_diff_waits_for_enter_and_one_past_the_limit_is_refused() {
+    let mut ui = working_tree(
+        Ui::open_with(|repo| {
+            let lines: String = (0..25_000).map(|i| format!("row {i}\n")).collect();
+            std::fs::write(repo.path().join("large.txt"), lines).expect("write");
+            let line = "x".repeat(99) + "\n";
+            let huge = line.repeat(gf_git::DIFF_LIMIT / line.len() + 1);
+            std::fs::write(repo.path().join("huge.txt"), huge).expect("write");
+        })
+        .await,
+    )
+    .await;
+    let _ = ui
+        .send(Message::Changes(changes::Message::Select(
+            "large.txt".into(),
+            changes::Group::Untracked,
+        )))
+        .await;
+    assert!(ui.shows("large diff — 25,000 lines"));
+    assert!(ui.shows("show diff"));
+    assert!(!ui.shows("row 0"));
+    ui.app.focus_pane(Pane::Diff);
+    let _ = ui.send(enter()).await;
+    assert!(ui.shows("row 0"));
+    assert!(!ui.shows("large diff"));
+
+    let _ = ui
+        .send(Message::Changes(changes::Message::Select(
+            "huge.txt".into(),
+            changes::Group::Untracked,
+        )))
+        .await;
+    assert!(ui.shows("diff is over 32 MiB, too large to show"));
+}
+
+#[tokio::test]
 async fn comparison_checks_the_size_of_the_previous_version() {
     let mut ui = working_tree(
         Ui::open_with(|repo| {

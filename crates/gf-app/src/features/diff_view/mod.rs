@@ -43,6 +43,46 @@ use crate::widgets::{self, colored, dim, mono};
 const FILES_ID: &str = "gf-commit-files";
 /// Files larger than this (in diff lines) are shown without highlighting.
 const MAX_HIGHLIGHT_LINES: usize = 20_000;
+/// A file's diff past this many lines or bytes waits for the user to ask
+/// for it ([`Message::ShowLarge`]) instead of drawing at once. (Past
+/// [`gf_git::DIFF_LIMIT`] it is not read at all.)
+const LARGE_DIFF_LINES: usize = MAX_HIGHLIGHT_LINES;
+const LARGE_DIFF_BYTES: usize = 1024 * 1024;
+
+/// How big one file's diff is: lines and bytes of their text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffSize {
+    pub lines: usize,
+    pub bytes: usize,
+}
+
+impl DiffSize {
+    fn of(f: &FileDiff) -> Self {
+        let lines = f.hunks.iter().flat_map(|h| &h.lines);
+        Self {
+            lines: lines.clone().count(),
+            bytes: lines.map(|l| l.content.len()).sum(),
+        }
+    }
+
+    fn is_large(self) -> bool {
+        self.lines > LARGE_DIFF_LINES || self.bytes > LARGE_DIFF_BYTES
+    }
+
+    /// `300,000 lines · 10.0 MiB`
+    fn describe(self) -> String {
+        let mut digits = self.lines.to_string();
+        let mut grouped = String::new();
+        while digits.len() > 3 {
+            let tail = digits.split_off(digits.len() - 3);
+            grouped = format!(",{tail}{grouped}");
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let mib = self.bytes as f64 / (1024.0 * 1024.0);
+        let plural = if self.lines == 1 { "" } else { "s" };
+        format!("{digits}{grouped} line{plural} · {mib:.1} MiB")
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -300,6 +340,8 @@ pub struct LoadedDiff {
     pub first_spans: Option<Arc<FileSpans>>,
     /// Widest line of each file in monospace columns (for sideways scroll).
     pub widths: Vec<usize>,
+    /// Size of each file's diff (large ones wait to be asked for).
+    sizes: Vec<DiffSize>,
     line_counts: Vec<select::LineCounts>,
     entry_counts: Vec<widgets::EntryCounts>,
     file_list_columns: usize,
@@ -327,6 +369,7 @@ impl LoadedDiff {
                     .unwrap_or(0)
             })
             .collect();
+        let sizes = files.iter().map(DiffSize::of).collect();
         let line_counts = files.iter().map(select::LineCounts::new).collect();
         let entry_counts: Vec<_> = files
             .iter()
@@ -362,6 +405,7 @@ impl LoadedDiff {
             files,
             first_spans,
             widths,
+            sizes,
             line_counts,
             entry_counts,
             file_list_columns,
@@ -451,6 +495,9 @@ pub struct State {
     /// Rows of the file shown, per loaded diff and file.
     /// The rows index into the diff's hunks: keyed by the diff itself.
     rows: Memo<(memo::Same<LoadedDiff>, usize), Rc<[DiffRow]>>,
+    /// Large files the user asked to see (by path, so a reload of the same
+    /// source keeps them shown). Cleared when the source changes.
+    shown_large: BTreeSet<PathBuf>,
     /// File to show first once the loading diff arrives (Find File).
     preferred: Option<std::path::PathBuf>,
     /// The files list should scroll to the file picked by [`Self::prefer_file`].
@@ -470,6 +517,8 @@ pub enum Message {
     LineDragged(LineKey, TextPointer),
     /// Mouse up, or the mouse left the diff.
     DragEnd,
+    /// Draw the shown file although its diff is large (⏎).
+    ShowLarge,
     /// ⌘A: all the text of the shown file.
     SelectAll,
     /// Copy the selected diff text.
@@ -563,6 +612,7 @@ impl State {
             folders: file_tree::Folders::default(),
             visible_files: Memo::default(),
             rows: Memo::default(),
+            shown_large: BTreeSet::new(),
             preferred: None,
             reveal_pending: false,
         }
@@ -716,6 +766,19 @@ impl State {
             }
         }
         out
+    }
+
+    /// Path of the shown file (its new path, else its old one).
+    fn current_file_path(&self) -> Option<PathBuf> {
+        self.diff.files.get(self.file)?.display_path().cloned()
+    }
+
+    /// Size of the shown file's diff when it is large and the user has not
+    /// asked to see it yet: the view shows a notice instead of its lines.
+    fn held_back(&self) -> Option<DiffSize> {
+        let size = *self.diff.sizes.get(self.file)?;
+        let path = self.current_file_path()?;
+        (size.is_large() && !self.shown_large.contains(&path)).then_some(size)
     }
 
     fn rows(f: &FileDiff) -> Vec<DiffRow> {
@@ -909,6 +972,13 @@ impl State {
     /// Keys for the diff itself: arrows and PgUp/PgDn scroll, Home/End
     /// jump, `n`/`p` go to the next/previous hunk.
     pub fn diff_nav(&self, nav: Nav, t: &Tokens) -> Option<Moved<Message>> {
+        if self.held_back().is_some() {
+            return match nav.key {
+                Key::Enter => Some(Moved::message(Message::ShowLarge)),
+                Key::Char('n' | 'p') => Some(Moved::stay()),
+                _ => None,
+            };
+        }
         let id = self.role.list_id();
         let h = Self::row_height(t);
         let page = (self.scroll.height - h).max(h);
@@ -1116,6 +1186,14 @@ impl State {
                 self.ranges.retain(|r| !r.is_empty());
                 Update::none()
             }
+            Message::ShowLarge => {
+                if let Some(path) = self.held_back().and(self.current_file_path()) {
+                    self.shown_large.insert(path);
+                }
+                Update::none()
+            }
+            // Nothing of a held-back file is drawn to select.
+            Message::SelectAll if self.held_back().is_some() => Update::none(),
             Message::SelectAll => {
                 self.clear_selection();
                 if let Some(f) = self.diff.files.get(self.file) {
@@ -1249,6 +1327,29 @@ impl State {
     }
 
     /// Changed files of the commit/stash being shown.
+    /// Stands in for a large diff until the user asks for it.
+    fn large_notice<'a>(t: &'a Tokens, size: DiffSize) -> Element<'a, Message> {
+        let note = if size.lines > MAX_HIGHLIGHT_LINES {
+            "drawing it may be slow, and it is shown without syntax highlighting"
+        } else {
+            "drawing it may be slow"
+        };
+        container(
+            column![
+                colored(t, format!("large diff — {}", size.describe()), t.warning()),
+                dim(t, note),
+                widgets::tip(
+                    t,
+                    widgets::text_button(t, "show diff", Some("⏎"), Some(Message::ShowLarge)),
+                    "draw this file's diff anyway".into(),
+                ),
+            ]
+            .spacing(4),
+        )
+        .padding(Padding::from([4, 16]))
+        .into()
+    }
+
     pub fn view<'a>(&'a self, cx: Cx<'a>) -> Element<'a, Message> {
         let t = cx.tokens;
         let accent = self.role.accent(t);
@@ -1398,6 +1499,8 @@ impl State {
             colored(t, format!("  ⚠ {e}"), t.error()).into()
         } else if self.loading && files.is_empty() {
             widgets::empty_hint(t, "loading diff…")
+        } else if let Some(size) = self.held_back() {
+            Self::large_notice(t, size)
         } else if let Some(f) = files.get(self.file) {
             let key = (memo::Same(self.diff.clone()), self.file);
             let rows = self.rows.get(key, || Self::rows(f).into());
@@ -1787,5 +1890,102 @@ index 1111111..2222222 100644
             Title::of(&DiffSource::WorkTree(top.into()), Some(top)).full(),
             "a.rs"
         );
+    }
+
+    /// A diff of `big.txt` adding `lines` lines of `width` bytes, then a
+    /// small `g.txt`.
+    fn large_diff(lines: usize, width: usize) -> Vec<FileDiff> {
+        let mut text = format!(
+            "diff --git a/big.txt b/big.txt\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/big.txt\n@@ -0,0 +1,{lines} @@\n"
+        );
+        for _ in 0..lines {
+            text.push('+');
+            text.push_str(&"x".repeat(width));
+            text.push('\n');
+        }
+        text.push_str(&DIFF[DIFF.find("diff --git a/g.txt").expect("g.txt")..]);
+        parse_diff(text.as_bytes()).expect("parse")
+    }
+
+    fn loaded(s: &mut State, files: Vec<FileDiff>) {
+        let _ = s.loaded(s.generation, Ok(Arc::new(LoadedDiff::new(files, false))));
+    }
+
+    #[test]
+    fn diff_sizes_count_lines_and_bytes() {
+        let size = DiffSize::of(&large_diff(3, 4)[0]);
+        assert_eq!(
+            size,
+            DiffSize {
+                lines: 3,
+                bytes: 12
+            }
+        );
+        assert!(!size.is_large());
+        assert!(DiffSize::of(&large_diff(LARGE_DIFF_LINES + 1, 1)[0]).is_large());
+        // One very long line is large too.
+        assert!(DiffSize::of(&large_diff(1, LARGE_DIFF_BYTES + 1)[0]).is_large());
+        assert_eq!(
+            DiffSize {
+                lines: 300_000,
+                bytes: 10 * 1024 * 1024
+            }
+            .describe(),
+            "300,000 lines · 10.0 MiB"
+        );
+        assert_eq!(
+            DiffSize { lines: 1, bytes: 0 }.describe(),
+            "1 line · 0.0 MiB"
+        );
+    }
+
+    #[test]
+    fn a_large_file_waits_until_asked_for_and_stays_shown_on_reload() {
+        let source = DiffSource::Commit("a".repeat(40).parse().expect("oid"));
+        let mut s = State::new(Role::Commit);
+        s.show(source.clone());
+        loaded(&mut s, large_diff(LARGE_DIFF_LINES + 1, 1));
+        let size = s.held_back().expect("held back");
+        assert_eq!(size.lines, LARGE_DIFF_LINES + 1);
+
+        // Nothing hidden can be selected.
+        let _ = s.update(Message::SelectAll);
+        assert!(!s.has_selection());
+
+        // A small file is drawn at once.
+        let _ = s.update(Message::SelectFile(1));
+        assert!(s.held_back().is_none());
+        let _ = s.update(Message::SelectFile(0));
+        assert!(s.held_back().is_some());
+
+        let _ = s.update(Message::ShowLarge);
+        assert!(s.held_back().is_none());
+        let _ = s.update(Message::SelectAll);
+        assert!(s.has_selection());
+
+        // Reloading the same source keeps it shown.
+        s.show(source);
+        loaded(&mut s, large_diff(LARGE_DIFF_LINES + 1, 1));
+        assert!(s.held_back().is_none());
+
+        // Another source asks again.
+        s.show(DiffSource::Commit("b".repeat(40).parse().expect("oid")));
+        loaded(&mut s, large_diff(LARGE_DIFF_LINES + 1, 1));
+        assert!(s.held_back().is_some());
+    }
+
+    #[test]
+    fn enter_shows_a_held_back_diff_and_is_left_to_the_app_otherwise() {
+        let t = crate::theme::preset("gf-dark");
+        let mut s = State::new(Role::Local);
+        s.show(DiffSource::Untracked("big.txt".into()));
+        loaded(&mut s, large_diff(LARGE_DIFF_LINES + 1, 1));
+        let enter = Nav::plain(Key::Enter);
+        let moved = s.diff_nav(enter, &t).expect("Enter is used");
+        assert!(matches!(moved.message, Some(Message::ShowLarge)));
+        assert!(s.diff_nav(Nav::plain(Key::Char('n')), &t).is_some());
+
+        let _ = s.update(Message::ShowLarge);
+        assert!(s.diff_nav(enter, &t).is_none());
     }
 }

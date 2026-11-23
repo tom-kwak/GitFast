@@ -57,6 +57,19 @@ pub struct RunOptions {
     /// stopped and the run counts as a success, with stdout read so far
     /// (the line included). For long listings searched for one entry.
     pub stop_at: Option<Vec<u8>>,
+    /// Most stdout bytes to read: past it git is stopped and the call
+    /// returns [`GfError::OutputTooLarge`], so a huge output never sits in
+    /// memory whole.
+    pub max_stdout: Option<usize>,
+}
+
+/// Why the stdout reader stopped before git ended.
+#[derive(Debug, Clone, Copy)]
+enum Stop {
+    /// `RunOptions::stop_at` was read.
+    Found,
+    /// Past `RunOptions::max_stdout`.
+    Overflow(usize),
 }
 
 /// Whether `buf` has `line` as a whole line, looking only at what came
@@ -236,8 +249,9 @@ impl GitRunner {
             });
         }
 
-        // Fires when `opts.stop_at` was read (never otherwise).
-        let (found_tx, found_rx) = tokio::sync::oneshot::channel::<()>();
+        // Fires when `opts.stop_at` was read or stdout passed
+        // `opts.max_stdout` (never otherwise).
+        let (found_tx, found_rx) = tokio::sync::oneshot::channel::<Stop>();
         let stdout_task = {
             let mut pipe = child
                 .stdout
@@ -245,6 +259,7 @@ impl GitRunner {
                 .ok_or_else(|| GfError::Other("no stdout".into()))?;
             let echo = cmd.echo_stdout.then(|| self.line_sink(id, cmd, false));
             let stop_at = opts.stop_at.clone().filter(|l| !l.is_empty());
+            let max_stdout = opts.max_stdout;
             let mut found = Some(found_tx);
             tokio::spawn(async move {
                 let mut buf = Vec::new();
@@ -256,6 +271,16 @@ impl GitRunner {
                         break;
                     }
                     let from = buf.len();
+                    if let Some(max) = max_stdout
+                        && from + n > max
+                    {
+                        if let Some(tx) = found.take() {
+                            let _ = tx.send(Stop::Overflow(max));
+                        }
+                        // Git may exit before the stop is seen: the
+                        // result says it too.
+                        return Ok((buf, Some(max)));
+                    }
                     buf.extend_from_slice(&chunk[..n]);
                     if let Some(sink) = &echo {
                         lines.feed(&chunk[..n], sink);
@@ -264,7 +289,7 @@ impl GitRunner {
                         && has_line(&buf, line, from)
                     {
                         if let Some(tx) = found.take() {
-                            let _ = tx.send(());
+                            let _ = tx.send(Stop::Found);
                         }
                         break;
                     }
@@ -272,7 +297,7 @@ impl GitRunner {
                 if let Some(sink) = &echo {
                     lines.finish(sink);
                 }
-                Ok::<_, std::io::Error>(buf)
+                Ok::<_, std::io::Error>((buf, None))
             })
         };
 
@@ -315,20 +340,25 @@ impl GitRunner {
 
         let cancel = opts.cancel.unwrap_or_default();
         let found = async {
-            if found_rx.await.is_err() {
-                // The reader ended without the line: wait for git instead.
-                std::future::pending::<()>().await;
+            match found_rx.await {
+                Ok(stop) => stop,
+                // The reader ended without stopping early: wait for git instead.
+                Err(_) => std::future::pending().await,
             }
         };
         // `biased`: once the line is read, git may die of the closed pipe
         // at any moment; the found line must win over that exit.
         let status = tokio::select! {
             biased;
-            () = found => {
+            stop = found => {
                 let _ = child.kill().await;
                 stderr_task.abort();
+                if let Stop::Overflow(limit) = stop {
+                    stdout_task.abort();
+                    return Err(GfError::OutputTooLarge { limit });
+                }
                 return Ok(GitOutput {
-                    stdout: join(stdout_task).await?,
+                    stdout: join(stdout_task).await?.0,
                     stderr: String::new(),
                     exit_code: Some(0),
                 });
@@ -344,7 +374,11 @@ impl GitRunner {
             }
         };
 
-        let stdout = join(stdout_task).await?;
+        let (stdout, overflow) = join(stdout_task).await?;
+        if let Some(limit) = overflow {
+            stderr_task.abort();
+            return Err(GfError::OutputTooLarge { limit });
+        }
         let stderr = join(stderr_task).await?;
         Ok(GitOutput {
             stdout,

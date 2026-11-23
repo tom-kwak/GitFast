@@ -90,6 +90,7 @@ impl State {
             self.clear_selection();
             self.diff = Arc::default();
             self.spans.clear();
+            self.shown_large.clear();
             self.file = 0;
             self.scroll = ScrollPos::default();
             self.files_scroll = ScrollPos::default();

@@ -237,6 +237,7 @@ gf는 성능이 가장 중요합니다. 새 코드는 아래 규칙을 지킵니
    - 목록 전체를 훑는 계산은 로드할 때 백그라운드에서 끝내 데이터에 담습니다. 예: `Snapshot.badges`, `LoadedDiff::new`(줄 너비·하이라이트).
    - 그럴 수 없으면 `widgets::memo::Memo`에 담습니다.
    - 긴 목록은 `virtual_list`로 그립니다.
+   - 크기에 끝이 없는 출력은 상한을 둡니다. 예: diff는 `gf_git::DIFF_LIMIT`(32 MiB)를 넘으면 읽지 않고(`RunOptions::max_stdout`), 2만 줄이나 1 MiB를 넘는 파일은 ⏎를 누를 때까지 그리지 않습니다(`diff_view`의 `LARGE_DIFF_*`).
 4. **canvas는 캐시합니다.** `canvas::Cache`를 쓰고, 내용으로 키를 잡습니다. virtual list는 스크롤할 때 위젯을 다른 행에 재사용하므로 위젯 기준 키는 틀립니다. 예: `widgets/graph_canvas.rs`의 `RowCache`.
 5. **UI 스레드에서 git·큰 파일 I/O를 하지 않습니다.**
    - git 실행은 `Task::perform`으로 합니다.
