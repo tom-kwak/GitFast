@@ -87,13 +87,24 @@ fn history_len(app: &App) -> usize {
     history(app).map_or(0, |h| h.commits.len())
 }
 
-/// Time of one `App::view()` (what iced rebuilds after every message), ms.
-fn view_ms(app: &App) -> f64 {
+/// Time of `App::view()` (what iced rebuilds after every message), ms:
+/// the first call after new data (it fills the view's memos) and the
+/// average of the calls after it (every other frame).
+fn view_ms(app: &App) -> (f64, f64) {
     let start = Instant::now();
-    for _ in 0..10 {
+    drop(app.view());
+    let first = start.elapsed().as_secs_f64() * 1000.0;
+    let start = Instant::now();
+    for _ in 0..20 {
         drop(app.view());
     }
-    start.elapsed().as_secs_f64() * 100.0
+    (first, start.elapsed().as_secs_f64() * 1000.0 / 20.0)
+}
+
+/// [`view_ms`] as text.
+fn view_text(app: &App) -> String {
+    let (first, then) = view_ms(app);
+    format!("view() first {first:.2} ms, then {then:.2} ms")
 }
 
 /// The commit with the most changed lines among the newest 2000 (merges
@@ -252,9 +263,9 @@ async fn mem_bench() {
             continue;
         };
         println!(
-            "  history {} commits, view() {:.2} ms",
+            "  history {} commits, {}",
             history_len(&app),
-            view_ms(&app)
+            view_text(&app)
         );
         step!("select HEAD commit (its diff)", {
             drive(
@@ -273,7 +284,7 @@ async fn mem_bench() {
                 drive(&mut app, Message::History(history::Message::Select(id))).await
             });
         }
-        println!("  view() with that diff {:.2} ms", view_ms(&app));
+        println!("  with that diff: {}", view_text(&app));
         // What dropping a background tab's diff would give back.
         let tab = &mut app.tabs[app.active];
         step!("  if the commit diff were dropped", {
@@ -297,10 +308,7 @@ async fn mem_bench() {
                 }
                 history_len(&app)
             });
-            println!(
-                "  history {reached} commits, view() {:.2} ms",
-                view_ms(&app)
-            );
+            println!("  history {reached} commits, {}", view_text(&app));
             if reached < goal || goal == deep {
                 break;
             }

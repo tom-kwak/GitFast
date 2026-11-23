@@ -53,7 +53,7 @@ cargo test -p gf-app --features mem-bench --bin gf mem_bench -- --ignored --noca
 ```
 --- tab 1: git
 open tab (first history page)                Δheap     +3.9 MB     2446 ms | heap     5.4  high-water    25.9  rss   159.0
-  history 1000 commits, view() 0.15 ms
+  history 1000 commits, view() first 0.45 ms, then 0.05 ms
 select largest commit (26597 lines)          Δheap     +2.5 MB       42 ms | heap     7.2  high-water    25.9  rss   161.1
   if the commit diff were dropped            Δheap     -2.5 MB        1 ms | heap     4.7  high-water    25.9  rss   161.1
 ```
@@ -71,7 +71,7 @@ select largest commit (26597 lines)          Δheap     +2.5 MB       42 ms | he
 1. **탭마다**
    - `open tab`: 저장소를 열고 첫 화면(히스토리 첫 페이지, status)을 읽은 비용
    - `select HEAD commit`, `select largest commit`: 커밋 diff를 열었을 때 탭이 들고 있는 양. 최근 2000개 커밋 중 가장 많이 바뀐 커밋을 고릅니다
-   - `view()`: 화면 한 번을 다시 만드는 시간. iced는 메시지마다 다시 만듭니다
+   - `view()`: 화면 한 번을 다시 만드는 시간. iced는 메시지마다 다시 만듭니다. `first`는 새 데이터가 들어온 직후 첫 호출(Memo를 채우는 비용 포함), `then`은 그 뒤 평소 프레임입니다. 둘 다 커밋 수와 관계없이 일정해야 합니다
    - `if the commit diff were dropped`: 백그라운드 탭의 diff를 비우면 돌려받을 양
 2. **history scroll**: 첫 저장소에서 "더 불러오기"를 반복합니다. 커밋 수에 따라 메모리와 `view()` 시간이 어떻게 늘어나는지, 그리고 히스토리 메모리가 어디에 쓰이는지(`breakdown`) 봅니다.
 3. **close every tab**: 탭을 닫으면 메모리가 돌아오는지 봅니다. `left after closing`의 `heap`이 시작할 때와 비슷해야 합니다.
@@ -83,10 +83,13 @@ select largest commit (26597 lines)          Δheap     +2.5 MB       42 ms | he
 - `Δheap`은 할당자 기준이라 거의 흔들리지 않습니다.
 - 기본 프로필은 의존성만 최적화합니다. 시간을 정확히 보려면 `GF_BENCH_CARGO=--release`를 씁니다(빌드가 오래 걸립니다).
 
-참고 기록(Linux, 4코어, dev 프로필, `GF_BENCH_DEEP=all`, git.git 8.3만 커밋):
+참고 기록(Linux, 4코어, dev 프로필, `GF_BENCH_DEEP=all`, git.git 8만 커밋):
 
-| 항목 | 그래프 정리 전 | 정리 후 |
-|---|---|---|
-| git.git 탭 열기 | 18.8MB | 3.9MB |
-| 8.3만 커밋 히스토리 | 1,090MB | 135MB |
-| 끝까지 스크롤하는 동안 high-water | 2.2GB | 262MB |
+| 항목 | 처음 | 그래프 정리 후 | 페이지 이어 읽기·폭 미리 계산 후 |
+|---|---|---|---|
+| git.git 탭 열기 | 18.8MB | 3.9MB | 4.0MB |
+| 8만 커밋 히스토리 | 1,090MB | 135MB | 117MB |
+| 끝까지 스크롤하는 동안 high-water | 2.2GB | 262MB | 238MB |
+| 8만 커밋까지 스크롤 총 시간 | 92초 | 49초 | 18초 |
+| 페이지가 들어온 직후 첫 `view()` (8만 커밋) | — | 48ms | 0.6ms |
+| 그 뒤 `view()` | 0.07ms | 0.07ms | 0.08ms |
