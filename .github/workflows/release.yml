@@ -9,8 +9,8 @@ name: Release
 #
 #   git tag release-0.0.2 && git push origin release-0.0.2
 #
-# Every other push to main runs the UI sweep on main here (CI sweeps only
-# pull requests into main), so each commit is swept once.
+# The UI sweep and the packages run only for a release tag; a push to main
+# without a new tag does nothing here.
 on:
   push:
     branches: [main]
@@ -27,9 +27,9 @@ concurrency:
 
 jobs:
   # Which tag to release: the newest release-* tag in main that has no
-  # release yet (none: nothing to do). And what to sweep: that tag, else
-  # main after a push to it, unless a release tag already sits on that
-  # commit (its release swept it).
+  # release yet (none: nothing to do). And whether to sweep it: not when
+  # the sweep already passed on the same code ("same code" = no difference
+  # outside *.md and docs/).
   resolve:
     name: Find the tag to release
     runs-on: ubuntu-latest
@@ -63,27 +63,25 @@ jobs:
           else
             echo "Releasing $tag ($(git rev-parse "$tag^{commit}"))"
           fi
-          # A CI run (a push to develop or main, a pull request) already
-          # passed on the tagged commit: the release need not run the same
-          # checks again (on Windows they take 20+ minutes).
+          # CI already passed on the same code (a push to develop or main,
+          # a pull request; docs and *.md do not count): the release need
+          # not run the same checks again (on Windows they take 20+ minutes).
           tested=""
-          if [ -n "$tag" ]; then
-            passed="$(gh run list --workflow ci.yml --status success \
-              --commit "$(git rev-parse "$tag^{commit}")" \
-              --json databaseId -q length)"
-            [ "${passed:-0}" -gt 0 ] && tested=true
-            echo "CI already passed on the tagged commit: ${tested:-no}"
+          if [ -n "$tag" ] && scripts/ci-verified.sh ci "$tag"; then
+            tested=true
           fi
+          echo "CI already passed on this code: ${tested:-no}"
+          # The UI sweep runs for the tag only, and not when it already
+          # passed on the same code (a release before it, 0.0.9-rc.1).
           sweep="$tag"
-          if [ -z "$sweep" ] && [ "$GITHUB_REF_TYPE" = branch ] &&
-             [ -z "$(git tag -l 'release-*' --points-at "$GITHUB_SHA")" ]; then
-            sweep="$GITHUB_SHA"
+          if [ -n "$sweep" ] && scripts/ci-verified.sh sweep "$sweep"; then
+            sweep=""
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sweep=$sweep" >> "$GITHUB_OUTPUT"
           echo "tested=$tested" >> "$GITHUB_OUTPUT"
 
-  # Skipped when CI already passed on that commit (`tested`): the packages
+  # Skipped when CI already passed on the same code (`tested`): the packages
   # below then follow without it.
   ci:
     needs: resolve
@@ -93,7 +91,6 @@ jobs:
       ref: ${{ needs.resolve.outputs.tag }}
 
   # Runs beside the checks and the .dmg build; the release waits for it.
-  # With nothing to release it checks main alone.
   ui-sweep:
     name: UI sweep (every button does something)
     needs: resolve
@@ -198,6 +195,8 @@ jobs:
   publish:
     name: Publish release
     needs: [resolve, macos, windows, ui-sweep]
+    # `ui-sweep` is skipped when it already passed on the same code.
+    if: ${{ !failure() && !cancelled() && needs.resolve.outputs.tag != '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -230,6 +229,15 @@ jobs:
           ZIP: dist/gf-windows-x64.zip
         run: |
           version="${TAG#release-}"
+          # This release's own installers: the tag is in them, so they need
+          # no argument (a pre-release too).
+          sed "s/^TAG=\$/TAG=$TAG/" src/scripts/install.sh > dist/install.sh
+          sed "s/^    \$tag = ''\$/    \$tag = '$TAG'/" src/scripts/install.ps1 > dist/install.ps1
+          grep -q "^TAG=$TAG\$" dist/install.sh
+          grep -qF "\$tag = '$TAG'" dist/install.ps1
+          # A pre-release is not "latest": its page links its own installers.
+          installers="https://github.com/${{ github.repository }}/releases/latest/download"
+          case "$version" in *-*) installers="https://github.com/${{ github.repository }}/releases/download/$TAG" ;; esac
           whats_new="src/docs/release-notes/$version.md"
           previous="$(git -C src tag -l 'release-*' --sort=-v:refname | grep -vxF "$TAG" | head -1)"
           {
@@ -244,17 +252,18 @@ jobs:
           Run in Terminal on macOS 11 or later (Apple silicon or Intel):
 
           \`\`\`bash
-          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
+          curl -fsSL $installers/install.sh | bash
           \`\`\`
 
           ### Windows
 
-          Run in PowerShell on Windows 10 1809+ or 11 (x64). It installs gf for the
+          Run in PowerShell on Windows 10 1809+ or 11 (x64) (the macOS command also
+          works in Git Bash, which detects Windows). It installs gf for the
           current user (no administrator rights), adds it to the Start menu and \`PATH\`,
           and checks the download's SHA-256:
 
           \`\`\`powershell
-          irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
+          irm $installers/install.ps1 | iex
           \`\`\`
 
           gf is not code-signed yet, so SmartScreen may warn on the first launch
@@ -277,6 +286,7 @@ jobs:
           # The tag already exists (on a commit in main).
           gh release create "$TAG" \
             "$DMG_ARM64" "$DMG_ARM64.sha256" "$DMG_X64" "$DMG_X64.sha256" "$ZIP" "$ZIP.sha256" \
+            dist/install.sh dist/install.ps1 \
             --verify-tag \
             --title "gf $version" \
             --notes-file notes.md \
