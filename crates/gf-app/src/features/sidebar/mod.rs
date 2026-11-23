@@ -1414,7 +1414,7 @@ impl State {
                 .map(|(_, frame)| frame)
         };
         let t = cx.tokens;
-        let filter = text_input("filter refs…  ·  right-click for actions", &self.filter)
+        let filter = text_input("filter refs…", &self.filter)
             .id(REFS_FILTER_ID)
             .on_input(Message::Filter)
             .size(t.small())
