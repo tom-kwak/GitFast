@@ -3108,6 +3108,51 @@ async fn removing_a_worktree_closes_its_open_tab() {
     assert_eq!(ui.app.tabs.len(), 1);
 }
 
+/// The first target whose press sends exactly `wanted`.
+fn target_sending(ui: &Ui, label: &str, wanted: &Message) -> Target {
+    let wanted = format!("{wanted:?}");
+    ui.targets()
+        .into_iter()
+        .find(|target| {
+            target.label == label
+                && ui
+                    .press(target.at, mouse::Button::Left)
+                    .iter()
+                    .any(|m| format!("{m:?}") == wanted)
+        })
+        .unwrap_or_else(|| panic!("no {label:?} sending {wanted}"))
+}
+
+#[tokio::test]
+async fn worktrees_panel_closes_like_refs_and_each_closed_tab_reopens_its_own() {
+    let mut ui = Ui::open().await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    ui.settle();
+    // `+` still adds a tree; `«` where it used to be hides the panel.
+    let _ = target_sending(&ui, "+", &Message::Worktrees(worktrees::Message::New));
+    let close = target_sending(&ui, "«", &Message::Worktrees(worktrees::Message::Collapse));
+    let _ = ui.click_at(&close, mouse::Button::Left).await;
+    assert!(!ui.app.settings.appearance.show_refs);
+
+    // Closed: REFS above, WORKTREES below, each opening its own tab.
+    ui.settle();
+    let refs = target_sending(&ui, "F", &Message::RefsMode(worktrees::RefsMode::Refs));
+    let trees = target_sending(&ui, "W", &Message::RefsMode(worktrees::RefsMode::Worktrees));
+    assert!(refs.at.y < trees.at.y, "REFS sits above WORKTREES");
+    let _ = ui.click_at(&refs, mouse::Button::Left).await;
+    assert!(ui.app.settings.appearance.show_refs);
+    assert_eq!(ui.app.refs_mode(), worktrees::RefsMode::Refs);
+
+    let _ = ui.send(Message::Key(Shortcut::ToggleRefs)).await;
+    ui.settle();
+    let trees = target_sending(&ui, "W", &Message::RefsMode(worktrees::RefsMode::Worktrees));
+    let _ = ui.click_at(&trees, mouse::Button::Left).await;
+    assert!(ui.app.settings.appearance.show_refs);
+    assert_eq!(ui.app.refs_mode(), worktrees::RefsMode::Worktrees);
+}
+
 #[tokio::test]
 async fn new_worktree_goes_beside_the_repository_and_opens_in_a_tab() {
     let mut ui = Ui::open().await;

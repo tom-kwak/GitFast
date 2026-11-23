@@ -288,31 +288,42 @@ pub fn accent_panel_with_action<'a, M: 'a>(
         .into()
 }
 
-/// Thin full-height strip standing in for a closed side panel: an arrow
-/// and the panel name written vertically; clicking it reopens the panel.
-pub fn collapsed_strip<'a, M: Clone + 'a>(
+/// One tab of a [`collapsed_strips`] stack.
+pub struct StripTab<'a, M> {
+    pub label: &'a str,
+    pub hint: String,
+    pub on_press: M,
+    /// The tab the panel's own toggle reopens; its arrow is lit.
+    pub current: bool,
+}
+
+/// Closed side panel with several tabs: thin strips stacked at the top,
+/// each as tall as its name written vertically; a click opens that tab.
+pub fn collapsed_strips<'a, M: Clone + 'a>(
     t: &'a Tokens,
     arrow: &'a str,
-    label: &str,
-    hint: String,
-    on_press: M,
+    tabs: Vec<StripTab<'a, M>>,
 ) -> Element<'a, M> {
-    let mut col = column![colored(t, arrow, t.accent())]
-        .spacing(0)
-        .align_x(iced::Alignment::Center);
-    for ch in label.chars() {
-        col = col.push(dim(t, ch.to_string()));
+    let mut stack = column![].spacing(4).height(Length::Fill);
+    for tab in tabs {
+        let arrow_color = if tab.current { t.accent() } else { t.dim };
+        let mut col = column![colored(t, arrow, arrow_color)]
+            .spacing(0)
+            .align_x(iced::Alignment::Center);
+        for ch in tab.label.chars() {
+            col = col.push(dim(t, ch.to_string()));
+        }
+        stack = stack.push(tip(
+            t,
+            button(col)
+                .width(Length::Fixed(t.font_size * 1.8))
+                .padding(Padding::from([6, 2]))
+                .style(style::row_button(t, false))
+                .on_press(tab.on_press),
+            tab.hint,
+        ));
     }
-    tip(
-        t,
-        button(col)
-            .width(Length::Fixed(t.font_size * 1.8))
-            .height(Length::Fill)
-            .padding(Padding::from([6, 2]))
-            .style(style::row_button(t, false))
-            .on_press(on_press),
-        hint,
-    )
+    stack.into()
 }
 
 /// Full-width button standing in for a closed panel above or below the content.

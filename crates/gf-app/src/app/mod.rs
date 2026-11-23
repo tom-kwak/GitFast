@@ -1886,12 +1886,33 @@ impl App {
                     .width(Length::Fixed(t.cols(1) * appearance.refs_cols))
                     .into()
                 } else {
-                    widgets::collapsed_strip(
+                    // One strip per tab, so either opens straight away.
+                    let mode = self.refs_mode();
+                    // ⌘B reopens the current tab, ⌘⇧B the worktrees.
+                    let strip = |m: worktrees::RefsMode, label, hint: &str| {
+                        let key = match m {
+                            _ if mode == m => " ⌘B",
+                            worktrees::RefsMode::Worktrees => " ⌘⇧B",
+                            worktrees::RefsMode::Refs => "",
+                        };
+                        widgets::StripTab {
+                            label,
+                            hint: format!("{hint}{key}"),
+                            on_press: Message::RefsMode(m),
+                            current: mode == m,
+                        }
+                    };
+                    widgets::collapsed_strips(
                         t,
                         "»",
-                        "REFS",
-                        "show refs ⌘B".into(),
-                        Message::Key(Shortcut::ToggleRefs),
+                        vec![
+                            strip(worktrees::RefsMode::Refs, "REFS", "show refs"),
+                            strip(
+                                worktrees::RefsMode::Worktrees,
+                                "WORKTREES",
+                                "show worktrees",
+                            ),
+                        ],
                     )
                 };
                 use crate::features::op_banner;
