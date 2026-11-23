@@ -265,6 +265,7 @@ gf는 성능이 가장 중요합니다. 새 코드는 아래 규칙을 지킵니
    - 로드 시간은 `RUST_LOG=gf=debug`의 `snapshot loaded` 줄에서 봅니다.
    - gix와 CLI 비교는 `tests/gix_bench.rs`로 합니다.
    - 메모리(탭 여러 개, 큰 diff, 깊은 히스토리)는 [tools/mem-bench](../tools/mem-bench/README.md)로 잽니다.
+   - 다른 Git GUI(GitHub Desktop 등)와의 메모리 비교는 [tools/gui-bench](../tools/gui-bench/README.md)로 잽니다(macOS, 사람이 직접 조작).
    - 최적화는 결과가 같다는 테스트와 함께 넣습니다.
 
 ## 8. 테스트 작성법
