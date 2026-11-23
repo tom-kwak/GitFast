@@ -17,8 +17,9 @@
   <img alt="Windows 10+" src="https://img.shields.io/badge/Windows-10%2B%20x64-blue">
 </p>
 
-> **New in 0.0.8: gf runs on Windows.** Install it from PowerShell with one
-> line ([Windows](#windows) below).
+> **New in 0.0.8:** gf runs on Windows (install it from PowerShell with one
+> line, [Windows](#windows) below), and a **Worktrees view** shows every
+> working tree of a repository at a glance ([Features](#features)).
 
 ## Install
 
@@ -71,6 +72,13 @@ Linux support is planned.
   `~/Library/Application Support/dev.gf.gf/syntaxes/` (macOS) or
   `%APPDATA%\gf\gf\config\syntaxes\` (Windows).
 - **Branches, tags and stashes** in a sidebar tree with a quick filter.
+- **Worktrees** (`⌘⇧B`, beside REFS): one card per working tree, for running
+  several at once (e.g. one per AI agent). A card shows the branch, what is
+  uncommitted, recent activity (`⚡`) and where the tree came from
+  (`from develop · 3 ahead · 1 behind`, or `merged`). Right-click to open it in
+  a tab, IDE or terminal, compare it with its base, merge it into its base,
+  lock or remove it. `+` adds a tree, with a dropdown of existing branches;
+  `clean N` removes the merged ones.
 - **Blame**: who last changed each line; click a line to find its commit.
 - **Conflicts**: keep ours, theirs or both for each conflict block.
 - **Interactive rebase**: pick, reword, squash, fixup or drop commits and
@@ -96,6 +104,12 @@ falling back to `git` when gitoxide cannot handle one.
   screen says how to get git when it cannot start it.
 - The open-repository window takes Windows paths (`C:\src\gf`,
   `\\server\share`).
+- **Worktrees view**: see all working trees of a repository as cards and act
+  on them from the right-click menu, including merging a tree's branch into
+  its base. The base is the branch the tree was made from (gf remembers it),
+  not always `main`.
+- **Safer undo / redo**: undoing pushed commits warns first, a restore is all
+  or nothing, and the redo stack survives a restart.
 
 [Release notes](https://github.com/tom-kwak/GitFast/releases/tag/release-0.0.8)
 
