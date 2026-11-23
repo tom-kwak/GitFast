@@ -113,7 +113,9 @@ Pushing the tag starts the release workflow if the tagged commit is already
 in `main`. Otherwise, the workflow picks up the tag when the commit reaches
 `main`. After the checks (macOS and Windows) and UI sweep pass, the workflow
 publishes the universal `.dmg`, the Windows `.zip` and their SHA-256
-checksums. The release notes start with
+checksums. The checks are skipped when CI already passed on the tagged commit
+(the usual case: push `develop` and wait for its CI before merging to `main`
+and tagging), which saves the 20+ minutes Windows takes to build. The release notes start with
 `docs/release-notes/<version>.md` ("What's new", written for each release),
 followed by the install steps.
 [Release workflow](.github/workflows/release.yml) ·

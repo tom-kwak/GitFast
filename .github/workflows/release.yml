@@ -36,6 +36,11 @@ jobs:
     outputs:
       tag: ${{ steps.find.outputs.tag }}
       sweep: ${{ steps.find.outputs.sweep }}
+      tested: ${{ steps.find.outputs.tested }}
+    # `gh run list` below reads the CI runs.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,6 +63,17 @@ jobs:
           else
             echo "Releasing $tag ($(git rev-parse "$tag^{commit}"))"
           fi
+          # A CI run (a push to develop or main, a pull request) already
+          # passed on the tagged commit: the release need not run the same
+          # checks again (on Windows they take 20+ minutes).
+          tested=""
+          if [ -n "$tag" ]; then
+            passed="$(gh run list --workflow ci.yml --status success \
+              --commit "$(git rev-parse "$tag^{commit}")" \
+              --json databaseId -q length)"
+            [ "${passed:-0}" -gt 0 ] && tested=true
+            echo "CI already passed on the tagged commit: ${tested:-no}"
+          fi
           sweep="$tag"
           if [ -z "$sweep" ] && [ "$GITHUB_REF_TYPE" = branch ] &&
              [ -z "$(git tag -l 'release-*' --points-at "$GITHUB_SHA")" ]; then
@@ -65,10 +81,13 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sweep=$sweep" >> "$GITHUB_OUTPUT"
+          echo "tested=$tested" >> "$GITHUB_OUTPUT"
 
+  # Skipped when CI already passed on that commit (`tested`): the packages
+  # below then follow without it.
   ci:
     needs: resolve
-    if: needs.resolve.outputs.tag != ''
+    if: needs.resolve.outputs.tag != '' && needs.resolve.outputs.tested != 'true'
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ needs.resolve.outputs.tag }}
@@ -91,6 +110,9 @@ jobs:
   macos:
     name: Package (macOS)
     needs: [resolve, ci]
+    # `ci` is skipped when the commit passed CI already; it must not have
+    # failed. Nothing to release: nothing to package.
+    if: ${{ !failure() && !cancelled() && needs.resolve.outputs.tag != '' }}
     # The universal build can use either host architecture.
     runs-on: macos-15-intel
     outputs:
@@ -144,6 +166,9 @@ jobs:
   windows:
     name: Package (Windows)
     needs: [resolve, ci]
+    # `ci` is skipped when the commit passed CI already; it must not have
+    # failed. Nothing to release: nothing to package.
+    if: ${{ !failure() && !cancelled() && needs.resolve.outputs.tag != '' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
