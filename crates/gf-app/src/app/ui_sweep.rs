@@ -2660,7 +2660,7 @@ async fn remote_checkout_selects_the_current_tracking_branch_without_switching()
 }
 
 #[tokio::test]
-async fn remote_checkout_selects_a_branch_checked_out_in_a_linked_worktree() {
+async fn remote_checkout_offers_the_tab_of_a_linked_worktree_holding_the_branch() {
     let folder = tempfile::tempdir().expect("worktree parent");
     let path = folder.path().join("linked");
     let mut ui = Ui::open_with(|repo| {
@@ -2685,10 +2685,12 @@ async fn remote_checkout_selects_a_branch_checked_out_in_a_linked_worktree() {
         .await;
 
     assert!(!fx.repo_changed);
-    assert!(ui.app.dialog.is_none());
-    assert_eq!(
-        ui.app.active_tab().expect("tab").history.revision(),
-        Some("refs/heads/feature")
+    let dialog = ui.app.dialog.as_ref().expect("asks about the worktree tab");
+    assert_eq!(dialog.title, "Branch in another worktree");
+    assert!(
+        matches!(&dialog.purpose, Purpose::OpenWorktreeTab(p) if p.ends_with("linked")),
+        "{:?}",
+        dialog.purpose
     );
     assert_eq!(
         ui.fixture.repo.git(&["branch", "--show-current"]).trim(),
@@ -4042,4 +4044,19 @@ async fn a_batch_stops_at_the_first_step_that_fails() {
         "{}",
         ui.flash()
     );
+}
+
+#[tokio::test]
+async fn forgetting_a_recent_repository_needs_no_confirmation() {
+    let mut ui = Ui::open_with(|_| {}).await;
+    let gone = PathBuf::from("/nowhere/old-tree");
+    ui.app.settings.repos.recent = vec![gone.clone()];
+    let _ = ui.send(Message::OpenPicker).await;
+
+    let _ = ui
+        .send(Message::Picker(repo_picker::Message::Forget(gone)))
+        .await;
+
+    assert!(ui.app.dialog.is_none(), "forgetting asks nothing");
+    assert!(ui.app.settings.repos.recent.is_empty());
 }

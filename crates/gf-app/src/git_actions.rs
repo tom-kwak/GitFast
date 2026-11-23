@@ -460,6 +460,26 @@ pub fn diagnose(error: &str) -> Diagnosis {
         .map_or(UNKNOWN, |r| r.diagnosis.clone())
 }
 
+/// Reads git's refusal to check out a branch another worktree has:
+/// `fatal: 'topic' is already used by worktree at '/work/topic'` (older git:
+/// `is already checked out at '…'`). Returns the branch and that worktree's
+/// path.
+pub fn worktree_conflict(error: &str) -> Option<(String, std::path::PathBuf)> {
+    const MARKERS: [&str; 2] = [
+        "' is already used by worktree at '",
+        "' is already checked out at '",
+    ];
+    error.lines().find_map(|line| {
+        let (marker, at) = MARKERS
+            .iter()
+            .find_map(|m| line.find(m).map(|at| (*m, at)))?;
+        let branch = line[..at].rsplit_once('\'')?.1;
+        let path = line[at + marker.len()..].trim_end().strip_suffix('\'')?;
+        (!branch.is_empty() && !path.is_empty())
+            .then(|| (branch.to_owned(), std::path::PathBuf::from(path)))
+    })
+}
+
 /// The part of a failure worth showing: git's own words without the
 /// "`git …` failed with exit code" wrapper, at most `max` non-empty lines.
 pub fn error_excerpt(error: &str, max: usize) -> Vec<String> {
@@ -618,5 +638,27 @@ mod tests {
             hint_for_error(&args(&["push"]), "! [rejected] main -> main (fetch first)").is_some()
         );
         assert!(hint_for_error(&args(&["status"]), "all good").is_none());
+    }
+
+    #[test]
+    fn reads_the_worktree_that_holds_a_branch() {
+        let (b, p) =
+            worktree_conflict("fatal: 'topic' is already used by worktree at '/work/topic'")
+                .expect("new git");
+        assert_eq!((b.as_str(), p.to_str()), ("topic", Some("/work/topic")));
+        let (b, p) =
+            worktree_conflict("fatal: 'feature/x' is already checked out at 'C:/Users/me/wt x'\n")
+                .expect("old git, Windows path");
+        assert_eq!(
+            (b.as_str(), p.to_str()),
+            ("feature/x", Some("C:/Users/me/wt x"))
+        );
+        let wrapped = "`git switch topic` failed with exit code 128: fatal: 'topic' is already used by worktree at '/o'neil/wt'";
+        assert_eq!(
+            worktree_conflict(wrapped).expect("wrapped").1.to_str(),
+            Some("/o'neil/wt")
+        );
+        assert!(worktree_conflict("fatal: invalid reference: topic").is_none());
+        assert!(worktree_conflict("fatal: 'x' is already used by worktree at ''").is_none());
     }
 }

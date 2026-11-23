@@ -648,6 +648,59 @@ impl Snapshot {
                 .all(|e| matches!(e, StatusEntry::Ignored { .. }))
     }
 
+    /// The local branch a remote branch checks out as: the one tracking it
+    /// (HEAD first, then the usual name, then the only one).
+    pub fn local_for_remote(&self, remote: &Branch) -> Option<&Branch> {
+        use gf_core::model::RefKind;
+        let tracking = self.branches.iter().filter(|b| {
+            b.name.kind() == RefKind::LocalBranch
+                && b.upstream
+                    .as_ref()
+                    .is_some_and(|upstream| upstream.name == remote.name)
+        });
+        let usual_name =
+            gf_git::remote_branch(&self.remotes, remote.name.as_str()).map(|(_, head)| head);
+        tracking
+            .clone()
+            .find(|b| b.is_head)
+            .or_else(|| {
+                tracking
+                    .clone()
+                    .find(|b| Some(b.name.short()) == usual_name.as_deref())
+            })
+            .or_else(|| {
+                let mut candidates = tracking;
+                let first = candidates.next()?;
+                candidates.next().is_none().then_some(first)
+            })
+    }
+
+    /// The other worktree that has `branch` (a local branch) checked out.
+    /// The current worktree's branch is HEAD, so HEAD never counts; bare
+    /// and prunable entries (directory gone, nothing to go to) are left
+    /// out too.
+    pub fn worktree_holding(&self, branch: &Branch) -> Option<&Worktree> {
+        use gf_core::model::RefKind;
+        if branch.is_head || branch.name.kind() != RefKind::LocalBranch {
+            return None;
+        }
+        self.worktrees
+            .iter()
+            .find(|w| !w.bare && !w.prunable && w.branch.as_deref() == Some(branch.name.short()))
+    }
+
+    /// The other worktree that checking out `b` would run into: the one
+    /// holding `b` itself, or for a remote branch the one holding its local
+    /// counterpart.
+    pub fn worktree_for_checkout(&self, b: &Branch) -> Option<&Worktree> {
+        use gf_core::model::RefKind;
+        if b.name.kind() == RefKind::RemoteBranch {
+            self.worktree_holding(self.local_for_remote(b)?)
+        } else {
+            self.worktree_holding(b)
+        }
+    }
+
     /// The newest stash gf made when changes were left on the current
     /// branch ("stash, then switch"), to offer them back.
     pub fn left_here(&self) -> Option<&StashEntry> {
@@ -872,6 +925,61 @@ impl RepoTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wt(path: &str, branch: Option<&str>) -> Worktree {
+        Worktree {
+            path: path.into(),
+            head: None,
+            branch: branch.map(str::to_owned),
+            bare: false,
+            locked: false,
+            prunable: false,
+        }
+    }
+
+    fn local(name: &str, head: bool) -> Branch {
+        Branch {
+            name: gf_core::model::RefName::local_branch(name),
+            target: "a".repeat(40).parse().expect("oid"),
+            upstream: None,
+            is_head: head,
+        }
+    }
+
+    #[test]
+    fn a_branch_is_held_by_another_worktree_only() {
+        let mut bare = wt("/repo.git", Some("bare"));
+        bare.bare = true;
+        let mut gone = wt("/gone", Some("gone"));
+        gone.prunable = true;
+        let snap = Snapshot {
+            worktrees: vec![
+                wt("/repo", Some("main")),
+                wt("/repo-topic", Some("topic")),
+                bare,
+                gone,
+            ],
+            ..Snapshot::default()
+        };
+        let held = snap.worktree_holding(&local("topic", false));
+        assert_eq!(
+            held.map(|w| w.path.as_path()),
+            Some(Path::new("/repo-topic"))
+        );
+        assert!(
+            snap.worktree_holding(&local("main", true)).is_none(),
+            "current"
+        );
+        assert!(snap.worktree_holding(&local("other", false)).is_none());
+        assert!(
+            snap.worktree_holding(&local("bare", false)).is_none(),
+            "bare"
+        );
+        assert!(
+            snap.worktree_holding(&local("gone", false)).is_none(),
+            "prunable"
+        );
+    }
 
     #[test]
     fn switching_quietly_needs_a_branch_no_operation_and_no_changes() {
@@ -1200,7 +1308,7 @@ mod tests {
             .expect("annotated");
         let after = load(Some(after), Parts::ALL).await.expect("refresh");
         let names: Vec<_> = after.tags.iter().map(|t| t.name.short()).collect();
-        assert_eq!(names, ["v1", "v2"]);
+        assert_eq!(names, ["v2", "v1"], "newest version first");
         assert!(after.badges.values().flatten().any(|b| b.label == "◆ v2"));
     }
 
@@ -1291,7 +1399,8 @@ mod tests {
         let more = load(Some(listed), Parts::ALL).await.expect("load");
         assert_eq!(
             more.pending_tags.clone().expect("known").names,
-            ["mine", "on-side"]
+            ["mine", "on-side"],
+            "in the tag list's order"
         );
 
         // Pushed through gf: recorded, no longer counted.

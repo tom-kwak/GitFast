@@ -924,6 +924,21 @@ impl App {
                     std::iter::once(p.clone()).chain(resolved)
                 })
                 .collect();
+            // A removed tree is not a repository to come back to: drop it
+            // from the recent list too (welcome page and open window).
+            let before = self.settings.repos.recent.len();
+            self.settings
+                .repos
+                .recent
+                .retain(|r| !gone.iter().any(|g| r == g));
+            if self.settings.repos.recent.len() != before {
+                self.save_settings();
+                for g in &gone {
+                    if let Some(p) = self.picker.as_mut() {
+                        p.forgotten(g);
+                    }
+                }
+            }
             for i in (0..self.tabs.len()).rev() {
                 if gone.iter().any(|p| self.tabs[i].repo.cwd().starts_with(p)) {
                     tasks.push(self.close_tab(i));
@@ -1097,6 +1112,11 @@ impl App {
         if self.dialog.is_some() || self.code_dialog.is_some() || self.rebase_editor().is_some() {
             return Task::none();
         }
+        if let Some((branch, path)) = git_actions::worktree_conflict(error)
+            && let Some(wt) = self.worktree_to_open(&path)
+        {
+            return self.ask_worktree_tab(&branch, wt);
+        }
         let d = git_actions::diagnose(error);
         let mut body = vec![format!("{} failed — git said:", truncate(label, 60))];
         body.extend(
@@ -1115,6 +1135,16 @@ impl App {
                 .map(|(i, s)| format!("  {}. {s}", i + 1)),
         );
         self.open_dialog(Dialog::notice(d.title, body, Purpose::Failure))
+    }
+
+    /// `path` as a worktree of the active repository that can be opened
+    /// (a missing one, listed as prunable, cannot).
+    fn worktree_to_open(&self, path: &std::path::Path) -> Option<PathBuf> {
+        let snap = self.active_tab()?.snapshot.as_deref()?;
+        match snap.worktrees.iter().find(|w| w.path == path) {
+            Some(w) if w.prunable || w.bare => None,
+            _ => Some(path.to_path_buf()),
+        }
     }
 
     pub(super) fn run_git(&mut self, args: Vec<String>) -> Task<Message> {
@@ -1438,6 +1468,54 @@ mod tests {
                 .loading_touched
                 .includes(std::path::Path::new("a.txt"))
         );
+    }
+
+    #[tokio::test]
+    async fn a_branch_in_another_worktree_asks_for_its_tab() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.commit_all("init");
+        let home = tempfile::tempdir().expect("home");
+        let (mut app, _) = App::boot(
+            gf_config::AppPaths::under(home.path()),
+            gf_config::Settings::default(),
+        );
+        app.tabs.push(RepoTab::new(open(&repo).await, None));
+        let tab = &mut app.tabs[0];
+        let topic = |head| gf_core::model::Branch {
+            name: gf_core::model::RefName::local_branch("topic"),
+            target: "a".repeat(40).parse().expect("oid"),
+            upstream: None,
+            is_head: head,
+        };
+        tab.snapshot = Some(Arc::new(Snapshot {
+            branches: [topic(false)].into(),
+            worktrees: vec![gf_git::Worktree {
+                path: "/wt/topic".into(),
+                head: None,
+                branch: Some("topic".into()),
+                bare: false,
+                locked: false,
+                prunable: false,
+            }],
+            ..Snapshot::default()
+        }));
+        let _ = app.checkout(topic(false));
+        let purpose = app.dialog.as_ref().map(|d| d.purpose.clone());
+        assert!(
+            matches!(purpose, Some(Purpose::OpenWorktreeTab(p)) if p.as_path() == std::path::Path::new("/wt/topic"))
+        );
+
+        // A failed switch with git's own words asks the same.
+        app.dialog = None;
+        let _ = app.show_failure(
+            "switch to topic",
+            "fatal: 'topic' is already used by worktree at '/wt/topic'",
+        );
+        assert!(matches!(
+            app.dialog.as_ref().map(|d| &d.purpose),
+            Some(Purpose::OpenWorktreeTab(_))
+        ));
     }
 
     #[tokio::test]
