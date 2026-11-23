@@ -20,8 +20,12 @@ mod advanced;
 mod branch_delete;
 mod dialogs;
 mod focus;
+#[cfg(test)]
+mod keyboard_tests;
 mod ops;
 mod outputs;
+#[cfg(test)]
+mod regression_tests;
 mod reveal;
 mod settings;
 #[cfg(test)]
