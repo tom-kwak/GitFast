@@ -19,7 +19,7 @@
 | 설정 | serde + toml, directories | 사용 중 | OS별 표준 경로(`GF_HOME`으로 한 폴더에 모을 수 있음) |
 | 구문 강조 | syntect(Oniguruma) + two-face | 사용 중 | VS Code와 같은 TextMate 문법. `<config>/syntaxes/`의 `*.tmLanguage.json`·`*.sublime-syntax`를 자동 로드 |
 | 로깅 | tracing | 사용 중 | 실행한 git 명령과 출력은 명령 로그 패널에 표시 |
-| 패키징 | `scripts/package-macos.sh`(universal .dmg), `scripts/package-windows.ps1`(.zip) | 사용 중 | 설치는 `install.sh` / `install.ps1`, 릴리스는 `release.yml` |
+| 패키징 | `scripts/package-macos.sh`(아키텍처별 .dmg: arm64·x86_64), `scripts/package-windows.ps1`(.zip) | 사용 중 | 설치는 `install.sh` / `install.ps1`, 릴리스는 `release.yml` |
 | HTTP | reqwest (rustls) | M7 예정 | GitLab/GitHub API |
 | 자격 증명 | keyring | M7 예정 | macOS Keychain / Windows Credential Manager. 지금은 git credential helper에 맡김 |
 | 내장 터미널 | alacritty_terminal | M5 예정 | 구조화 UI로 못 하는 명령의 마지막 폴백 |
@@ -167,7 +167,7 @@ trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }
 | **M5 전 명령 지원** | CommandSpec, 자동 폼, 커맨드 팔레트, 내장 터미널, 커스텀 액션 | 다음 |
 | **M6 Git Flow** | init 다이얼로그, start/finish/publish, Flow 사이드바 | |
 | **M7 호스팅** | gf-auth, gf-hosting, GitLab(repo/MR/pipeline), Clone 다이얼로그, GitHub repo/clone | |
-| **M8 macOS 배포** | universal .dmg, `install.sh`, 태그 기반 릴리스 워크플로 ✅ · 남음: 코드 서명·공증, 자동 업데이트, ko/en | 일부 |
+| **M8 macOS 배포** | 아키텍처별 .dmg, `install.sh`, 태그 기반 릴리스 워크플로 ✅ · 남음: 코드 서명·공증, 자동 업데이트, ko/en | 일부 |
 | **M9 크로스플랫폼** | Windows x64(0.0.8부터, zip + `install.ps1`, CI 매트릭스) ✅ · 남음: Windows 실기 점검(한글 IME, DPI·다중 모니터), 코드 서명·MSI·winget, Linux | 일부 |
 
 M6(Flow)과 M7(호스팅)은 서로 독립이라 병렬로 진행할 수 있습니다.

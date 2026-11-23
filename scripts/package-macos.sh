@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds gf.app and a .dmg for it into dist/.
 #
-#   scripts/package-macos.sh [version]          # this Mac's architecture
-#   UNIVERSAL=1 scripts/package-macos.sh 0.1.0  # Apple silicon + Intel
+#   scripts/package-macos.sh [version]   # this Mac's architecture
+#
+# Apple silicon and Intel are built on their own Macs (see release.yml).
 #
 # The app is ad-hoc signed, not notarized: a copy downloaded with a browser
 # is quarantined and macOS refuses to open it until that is cleared
@@ -16,21 +17,9 @@ BUNDLE_ID=io.github.tom-kwak.gf
 DIST=dist
 APP="$DIST/$NAME.app"
 
-if [[ "${UNIVERSAL:-0}" == 1 ]]; then
-  ARCH=universal
-  for t in aarch64-apple-darwin x86_64-apple-darwin; do
-    cargo build --release --locked -p gf-app --target "$t"
-  done
-  BIN="target/universal/$NAME"
-  mkdir -p "$(dirname "$BIN")"
-  lipo -create -output "$BIN" \
-    "target/aarch64-apple-darwin/release/$NAME" \
-    "target/x86_64-apple-darwin/release/$NAME"
-else
-  ARCH="$(uname -m)"
-  cargo build --release --locked -p gf-app
-  BIN="target/release/$NAME"
-fi
+ARCH="$(uname -m)"
+cargo build --release --locked -p gf-app
+BIN="target/release/$NAME"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

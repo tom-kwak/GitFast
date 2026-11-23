@@ -13,9 +13,14 @@ NAME=gf
 
 [[ "$(uname -s)" == Darwin ]] || { echo "gf: this installer is for macOS" >&2; exit 1; }
 
-# Every release names its .dmg this way. GF_DMG_URL / GF_INSTALL_DIR
-# override where from and where to (for testing a build).
-url="${GF_DMG_URL:-https://github.com/$REPO/releases/latest/download/$NAME-macos-universal.dmg}"
+# Every release names its .dmg this way, one per architecture. GF_DMG_URL /
+# GF_INSTALL_DIR override where from and where to (for testing a build).
+case "$(uname -m)" in
+  arm64) arch=arm64 ;;
+  x86_64) arch=x86_64 ;;
+  *) echo "gf: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+esac
+url="${GF_DMG_URL:-https://github.com/$REPO/releases/latest/download/$NAME-macos-$arch.dmg}"
 
 dest="${GF_INSTALL_DIR:-/Applications}"
 [[ -w "$dest" ]] || { dest="$HOME/Applications"; mkdir -p "$dest"; }

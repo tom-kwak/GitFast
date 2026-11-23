@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://github.com/tom-kwak/GitFast/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/tom-kwak/GitFast?label=release"></a>
   <img alt="macOS 11+" src="https://img.shields.io/badge/macOS-11%2B-black">
-  <img alt="Apple silicon and Intel" src="https://img.shields.io/badge/universal-Apple%20silicon%20%7C%20Intel-black">
+  <img alt="Apple silicon and Intel" src="https://img.shields.io/badge/macOS-Apple%20silicon%20%7C%20Intel-black">
   <img alt="Windows 10+" src="https://img.shields.io/badge/Windows-10%2B%20x64-blue">
 </p>
 
@@ -125,7 +125,7 @@ git tag release-0.0.9 && git push origin release-0.0.9
 Pushing the tag starts the release workflow if the tagged commit is already
 in `main`. Otherwise, the workflow picks up the tag when the commit reaches
 `main`. After the checks (macOS and Windows) and UI sweep pass, the workflow
-publishes the universal `.dmg`, the Windows `.zip` and their SHA-256
+publishes the Apple silicon and Intel `.dmg` files, the Windows `.zip` and their SHA-256
 checksums. The checks are skipped when CI already passed on the tagged commit
 (the usual case: push `develop` and wait for its CI before merging to `main`
 and tagging), which saves the 20+ minutes Windows takes to build. The release notes start with
