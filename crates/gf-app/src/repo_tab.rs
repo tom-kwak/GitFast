@@ -33,7 +33,11 @@ pub struct History {
 
 impl History {
     pub fn new(commits: Vec<Commit>) -> Self {
-        let graph = graph::layout(&commits, LANE_COLORS);
+        let graph = graph::layout(
+            &commits,
+            LANE_COLORS,
+            crate::widgets::graph_canvas::MAX_LANES,
+        );
         Self {
             commits,
             graph,

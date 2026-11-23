@@ -1,5 +1,5 @@
-//! Commit graph layout: assigns each commit a lane and produces one row of
-//! box-drawing glyphs per commit, terminal style:
+//! Commit graph layout: assigns each commit a lane and produces one row
+//! per commit. [`layout_text`] draws the rows terminal style:
 //!
 //! ```text
 //! ◉─╮   merge
@@ -9,24 +9,14 @@
 //! ●     base
 //! ```
 //!
-//! Besides the glyphs, every row carries [`Edge`]s — line segments from
-//! the row's top edge, through the commit dot, to its bottom edge — so a UI
-//! can draw continuous vector lines (no gaps between rows) at any lane
-//! spacing.
+//! [`layout`] gives every row [`Edge`]s instead — line segments from the
+//! row's top edge, through the commit dot, to its bottom edge — so a UI can
+//! draw continuous vector lines (no gaps between rows) at any lane spacing.
 //!
 //! Input must be in an order where children come before parents
 //! (`git log --topo-order` / `--date-order`). Pure and UI-independent.
 
 use gf_core::model::{Commit, Oid};
-
-/// One drawn character with the index of the lane color it belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cell {
-    pub ch: char,
-    pub color: usize,
-}
-
-const EMPTY: Cell = Cell { ch: ' ', color: 0 };
 
 /// Vertical position within a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +37,7 @@ pub struct Edge {
     pub color: usize,
 }
 
-/// Glyphs for one commit row. Lane `i` is drawn at `cells[2 * i]`; the
-/// cell after it holds the horizontal connector towards lane `i + 1`.
+/// One commit row: the commit's lane and the line segments through it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphRow {
     /// Lane of the commit itself.
@@ -58,20 +47,9 @@ pub struct GraphRow {
     pub is_merge: bool,
     /// Number of lanes touched by this row.
     pub width: usize,
+    /// Segments with at least one end in the first `max_lanes` lanes (see
+    /// [`layout`]).
     pub edges: Vec<Edge>,
-    pub cells: Vec<Cell>,
-}
-
-impl GraphRow {
-    /// The row as plain text (for tests and debugging).
-    pub fn text(&self) -> String {
-        self.cells
-            .iter()
-            .map(|c| c.ch)
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,9 +58,39 @@ struct Lane {
     color: usize,
 }
 
+/// What a row needs to know about a lane coming in from above.
+#[derive(Debug, Clone, Copy)]
+struct Above {
+    /// The lane was waiting for this row's commit: it ends here.
+    ends_here: bool,
+    color: usize,
+}
+
 /// Lays out `commits` (children before parents). `colors` is how many
 /// distinct lane colors the UI has; lanes cycle through them.
-pub fn layout(commits: &[Commit], colors: usize) -> Vec<GraphRow> {
+///
+/// Segments with both ends at lane `max_lanes` or past it are left out: a
+/// UI that draws only the first `max_lanes` lanes never shows them, and a
+/// wide history (hundreds of lanes) would otherwise keep hundreds of
+/// segments per row.
+pub fn layout(commits: &[Commit], colors: usize, max_lanes: usize) -> Vec<GraphRow> {
+    walk(commits, colors, max_lanes, None)
+}
+
+/// Each row as box-drawing glyphs, terminal style (for tests and
+/// debugging).
+pub fn layout_text(commits: &[Commit], colors: usize) -> Vec<String> {
+    let mut texts = Vec::with_capacity(commits.len());
+    walk(commits, colors, usize::MAX, Some(&mut texts));
+    texts
+}
+
+fn walk(
+    commits: &[Commit],
+    colors: usize,
+    max_lanes: usize,
+    mut texts: Option<&mut Vec<String>>,
+) -> Vec<GraphRow> {
     let colors = colors.max(1);
     let mut lanes: Vec<Option<Lane>> = Vec::new();
     let mut next_color = 0usize;
@@ -92,16 +100,20 @@ pub fn layout(commits: &[Commit], colors: usize) -> Vec<GraphRow> {
         c
     };
     let mut rows = Vec::with_capacity(commits.len());
+    let mut before: Vec<Option<Above>> = Vec::new();
 
     for commit in commits {
-        let before = lanes.clone();
+        before.clear();
+        before.extend(lanes.iter().map(|l| {
+            l.as_ref().map(|l| Above {
+                ends_here: l.expects == commit.id,
+                color: l.color,
+            })
+        }));
 
         // Where this commit is drawn: the lane already waiting for it, or a
         // free slot (a branch tip nobody has pointed at yet).
-        let col = match lanes
-            .iter()
-            .position(|l| l.as_ref().is_some_and(|l| l.expects == commit.id))
-        {
+        let col = match before.iter().position(|l| l.is_some_and(|l| l.ends_here)) {
             Some(c) => c,
             None => {
                 let slot = lanes
@@ -123,10 +135,10 @@ pub fn layout(commits: &[Commit], colors: usize) -> Vec<GraphRow> {
         let color = lanes[col].as_ref().map_or(0, |l| l.color);
 
         // Other lanes that were also waiting for this commit converge here.
-        let converging: Vec<usize> = lanes
+        let converging: Vec<usize> = before
             .iter()
             .enumerate()
-            .filter(|(i, l)| *i != col && l.as_ref().is_some_and(|l| l.expects == commit.id))
+            .filter(|(i, l)| *i != col && l.is_some_and(|l| l.ends_here))
             .map(|(i, _)| i)
             .collect();
         for &i in &converging {
@@ -168,90 +180,44 @@ pub fn layout(commits: &[Commit], colors: usize) -> Vec<GraphRow> {
             }
         }
 
-        // Draw.
         let width = before.len().max(lanes.len()).max(col + 1);
-        let mut cells = vec![EMPTY; width * 2];
         let lane_color = |i: usize| {
             lanes
                 .get(i)
                 .and_then(|l| l.as_ref())
-                .or_else(|| before.get(i).and_then(|l| l.as_ref()))
-                .map_or(color, |l| l.color)
+                .map(|l| l.color)
+                .or_else(|| before.get(i).copied().flatten().map(|l| l.color))
+                .unwrap_or(color)
         };
-        for (i, l) in before.iter().enumerate() {
-            if let Some(l) = l {
-                cells[2 * i] = Cell {
-                    ch: '│',
-                    color: l.color,
-                };
-            }
+        if let Some(texts) = texts.as_deref_mut() {
+            texts.push(glyphs(commit, col, width, &before, &converging, &links));
         }
-        let connect = |cells: &mut Vec<Cell>, target: usize, end_glyph: char, link_color: usize| {
-            let (lo, hi) = if target < col {
-                (target, col)
-            } else {
-                (col, target)
-            };
-            for k in lo..hi {
-                cells[2 * k + 1] = Cell {
-                    ch: '─',
-                    color: link_color,
-                };
-                if k > lo && cells[2 * k].ch == '│' {
-                    cells[2 * k] = Cell {
-                        ch: '┼',
-                        color: cells[2 * k].color,
-                    };
-                } else if k > lo {
-                    cells[2 * k] = Cell {
-                        ch: '─',
-                        color: link_color,
-                    };
-                }
-            }
-            cells[2 * target] = Cell {
-                ch: end_glyph,
-                color: link_color,
-            };
-        };
-        for &i in &converging {
-            let glyph = if i > col { '╯' } else { '╰' };
-            let c = before[i].as_ref().map_or(color, |l| l.color);
-            connect(&mut cells, i, glyph, c);
-        }
-        for &(j, opened) in &links {
-            let glyph = match (opened, j > col) {
-                (true, true) => '╮',
-                (true, false) => '╭',
-                (false, true) => '┤',
-                (false, false) => '├',
-            };
-            connect(&mut cells, j, glyph, lane_color(j));
-        }
-        cells[2 * col] = Cell {
-            ch: if commit.is_merge() { '◉' } else { '●' },
-            color,
-        };
 
         // Vector segments: lanes coming in from above either pass through
         // or end at this commit; parents leave towards the bottom.
+        let shown = |a: usize, b: usize| a < max_lanes || b < max_lanes;
         let mut edges = Vec::new();
         for (i, l) in before.iter().enumerate() {
             let Some(l) = l else { continue };
-            let (to_lane, to) = if l.expects == commit.id {
+            let (to_lane, to) = if l.ends_here {
                 (col, Anchor::Center)
             } else {
                 (i, Anchor::Bottom)
             };
-            edges.push(Edge {
-                from_lane: i,
-                from: Anchor::Top,
-                to_lane,
-                to,
-                color: l.color,
-            });
+            if shown(i, to_lane) {
+                edges.push(Edge {
+                    from_lane: i,
+                    from: Anchor::Top,
+                    to_lane,
+                    to,
+                    color: l.color,
+                });
+            }
         }
-        if !commit.parents.is_empty() && lanes.get(col).is_some_and(Option::is_some) {
+        if !commit.parents.is_empty()
+            && lanes.get(col).is_some_and(Option::is_some)
+            && shown(col, col)
+        {
             edges.push(Edge {
                 from_lane: col,
                 from: Anchor::Center,
@@ -261,14 +227,17 @@ pub fn layout(commits: &[Commit], colors: usize) -> Vec<GraphRow> {
             });
         }
         for &(j, _) in &links {
-            edges.push(Edge {
-                from_lane: col,
-                from: Anchor::Center,
-                to_lane: j,
-                to: Anchor::Bottom,
-                color: lane_color(j),
-            });
+            if shown(col, j) {
+                edges.push(Edge {
+                    from_lane: col,
+                    from: Anchor::Center,
+                    to_lane: j,
+                    to: Anchor::Bottom,
+                    color: lane_color(j),
+                });
+            }
         }
+        edges.shrink_to_fit();
 
         while lanes.last().is_some_and(Option::is_none) {
             lanes.pop();
@@ -279,10 +248,55 @@ pub fn layout(commits: &[Commit], colors: usize) -> Vec<GraphRow> {
             is_merge: commit.is_merge(),
             width,
             edges,
-            cells,
         });
     }
     rows
+}
+
+/// One row as text: lane `i` at column `2 * i`, the column after it holds
+/// the horizontal connector towards lane `i + 1`.
+fn glyphs(
+    commit: &Commit,
+    col: usize,
+    width: usize,
+    before: &[Option<Above>],
+    converging: &[usize],
+    links: &[(usize, bool)],
+) -> String {
+    let mut cells = vec![' '; width * 2];
+    for (i, l) in before.iter().enumerate() {
+        if l.is_some() {
+            cells[2 * i] = '│';
+        }
+    }
+    let connect = |cells: &mut Vec<char>, target: usize, end_glyph: char| {
+        let (lo, hi) = if target < col {
+            (target, col)
+        } else {
+            (col, target)
+        };
+        for k in lo..hi {
+            cells[2 * k + 1] = '─';
+            if k > lo {
+                cells[2 * k] = if cells[2 * k] == '│' { '┼' } else { '─' };
+            }
+        }
+        cells[2 * target] = end_glyph;
+    };
+    for &i in converging {
+        connect(&mut cells, i, if i > col { '╯' } else { '╰' });
+    }
+    for &(j, opened) in links {
+        let glyph = match (opened, j > col) {
+            (true, true) => '╮',
+            (true, false) => '╭',
+            (false, true) => '┤',
+            (false, false) => '├',
+        };
+        connect(&mut cells, j, glyph);
+    }
+    cells[2 * col] = if commit.is_merge() { '◉' } else { '●' };
+    cells.into_iter().collect::<String>().trim_end().to_owned()
 }
 
 #[cfg(test)]
@@ -314,7 +328,7 @@ mod tests {
     }
 
     fn texts(commits: &[Commit]) -> Vec<String> {
-        layout(commits, 6).iter().map(GraphRow::text).collect()
+        layout_text(commits, 6)
     }
 
     #[test]
@@ -353,9 +367,11 @@ mod tests {
                 commit(1, &[]),
             ],
             2,
+            usize::MAX,
         );
-        let merge_row = &rows[0];
-        assert_ne!(merge_row.cells[0].color, merge_row.cells[2].color);
+        // The merge continues lane 0 and opens lane 1 in the next color.
+        let colors: Vec<_> = rows[0].edges.iter().map(|e| e.color).collect();
+        assert_eq!(colors, [0, 1]);
     }
 
     #[test]
@@ -370,6 +386,7 @@ mod tests {
                 commit(1, &[]),
             ],
             6,
+            usize::MAX,
         );
         let e = |r: &GraphRow| {
             r.edges
@@ -420,5 +437,40 @@ mod tests {
                 .collect();
             assert_eq!(bottoms, tops);
         }
+    }
+
+    #[test]
+    fn segments_past_max_lanes_are_left_out() {
+        // Four tips side by side, all merging into the root.
+        let commits = [
+            commit(6, &[1]),
+            commit(5, &[1]),
+            commit(4, &[1]),
+            commit(3, &[1]),
+            commit(1, &[]),
+        ];
+        let all = layout(&commits, 6, usize::MAX);
+        let kept = layout(&commits, 6, 2);
+        assert!(
+            all.iter()
+                .any(|r| r.edges.iter().any(|e| e.from_lane >= 2 && e.to_lane >= 2))
+        );
+        for (a, k) in all.iter().zip(&kept) {
+            let shown: Vec<_> = a
+                .edges
+                .iter()
+                .filter(|e| e.from_lane < 2 || e.to_lane < 2)
+                .copied()
+                .collect();
+            // Only hidden segments go: one from lane 3 into lane 0 stays.
+            assert_eq!(k.edges, shown);
+            assert_eq!((k.lane, k.width), (a.lane, a.width));
+        }
+        assert!(
+            kept[4]
+                .edges
+                .iter()
+                .any(|e| e.from_lane == 3 && e.to_lane == 0)
+        );
     }
 }
