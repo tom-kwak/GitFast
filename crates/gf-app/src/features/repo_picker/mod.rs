@@ -23,6 +23,8 @@
 //! - Missing folders stay listed (a disk may be unmounted) but dimmed;
 //!   `×` / ⌘⌫ removes an entry from the list (after a confirmation); in a
 //!   non-empty filter ⌘⌫ first clears the text, as in any text field.
+//! - Typing a URL (`https://…`, `git@host:path`) offers to clone it; the
+//!   app asks where to, clones it and opens it.
 //! - `Browse…` (⌘O again) falls back to the system folder dialog.
 
 use std::cell::Cell;
@@ -36,7 +38,7 @@ use iced::{Background, Border, Element, Length, Padding, mouse};
 
 use crate::feature::{Cx, Feature, Update};
 use crate::theme::{Tokens, style};
-use crate::widgets::{self, colored, dim, format};
+use crate::widgets::{self, colored, dim, format, mono};
 
 /// Id of the filter field (focused when the window opens).
 pub const FILTER_ID: &str = "gf-repo-picker-filter";
@@ -165,6 +167,8 @@ enum Item {
     /// A repository or folder inside the typed folder (`~/work/` lists
     /// the services there; ⇥ / ⏎ on a folder goes into it).
     Found(Found),
+    /// The typed URL: clone it.
+    Clone(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,6 +268,8 @@ pub enum Message {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
     Open(PathBuf),
+    /// Clone this URL (the app asks where to).
+    Clone(String),
     SwitchTab(usize),
     /// Remove it from the recent list (the app confirms first).
     Forget(PathBuf),
@@ -318,6 +324,7 @@ impl State {
             Item::Recent { index, .. } => (self.entries[*index].path.clone(), false),
             Item::Path(p, kind) => (p.clone(), *kind == PathKind::Folder),
             Item::Found(f) => (f.path.clone(), !f.repo),
+            Item::Clone(_) => return None,
         };
         // Typed text may mix / and \ on Windows: write the path cleanly.
         let path: PathBuf = path.components().collect();
@@ -355,7 +362,7 @@ impl State {
         }
         match self.items.get(self.selected)? {
             Item::Recent { index, .. } => Some(Output::Forget(self.entries[*index].path.clone())),
-            Item::Path(..) | Item::Found(_) => None,
+            Item::Path(..) | Item::Found(_) | Item::Clone(_) => None,
         }
     }
 
@@ -381,6 +388,7 @@ impl State {
     fn output_for(&mut self, row: usize) -> Option<Output> {
         let refused = match self.items.get(row)? {
             Item::Path(p, PathKind::Repo) => return Some(Output::Open(p.clone())),
+            Item::Clone(url) => return Some(Output::Clone(url.clone())),
             Item::Found(f) if f.repo => return Some(Output::Open(f.path.clone())),
             // A folder in the list: go into it, like a file dialog.
             Item::Found(_) => {
@@ -510,6 +518,9 @@ fn matches(
     listing: &mut Option<Listing>,
 ) -> (Vec<Item>, Option<PathBuf>) {
     let query = filter.trim();
+    if crate::git_actions::is_clone_url(query) {
+        return (vec![Item::Clone(query.to_owned())], None);
+    }
     if crate::platform::looks_like_path(query) {
         return path_items(entries, query, listing);
     }
@@ -649,7 +660,7 @@ impl Feature for State {
         let filter = row![
             colored(t, "❯", accent),
             text_input(
-                "type to filter · a folder like ~/work/ lists the repositories in it",
+                "type to filter · a folder like ~/work/ lists the repositories in it · a URL clones it",
                 &self.filter
             )
             .id(FILTER_ID)
@@ -715,6 +726,7 @@ impl Feature for State {
                         Item::Found(f) => f.repo,
                         Item::Recent { .. } => true,
                         Item::Path(_, k) => *k == PathKind::Repo,
+                        Item::Clone(_) => false,
                     })
                     .count();
                 format!(
@@ -723,6 +735,9 @@ impl Feature for State {
                     std::path::MAIN_SEPARATOR,
                     self.items.len() - repos
                 )
+            }
+            None if matches!(self.items.first(), Some(Item::Clone(_))) => {
+                "clone from a server".to_owned()
             }
             None if self.filter.trim().is_empty() => {
                 format!("recent {}", self.entries.len())
@@ -809,6 +824,21 @@ impl State {
                 .wrapping(iced::widget::text::Wrapping::None)
         };
         let line: Element<'a, Message> = match item {
+            Item::Clone(url) => {
+                let name = crate::git_actions::humanish_name(url).unwrap_or_default();
+                row![
+                    pointer,
+                    colored(t, "clone repository", t.accent()).width(Length::Fixed(t.cols(28))),
+                    mono(t, format::truncate(&name, 20)).width(Length::Fixed(t.cols(21))),
+                    dim(t, elide_path(url, PATH_COLS))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    key,
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .into()
+            }
             Item::Path(path, kind) => {
                 let (what, color) = match kind {
                     PathKind::Repo => ("open repository", t.accent()),
@@ -931,6 +961,19 @@ mod tests {
         ])
     }
 
+    #[test]
+    fn a_typed_url_offers_to_clone_it() {
+        let mut s = picker();
+        let _ = s.update(Message::Filter(" git@github.com:team/app.git ".into()));
+        assert_eq!(names(&s), ["git@github.com:team/app.git"]);
+        assert_eq!(
+            s.activate(),
+            Some(Output::Clone("git@github.com:team/app.git".into()))
+        );
+        assert_eq!(s.complete(), None, "nothing to complete");
+        assert_eq!(s.forget_selected(), None);
+    }
+
     fn names(s: &State) -> Vec<String> {
         s.items
             .iter()
@@ -938,6 +981,7 @@ mod tests {
                 Item::Recent { index, .. } => s.entries[*index].name.clone(),
                 Item::Path(p, _) => p.display().to_string(),
                 Item::Found(f) => f.name.clone(),
+                Item::Clone(url) => url.clone(),
             })
             .collect()
     }

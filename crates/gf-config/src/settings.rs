@@ -19,6 +19,20 @@ pub struct Settings {
     pub git: GitSettings,
     pub repos: RepoSettings,
     pub worktrees: WorktreeSettings,
+    /// Git servers logged in from the settings screen (newest last). Only
+    /// who and where: the token lives in git's credential helper.
+    pub accounts: Vec<Account>,
+}
+
+/// A login to a git server over HTTPS. The token is not here: git's
+/// credential helper (macOS Keychain, Windows Credential Manager …) keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Account {
+    /// `https` (or `http` for a server without TLS).
+    pub protocol: String,
+    /// Host name, with `:port` when not the default one.
+    pub host: String,
+    pub username: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,6 +181,14 @@ impl Settings {
         Ok(())
     }
 
+    /// Adds or replaces the login to `account.host` (one per server and
+    /// protocol: logging in again as someone else replaces it).
+    pub fn remember_account(&mut self, account: Account) {
+        self.accounts
+            .retain(|a| !(a.host == account.host && a.protocol == account.protocol));
+        self.accounts.push(account);
+    }
+
     /// Moves `path` to the front of the recent list.
     pub fn remember_repo(&mut self, path: &Path) {
         let recent = &mut self.repos.recent;
@@ -201,6 +223,11 @@ mod tests {
         s.repos.active = Some(1);
         s.worktrees.editor = "cursor".into();
         s.worktrees.root = Some("/w".into());
+        s.accounts = vec![Account {
+            protocol: "https".into(),
+            host: "git.example.com:8443".into(),
+            username: "me".into(),
+        }];
         s.save(&path).expect("save");
         assert_eq!(Settings::load(&path).expect("load"), s);
     }
@@ -245,6 +272,23 @@ mod tests {
                 .filter(|p| *p == Path::new("/r10"))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn logging_in_again_replaces_the_account_for_that_server() {
+        let account = |host: &str, user: &str| Account {
+            protocol: "https".into(),
+            host: host.into(),
+            username: user.into(),
+        };
+        let mut s = Settings::default();
+        s.remember_account(account("github.com", "a"));
+        s.remember_account(account("gitlab.com", "a"));
+        s.remember_account(account("github.com", "b"));
+        assert_eq!(
+            s.accounts,
+            vec![account("gitlab.com", "a"), account("github.com", "b")]
         );
     }
 

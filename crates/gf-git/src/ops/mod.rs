@@ -7,6 +7,7 @@ pub mod blame;
 pub mod branch;
 pub mod commit;
 pub mod conflict;
+pub mod credential;
 pub mod diff;
 pub mod index;
 pub mod integrate;

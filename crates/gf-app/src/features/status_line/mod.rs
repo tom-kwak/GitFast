@@ -17,6 +17,14 @@ pub struct Flash {
     pub text: String,
 }
 
+/// Work running in the background that is not tied to a tab (a clone):
+/// what it is doing, with a cancel button.
+#[derive(Debug, Clone)]
+pub struct Running<M> {
+    pub text: String,
+    pub on_cancel: M,
+}
+
 /// The undo / redo buttons: what the next undo and redo would do.
 #[derive(Debug, Clone)]
 pub struct UndoBar<M> {
@@ -32,6 +40,7 @@ pub fn view<'a, M: Clone + 'a>(
     t: &'a Tokens,
     tab: Option<&'a RepoTab>,
     busy: Option<(&'static str, Option<&str>)>,
+    running: Option<Running<M>>,
     flash: Option<&'a Flash>,
     undo: Option<UndoBar<M>>,
 ) -> Element<'a, M> {
@@ -115,6 +124,17 @@ pub fn view<'a, M: Clone + 'a>(
         );
         right =
             right.push(colored(t, text, t.warning()).wrapping(iced::widget::text::Wrapping::None));
+    }
+    if let Some(r) = running {
+        right = right.push(
+            row![
+                colored(t, widgets::format::truncate(&r.text, 70), t.warning())
+                    .wrapping(iced::widget::text::Wrapping::None),
+                widgets::text_button(t, "cancel", Some("Esc"), Some(r.on_cancel)),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
+        );
     }
     if let Some(f) = flash {
         let color = match f.kind {

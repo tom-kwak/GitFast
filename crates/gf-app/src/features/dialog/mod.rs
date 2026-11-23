@@ -99,6 +99,8 @@ pub struct Field {
     open: bool,
     /// Said under the field when nothing matches what is typed.
     no_match: String,
+    /// Typed text is hidden (tokens, passwords).
+    secret: bool,
 }
 
 /// Rows of suggestions a dropped-down list shows at most.
@@ -413,7 +415,16 @@ impl<P: Clone> Dialog<P> {
             highlight: None,
             open: false,
             no_match: String::new(),
+            secret: false,
         });
+        self
+    }
+
+    /// The last field hides what is typed (tokens, passwords).
+    pub fn secret(mut self) -> Self {
+        if let Some(field) = self.fields.last_mut() {
+            field.secret = true;
+        }
         self
     }
 
@@ -775,6 +786,7 @@ impl<P: Clone> Dialog<P> {
         }
         for (i, f) in self.fields.iter().enumerate() {
             let mut input = text_input(&f.placeholder, &f.value)
+                .secure(f.secret)
                 .on_input(move |v| Message::Field(i, v))
                 .size(t.font_size)
                 .padding(4)
