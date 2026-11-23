@@ -988,13 +988,13 @@ fn regex_escape(s: &str) -> String {
 }
 
 #[cfg(unix)]
-fn executable(m: &std::fs::Metadata) -> bool {
+pub(crate) fn executable(m: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
     m.permissions().mode() & 0o111 != 0
 }
 
 #[cfg(not(unix))]
-fn executable(_: &std::fs::Metadata) -> bool {
+pub(crate) fn executable(_: &std::fs::Metadata) -> bool {
     false
 }
 

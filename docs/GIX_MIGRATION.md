@@ -20,6 +20,8 @@ gf-git/src/
 │  ├─ gix_backend.rs  GixBackend: gix 조회 구현(log·ref·reflog·stash·worktree·rebase). 지원하지 않는 메서드는 Err(Unsupported)
 │  ├─ gix_status.rs   GixBackend: status, numstat
 │  ├─ gix_refs.rs     GixBackend: 브랜치·경량 태그 ref 편집
+│  ├─ gix_worktree.rs GixBackend: worktree_status, default_base
+│  ├─ gix_undo.rs     GixBackend: undo capture
 │  └─ gix_fetch.rs    GixBackend: fetch --prune (기능 `gix-fetch`, 설정으로 켤 때만)
 ├─ ops/*.rs      영역별 타입·파서와 `impl XxxOps for CliBackend` (CLI 구현)
 ├─ routes.rs     Repository → 명령별 백엔드 선택표(이 파일만 보면 누가 처리하는지 압니다)
@@ -53,7 +55,8 @@ gf-git/src/
 | StashOps | stashes(목록) | **gix** ✅ | `refs/stash` reflog |
 | | push/apply/pop/drop | CLI | |
 | WorktreeOps | 목록 | **gix** ✅ | unborn 브랜치의 worktree는 CLI. 연결된 트리에서 읽어도 main 트리가 맨 앞(git과 같음) |
-| | add, remove, prune, lock/unlock, worktree_status, default_base | CLI | worktree_status는 다른 작업 트리 폴더에서 실행(status·log·rev-list·merge-base) |
+| | worktree_status, default_base | **gix** ✅ | 그 트리를 gix로 따로 엽니다. CLI는 트리 하나에 git을 6~12번 실행했습니다(status·log·reflog·config·rev-list·merge-base). status는 `--untracked-files=normal`처럼 폴더를 한 항목으로 셉니다. `diff.ignoreSubmodules` 설정, unborn 브랜치, intent-to-add 항목은 CLI |
+| | add, remove, prune, lock/unlock | CLI | |
 | SubmoduleOps | 목록(상태 포함), update/sync | CLI | 목록의 `(describe)`가 git의 describe 단계(태그 → `--tags` → `--contains` → `--all`)와 같아야 해서 CLI 유지 |
 | RebaseOps | rebase_plan, squash_preview | **gix** ✅ | 두 백엔드가 같은 로직(`rebase_interactive::plan/preview`)을 공유하고 log·unpushed만 각자 구현 |
 | | rebase_interactive, squash | CLI | gix-sequencer 없음 |
@@ -73,6 +76,8 @@ gf-git/src/
 | SyncOps | fetch(`--prune`, 한 remote 또는 `--all`) | **gix** ✅ (설정을 켰을 때만, 기본 CLI) | 진행률·취소·명령 로그 지원. 아래 차이 참고 |
 | | ↳ CLI로 보내는 경우 | CLI | shallow 저장소, submodule 있음(git은 필요 시 submodule도 fetch), `src/*:dst/*` 외 refspec, `--all`에서 제외 설정된 remote, 등록되지 않은 URL, `followRemoteHEAD=always`, gix 오류(인증 실패 등) |
 | | pull, push | CLI | 고수준 push 없음 |
+| UndoOps | capture | **gix** ✅ | 기록되는 쓰기 작업마다 전후로 실행합니다. HEAD·index(`ls-files -s`처럼 리터럴 경로)·작업 트리 파일(`hash-object -w --no-filters`와 같은 blob)·ref·stash·config 섹션(`--local`, include 없음). SHA-256 저장소, sparse index, 평범하지 않은 경로(`..`, 절대 경로), symbolic ref, 구식 섹션 헤더(`[a.b]`), 값이 없거나 빈 config 키는 CLI |
+| | stash_paths, restore, pin_saved_files, published_leaving | CLI | 쓰기, 또는 자주 불리지 않음 |
 | BisectOps / LfsOps | 전부 | CLI | 미구현 |
 | MaintenanceOps | commit-graph 작성(없을 때만) | CLI | 저장소 파일을 쓰는 작업이라 git이 만든 것과 같아야 함 |
 | (Repository::run) | 프롬프트의 임의 git 명령 | CLI | "모든 git 명령" 경로 |
@@ -87,6 +92,7 @@ gf-git/src/
 | **P2b** submodule ✅ | submodule이 있는 저장소의 status·numstat (submodule 목록은 CLI 유지) | 계약 테스트 통과(깨끗함·다른 커밋·내용 수정·untracked·스테이징된 새 커밋·새로 추가·미초기화), 실제 저장소 3곳에서 벤치마크 결과 일치 |
 | **P3** gix ref 쓰기 ✅ | 브랜치 생성·삭제, 경량 태그 생성·삭제 (이름변경은 reflog·설정 이동 때문에 CLI 유지) | 같은 저장소 두 벌에 CLI와 gix로 각각 적용해 ref·reflog·설정이 같은지 비교하는 계약 테스트 8건 통과, git이 해야 하는 경우는 CLI로 넘어가는지 확인, 명령 로그 기록 확인 |
 | **P4** 선택 기능 ✅ | fetch를 gix로(설정 `git.gix_fetch`, `:gix-fetch on`) | 같은 원격 변경을 두 clone에 CLI·gix로 각각 fetch해 ref가 같은지 비교(새 커밋·새 브랜치·prune·강제 갱신·태그 자동 추적·도달 불가 태그 제외·remote HEAD 생성·`--all`), 객체 연결성 검사, 취소·대체 경로 테스트. 실제 HTTPS·SSH 원격과 인증 도우미로는 아직 확인하지 않음 |
+| **P5** 조회 C ✅ | worktree_status, default_base, undo capture. 저장소 열기는 `rev-parse` 2번 → 1번(CLI 유지: 경로 표기가 git과 같아야 함) | 계약 테스트 통과(주 트리·연결 트리·base 기록/생성 기록/추측·detached·충돌·origin/HEAD 없음, capture의 index·파일·심볼릭 링크·실행 비트·주석 태그·stash·config·충돌 stage·unborn·submodule). 새 테스트는 gix가 `Unsupported`로 빠지면 실패하는 `served`로 확인 |
 | 보류 | commit, checkout, reset, merge 계열, stash 쓰기, push/pull, blame, bisect, LFS | gix의 해당 crate가 "usable" 이상이 되면 다시 검토 |
 
 ### gix fetch가 git과 다른 점 (P4)

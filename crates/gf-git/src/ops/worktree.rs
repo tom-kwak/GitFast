@@ -163,7 +163,8 @@ pub fn parse_left_right(out: &[u8]) -> Option<(u32, u32)> {
 
 /// Branches work usually goes into, tried after the default base when
 /// nothing records where a branch came from.
-const USUAL_BASES: [&str; 6] = ["main", "master", "develop", "development", "dev", "trunk"];
+pub(crate) const USUAL_BASES: [&str; 6] =
+    ["main", "master", "develop", "development", "dev", "trunk"];
 
 /// The git config key gf keeps a branch's base under (`branch.<b>.gf-base`);
 /// `git branch -d` drops it with the branch.
@@ -183,7 +184,7 @@ pub fn parse_created_from(subject: &str) -> Option<&str> {
 
 /// Changed files whose modification time is read for
 /// [`WorktreeStatus::last_activity`]; more are not worth the stat calls.
-const ACTIVITY_SAMPLE: usize = 256;
+pub(crate) const ACTIVITY_SAMPLE: usize = 256;
 
 impl CliBackend {
     /// Reads a command's stdout in `dir`; `None` when git fails.

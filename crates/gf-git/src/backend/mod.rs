@@ -16,6 +16,10 @@ mod gix_fetch;
 mod gix_refs;
 #[cfg(feature = "gix")]
 mod gix_status;
+#[cfg(feature = "gix")]
+mod gix_undo;
+#[cfg(feature = "gix")]
+mod gix_worktree;
 
 use std::path::{Path, PathBuf};
 

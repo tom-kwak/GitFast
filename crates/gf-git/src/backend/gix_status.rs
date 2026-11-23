@@ -131,6 +131,17 @@ fn head_info(repo: &gix::Repository) -> Result<HeadInfo> {
 }
 
 fn status(repo: &gix::Repository) -> Result<StatusReport> {
+    status_with(repo, gix::status::UntrackedFiles::Files, submodules(true))
+}
+
+/// [`status`] with git's other choices: `Collapsed` is
+/// `--untracked-files=normal` (a wholly untracked folder is one entry),
+/// `Submodule::AsConfigured` is status without `--ignore-submodules`.
+pub(super) fn status_with(
+    repo: &gix::Repository,
+    untracked_files: gix::status::UntrackedFiles,
+    submodule_check: gix::status::Submodule,
+) -> Result<StatusReport> {
     let head = head_info(repo)?;
 
     let mut tracked: BTreeMap<BString, Sides> = BTreeMap::new();
@@ -138,9 +149,9 @@ fn status(repo: &gix::Repository) -> Result<StatusReport> {
     let iter = repo
         .status(gix::progress::Discard)
         .map_err(err)?
-        .untracked_files(gix::status::UntrackedFiles::Files)
+        .untracked_files(untracked_files)
         .index_worktree_rewrites(None)
-        .index_worktree_submodules(submodules(true))
+        .index_worktree_submodules(submodule_check)
         .into_iter(Vec::<BString>::new())
         .map_err(err)?;
     for item in iter {
