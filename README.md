@@ -20,6 +20,9 @@
 > **New in 0.0.9:** history on big repositories loads much faster and uses a
 > fraction of the memory, large diffs wait until asked, and the refs panel
 > can be resized ([What's new](#whats-new-in-009)).
+>
+> **Pre-release 0.0.9-rc.1:** macOS now ships separate Apple silicon and Intel
+> downloads instead of one universal `.dmg` ([try it](#try-a-pre-release)).
 
 ## Install
 
@@ -33,6 +36,22 @@ curl -fsSL https://raw.githubusercontent.com/tom-kwak/GitFast/main/scripts/insta
 
 It installs the latest release as `/Applications/gf.app` (or `~/Applications`) and
 opens without a Gatekeeper prompt. Run it again to update.
+
+The installer picks the build for your Mac (`gf-macos-arm64.dmg` on Apple
+silicon, `gf-macos-x86_64.dmg` on Intel). To install by hand, download the one
+for your Mac from [GitHub Releases](https://github.com/tom-kwak/GitFast/releases).
+
+#### Try a pre-release
+
+Releases with a suffix such as `0.0.9-rc.1` are marked as pre-releases, so the
+installer above does not pick them up. Point it at the `.dmg` you want:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tom-kwak/GitFast/main/scripts/install.sh |
+  GF_DMG_URL=https://github.com/tom-kwak/GitFast/releases/download/release-0.0.9-rc.1/gf-macos-arm64.dmg bash
+```
+
+Use `gf-macos-x86_64.dmg` on an Intel Mac.
 
 gf requires **Git 2.43.1 or later**. Check your version with `git --version`.
 Git is available through Xcode Command Line Tools or Homebrew.
@@ -125,8 +144,10 @@ git tag release-0.0.9 && git push origin release-0.0.9
 Pushing the tag starts the release workflow if the tagged commit is already
 in `main`. Otherwise, the workflow picks up the tag when the commit reaches
 `main`. After the checks (macOS and Windows) and UI sweep pass, the workflow
-publishes the Apple silicon and Intel `.dmg` files, the Windows `.zip` and their SHA-256
-checksums. The checks are skipped when CI already passed on the tagged commit
+publishes the Apple silicon and Intel `.dmg` files (each built on its own
+architecture), the Windows `.zip` and their SHA-256 checksums. A version with
+a suffix (`0.0.9-rc.1`) is published as a pre-release and does not become the
+latest release. The checks are skipped when CI already passed on the tagged commit
 (the usual case: push `develop` and wait for its CI before merging to `main`
 and tagging), which saves the 20+ minutes Windows takes to build. The release notes start with
 `docs/release-notes/<version>.md` ("What's new", written for each release),
