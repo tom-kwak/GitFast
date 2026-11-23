@@ -191,7 +191,7 @@ mod tests { /* update/nav 단위 테스트 */ }
 - git·도구 실행 환경은 `gf_core::tool_path`에 있습니다. git을 동기로 부를 때는 `tool_path::git_command()`(설정의 git 경로 + 확장 PATH + Windows 콘솔 창 숨김)를 씁니다. 새 서브프로세스를 만들면 `hide_console`을 거칩니다.
   - 예외: tokio `Command`를 쓰는 gf-git runner는 `hide_console`(std 전용)을 쓸 수 없어 `#[cfg(windows)]`로 `CREATE_NO_WINDOW`를 직접 넣고, gf-test-support는 테스트 헬퍼라 `cfg`를 직접 씁니다.
 - 저장소 안 경로를 화면에 쓸 때는 `widgets::format::repo_path`(항상 `/`)를 씁니다. `Path::join` 결과의 `display()`는 Windows에서 `\`가 섞입니다.
-- 테스트도 두 OS에서 돌아야 합니다: `/tmp` 같은 고정 경로 대신 `tempfile`을 쓰고, 플랫폼 전용 테스트에는 `#[cfg(...)]`와 이유 주석을 붙입니다. CI는 macOS와 Windows에서 돕니다. UI 스윕은 macOS에서만 돕니다.
+- 테스트도 두 OS에서 돌아야 합니다: `/tmp` 같은 고정 경로 대신 `tempfile`을 쓰고, 플랫폼 전용 테스트에는 `#[cfg(...)]`와 이유 주석을 붙입니다. CI는 macOS와 Windows에서 돕니다. UI 스윕은 macOS에서만 돕니다. 이미 같은 코드(`*.md`·`docs/` 제외)로 통과한 검사는 `scripts/ci-verified.sh`가 판정해서 다시 돌리지 않습니다(release.yml의 CI·스윕). UI 스윕과 패키징은 릴리스 태그를 만들 때만 돕니다.
 - Windows에서 알아둘 차이
   - 실행 비트는 항상 `false`로 기록되고, undo의 심볼릭 링크 복원은 `Unsupported`입니다.
   - `GIT_EDITOR`·`GIT_SEQUENCE_EDITOR`는 Git for Windows의 내장 sh로 실행됩니다. 에디터 명령을 바꾸면 백슬래시·한글·공백 경로에서 interactive rebase(reword/squash)를 확인합니다.
