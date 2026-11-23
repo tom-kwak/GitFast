@@ -92,6 +92,24 @@ pub fn is_path_sep(c: char) -> bool {
     c == '/' || (cfg!(windows) && c == '\\')
 }
 
+/// `path` with symlinks resolved, in the form git and the tabs use: on
+/// Windows without the `\\?\` prefix `std::fs::canonicalize` adds (which
+/// would never equal `C:\x`). Blocking: call it off the UI thread.
+pub fn canonicalize(path: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(path).ok()?;
+    Some(without_verbatim(real))
+}
+
+/// `path` without Windows' verbatim prefix (`\\?\C:\x` → `C:\x`); UNC
+/// paths and other platforms are left as they are.
+fn without_verbatim(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if cfg!(windows) && !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
 /// Whether typed text is a path rather than a name to search for:
 /// `/x`, `~`, and on Windows also `C:\x`, `C:/x` and `\\server\share`.
 pub fn looks_like_path(query: &str) -> bool {

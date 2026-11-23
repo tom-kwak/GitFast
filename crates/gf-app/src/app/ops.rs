@@ -918,7 +918,7 @@ impl App {
                 .flat_map(|p| {
                     let resolved = p
                         .parent()
-                        .and_then(|d| std::fs::canonicalize(d).ok())
+                        .and_then(crate::platform::canonicalize)
                         .zip(p.file_name())
                         .map(|(d, n)| d.join(n));
                     std::iter::once(p.clone()).chain(resolved)

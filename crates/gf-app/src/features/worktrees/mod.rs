@@ -343,9 +343,10 @@ impl State {
 
     fn mark_tabs(&mut self) {
         for c in &mut self.cards {
-            let path = c.real.as_deref().unwrap_or(&c.tree.path);
-            c.in_tab = self.tabs.iter().any(|t| t == path);
-            c.current = path == self.here;
+            // A tab may show the folder as git names it or resolved.
+            let is = |p: &PathBuf| *p == c.tree.path || c.real.as_ref() == Some(p);
+            c.in_tab = self.tabs.iter().any(is);
+            c.current = is(&self.here);
         }
     }
 
@@ -376,7 +377,7 @@ impl State {
                     tokio::task::spawn_blocking(move || {
                         paths
                             .iter()
-                            .map(|p| std::fs::canonicalize(p).ok())
+                            .map(|p| crate::platform::canonicalize(p))
                             .collect::<Vec<_>>()
                     })
                 };
