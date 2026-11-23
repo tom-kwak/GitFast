@@ -1,7 +1,11 @@
 # Installs (or updates) gf from the latest GitHub release, for the current
 # user (no administrator rights needed):
 #
-#   irm https://raw.githubusercontent.com/tom-kwak/GitFast/main/scripts/install.ps1 | iex
+#   irm https://github.com/tom-kwak/GitFast/releases/latest/download/install.ps1 | iex
+#
+# Each release carries its own copy of this script, which installs that
+# release (a pre-release too): .../releases/download/release-<version>/install.ps1
+# The copy in the repository has no release in it and installs the latest one.
 #
 # Goes to %LOCALAPPDATA%\Programs\gf, adds that folder to the user PATH and
 # a Start menu shortcut. GF_ZIP_URL / GF_INSTALL_DIR override where from
@@ -12,9 +16,12 @@ $ProgressPreference = 'SilentlyContinue'
 & {
     $repo = 'tom-kwak/GitFast'
     $name = 'gf-windows-x64'
-    $url = if ($env:GF_ZIP_URL) { $env:GF_ZIP_URL } else {
-        "https://github.com/$repo/releases/latest/download/$name.zip"
+    # The release tag to install; the release workflow fills it in. Empty: the latest.
+    $tag = ''
+    $base = if ($tag) { "https://github.com/$repo/releases/download/$tag" } else {
+        "https://github.com/$repo/releases/latest/download"
     }
+    $url = if ($env:GF_ZIP_URL) { $env:GF_ZIP_URL } else { "$base/$name.zip" }
     $dest = if ($env:GF_INSTALL_DIR) { $env:GF_INSTALL_DIR } else {
         Join-Path $env:LOCALAPPDATA 'Programs\gf'
     }

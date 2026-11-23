@@ -44,21 +44,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
-  # Clicks every button on screen headless (app/ui_sweep.rs). Slow, so
-  # only for main: here for a pull request into it; release.yml runs it
-  # for a push to main (a merge) and for a release.
-  ui-sweep:
-    name: UI sweep (every button does something)
-    if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p gf-app -- --ignored sweep_
-
   deny:
     name: cargo-deny (licenses, advisories)
     runs-on: ubuntu-latest
