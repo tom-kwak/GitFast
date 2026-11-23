@@ -564,16 +564,16 @@ async fn graph_of_real_history() {
         })
         .await
         .unwrap();
-    let rows = graph::layout(&commits, 6);
+    let rows = graph::layout_text(&commits, 6);
     assert_eq!(rows.len(), commits.len());
     assert!(
-        rows[0].text().starts_with('◉'),
+        rows[0].starts_with('◉'),
         "merge commit first: {:?}",
-        rows[0].text()
+        rows[0]
     );
-    assert!(rows.iter().any(|r| r.text().contains('╮')));
-    assert!(rows.iter().any(|r| r.text().contains('╯')));
-    assert_eq!(rows.last().unwrap().text(), "●");
+    assert!(rows.iter().any(|r| r.contains('╮')));
+    assert!(rows.iter().any(|r| r.contains('╯')));
+    assert_eq!(rows.last().unwrap(), "●");
 }
 
 #[tokio::test]

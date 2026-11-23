@@ -30,6 +30,13 @@ tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 unicode-segmentation = "1"
 regex = "1"
+# Only for the memory benchmark (`mem-bench` feature, tools/mem-bench/).
+cap = { version = "0.1", features = ["stats"], optional = true }
+memory-stats = { version = "1", optional = true }
+
+[features]
+# Memory benchmark: counts the test binary's heap (tools/mem-bench/README.md).
+mem-bench = ["dep:cap", "dep:memory-stats"]
 
 [build-dependencies]
 embed-resource = "3"
