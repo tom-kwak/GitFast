@@ -285,6 +285,11 @@ async fn mem_bench() {
             });
         }
         println!("  with that diff: {}", view_text(&app));
+        if i == repos.len() {
+            // Past the large-diff size the view waits for ⏎: draw it too.
+            drive(&mut app, Message::CommitDiff(diff_view::Message::ShowLarge)).await;
+            println!("  shown anyway (⏎): {}", view_text(&app));
+        }
         // What dropping a background tab's diff would give back.
         let tab = &mut app.tabs[app.active];
         step!("  if the commit diff were dropped", {

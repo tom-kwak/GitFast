@@ -791,6 +791,7 @@ impl App {
                         cancel: Some(token),
                         progress: Some(ptx),
                         stop_at: None,
+                        max_stdout: None,
                     },
                 );
                 tokio::pin!(fut);

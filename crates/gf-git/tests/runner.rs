@@ -107,6 +107,7 @@ async fn cancellation_kills_the_process() {
                 cancel: Some(cancel),
                 progress: None,
                 stop_at: None,
+                max_stdout: None,
             },
         )
         .await;
@@ -133,6 +134,7 @@ async fn reports_clone_progress() {
                 cancel: None,
                 progress: Some(tx),
                 stop_at: None,
+                max_stdout: None,
             },
         )
         .await
@@ -193,4 +195,43 @@ async fn stops_reading_at_the_line_asked_for() {
             .count(),
         300
     );
+}
+
+#[tokio::test]
+async fn stops_git_once_stdout_passes_the_limit() {
+    let repo = TestRepo::new();
+    for i in 0..300 {
+        repo.write("f.txt", &format!("{i}\n"));
+        repo.commit_all(&format!("c{i}"));
+    }
+    let cmd = GitCommand::new(["rev-list", "HEAD"])
+        .current_dir(repo.path())
+        .read_only();
+    // 300 ids of 41 bytes: over 1000 bytes.
+    let result = runner(&repo)
+        .run_with(
+            &cmd,
+            RunOptions {
+                max_stdout: Some(1000),
+                ..RunOptions::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(result, Err(GfError::OutputTooLarge { limit: 1000 })),
+        "{result:?}"
+    );
+
+    // Under the limit: the whole output, like a normal run.
+    let out = runner(&repo)
+        .run_with(
+            &cmd,
+            RunOptions {
+                max_stdout: Some(300 * 41),
+                ..RunOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout.len(), 300 * 41);
 }

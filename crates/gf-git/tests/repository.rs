@@ -487,6 +487,48 @@ async fn diff_of_merge_commit_uses_first_parent() {
     );
 }
 
+#[tokio::test]
+async fn diffs_past_the_limit_are_refused_without_reading_them() {
+    let repo = TestRepo::new();
+    repo.write("small.txt", "a\n");
+    repo.commit_all("init");
+    // Lines of text, so git prints a text diff (one byte past the limit).
+    let line = "x".repeat(99) + "\n";
+    let big = line.repeat(gf_git::DIFF_LIMIT / line.len() + 1);
+    repo.write("big.txt", &big);
+    let r = open(&repo).await;
+    let opts = DiffOptions::default();
+
+    let untracked = r
+        .diff(&DiffTarget::Untracked("big.txt".into()), &opts)
+        .await;
+    assert!(
+        matches!(untracked, Err(GfError::DiffTooLarge { limit }) if limit == gf_git::DIFF_LIMIT),
+        "{untracked:?}"
+    );
+
+    let id = repo.commit_all("big");
+    let commit = r
+        .diff(&DiffTarget::Commit(id.parse().unwrap()), &opts)
+        .await;
+    assert!(
+        matches!(commit, Err(GfError::DiffTooLarge { .. })),
+        "{commit:?}"
+    );
+    assert!(
+        GfError::DiffTooLarge {
+            limit: gf_git::DIFF_LIMIT
+        }
+        .to_string()
+        .contains("32 MiB")
+    );
+
+    // A diff under the limit still loads.
+    repo.write("small.txt", "b\n");
+    let files = r.diff(&DiffTarget::WorkTree, &opts).await.unwrap();
+    assert_eq!(files.len(), 1);
+}
+
 // ------------------------------------------------------- log position
 
 /// Branches, a merge, a branch merged nowhere and a tag on it.

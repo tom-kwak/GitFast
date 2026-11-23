@@ -1360,7 +1360,7 @@ impl App {
                     "panels: ↑/↓ PgUp/PgDn Home/End move · ←/→ ⇥ switch panel · / prompt".into(),
                 );
                 lines.push(
-                    "  history ⇧↑/↓ range · history / files . actions · working tree Space stage · d discard · diff n/p hunk"
+                    "  history ⇧↑/↓ range · history / files . actions · working tree Space stage · d discard · diff n/p hunk · ⏎ shows a large diff"
                         .into(),
                 );
                 lines.push("refs: ⌘-click marks branches · ⇧-click or ⇧↑/↓ selects a range · . then d reviews deletion".into());

@@ -29,6 +29,14 @@ pub enum GfError {
     #[error("file exceeds the preview size limit")]
     FilePreviewTooLarge,
 
+    /// A command printed more than the caller allowed (`limit` bytes).
+    #[error("git output exceeds the {} MiB limit", limit / (1024 * 1024))]
+    OutputTooLarge { limit: usize },
+
+    /// A diff larger than the diff limit (`limit` bytes): too large to show.
+    #[error("diff is over {} MiB, too large to show", limit / (1024 * 1024))]
+    DiffTooLarge { limit: usize },
+
     #[error("operation cancelled")]
     Cancelled,
 
