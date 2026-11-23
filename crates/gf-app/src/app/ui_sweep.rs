@@ -3722,12 +3722,12 @@ async fn settings_keys_change_the_theme_without_navigating_the_repository() {
     let _ = ui.send(key(Key::Left)).await;
     assert_eq!(ui.app.tokens.name, "cd-light");
     assert_eq!(ui.app.pane(), active);
-    let _ = ui.send(Message::Key(Shortcut::SelectTab(4))).await;
+    let _ = ui.send(Message::Key(Shortcut::SelectTab(3))).await;
     assert_eq!(
         ui.app.settings_page.section,
         settings_view::Section::Confirmations
     );
-    assert_eq!(ui.app.active, 0, "⌘5 did not switch tabs");
+    assert_eq!(ui.app.active, 0, "⌘4 did not switch tabs");
 
     let _ = ui.send(Message::Key(Shortcut::Escape)).await;
     assert!(!ui.app.settings_open);
@@ -4758,7 +4758,7 @@ async fn settings_offer_to_set_a_credential_helper_when_git_has_none() {
 }
 
 #[tokio::test]
-async fn settings_change_tools_font_size_fetch_and_confirmations_by_clicking() {
+async fn settings_change_tools_font_size_and_confirmations_by_clicking() {
     let mut ui = Ui::welcome().await;
     ui.app.settings.confirm.skip = vec!["checkout".into(), "stash-pop".into()];
     let _ = ui.send(Message::Key(Shortcut::Settings)).await;
@@ -4778,10 +4778,6 @@ async fn settings_change_tools_font_size_fetch_and_confirmations_by_clicking() {
     assert_eq!(ui.app.settings.appearance.font_size, size + 1);
     assert!((ui.app.tokens.font_size - f32::from(size + 1)).abs() < f32::EPSILON);
 
-    let _ = ui.click("GIT").await;
-    let _ = ui.click("gix").await;
-    assert!(ui.app.settings.git.gix_fetch);
-
     let _ = ui.click("CONFIRMATIONS").await;
     assert!(ui.shows("stash pop"));
     let _ = ui.click("[ Ask again ]").await;
@@ -4792,5 +4788,13 @@ async fn settings_change_tools_font_size_fetch_and_confirmations_by_clicking() {
 
     let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
     assert_eq!(saved.worktrees.editor, "cursor");
-    assert!(saved.git.gix_fetch);
+}
+
+#[tokio::test]
+async fn settings_say_when_git_is_missing() {
+    let mut ui = Ui::welcome().await;
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    assert!(!ui.shows("git was not found"));
+    let _ = ui.send(Message::GitChecked(false)).await;
+    assert!(ui.shows("⚠ git was not found"));
 }

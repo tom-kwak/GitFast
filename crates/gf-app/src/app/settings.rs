@@ -208,20 +208,6 @@ impl App {
                 )
                 .always(),
             ),
-            M::SetGixFetch(on) => {
-                self.settings.git.gix_fetch = on;
-                self.save_settings();
-                for tab in &mut self.tabs {
-                    tab.repo = tab.repo.clone().with_gix_fetch(on);
-                }
-                let text = if on {
-                    "fetch uses gix (git when gix can't)"
-                } else {
-                    "fetch uses git"
-                };
-                self.flash(NoteKind::Info, text);
-                Task::none()
-            }
             M::EditEditor => self.tool_dialog(Tool::Editor),
             M::EditTerminal => self.tool_dialog(Tool::Terminal),
             M::EditWorktreeRoot => self.tool_dialog(Tool::WorktreeRoot),

@@ -138,7 +138,7 @@ trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }
   - 열린 저장소가 쓰지만 로그인하지 않은 HTTPS 서버는 NOT LOGGED IN에 [ Log in ]으로, SSH 서버는 따로 보여 줍니다. [ Get token ↗ ]은 서비스의 토큰 생성 페이지를 필요한 scope와 함께 엽니다
   - 설정에서 로그인하면 열린 저장소의 그 서버 remote에 `git ls-remote`로 토큰을 확인하고, 서버가 거절하면 저장하지 않고 다이얼로그에 이유를 보입니다
   - git에 credential helper가 없으면 플랫폼 helper(macOS Keychain, Git Credential Manager)를 확인 후 `--global`로 설정하는 버튼을 보입니다
-- ✅ 설정 화면: 왼쪽 섹션 목록(ACCOUNTS·APPEARANCE·GIT·TOOLS·CONFIRMATIONS, ↑/↓·⌘1–⌘5). APPEARANCE는 테마(←/→)·글꼴 크기, GIT은 fetch 엔진(git/gix)·credential helper, TOOLS는 worktree용 편집기·터미널·새 worktree 폴더, CONFIRMATIONS는 "다시 묻지 않기"로 건너뛴 확인을 항목별로 되돌립니다
+- ✅ 설정 화면: 왼쪽 섹션 목록(ACCOUNTS·APPEARANCE·TOOLS·CONFIRMATIONS, ↑/↓·⌘1–⌘4). git을 못 찾으면 모든 섹션 위에 경고를 보입니다. APPEARANCE는 테마(←/→)·글꼴 크기, TOOLS는 worktree용 편집기·터미널·새 worktree 폴더, CONFIRMATIONS는 "다시 묻지 않기"로 건너뛴 확인을 항목별로 되돌립니다
 - ✅ 서버에 접속하는 작업이 HTTPS 인증 실패로 끝나면 실패 알림 대신 그 서버로 채운 로그인 다이얼로그를 띄우고, 로그인하면 같은 작업을 다시 실행합니다: fetch·pull·push(publish·force push 포함)·태그 push·submodule update·LFS pull·프롬프트의 git 명령·clone. 브랜치 삭제(원격 포함)는 로그인만 받고 다시 실행하지 않습니다. SSH 키 거부는 기존 실패 알림
 - 남음: 호스팅 API로 토큰 확인(열린 저장소가 없는 서버), OAuth Device Flow
 

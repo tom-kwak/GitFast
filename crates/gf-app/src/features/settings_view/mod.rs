@@ -1,11 +1,11 @@
-//! App-wide preferences: a section list on the left (↑/↓, ⌘1–⌘5) and the
+//! App-wide preferences: a section list on the left (↑/↓, ⌘1–⌘4) and the
 //! chosen section on the right.
 //!
 //! ACCOUNTS lists the git servers logged in to with whether git's
 //! credential helper still holds their token, the servers the open
 //! repositories use without a login (one click to log in), and SSH
 //! servers, which use the user's SSH keys. The other sections make the
-//! `:` prompt settings (`:theme`, `:gix-fetch`, `:editor`, `:terminal`,
+//! `:` prompt settings (`:theme`, `:editor`, `:terminal`,
 //! `:confirm reset`) clickable.
 
 pub mod provider;
@@ -26,16 +26,14 @@ pub enum Section {
     #[default]
     Accounts,
     Appearance,
-    Git,
     Tools,
     Confirmations,
 }
 
 impl Section {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 4] = [
         Self::Accounts,
         Self::Appearance,
-        Self::Git,
         Self::Tools,
         Self::Confirmations,
     ];
@@ -44,13 +42,12 @@ impl Section {
         match self {
             Self::Accounts => "ACCOUNTS",
             Self::Appearance => "APPEARANCE",
-            Self::Git => "GIT",
             Self::Tools => "TOOLS",
             Self::Confirmations => "CONFIRMATIONS",
         }
     }
 
-    /// The `n`th section (0-based), for ⌘1–⌘5.
+    /// The `n`th section (0-based), for ⌘1–⌘4.
     pub fn nth(n: usize) -> Option<Self> {
         Self::ALL.get(n).copied()
     }
@@ -134,7 +131,7 @@ impl Page {
 pub struct Props<'a> {
     pub page: &'a Page,
     pub settings: &'a Settings,
-    /// The git program gf runs.
+    /// The git program gf runs (named when it is missing).
     pub git: String,
     pub git_missing: bool,
     /// The credential helper this platform offers when git has none:
@@ -162,7 +159,6 @@ pub enum Message {
     OpenUrl(String),
     /// Make git keep logins with this credential helper (asks first).
     UseHelper(&'static str),
-    SetGixFetch(bool),
     EditEditor,
     EditTerminal,
     EditWorktreeRoot,
@@ -205,7 +201,6 @@ pub fn view<'a>(t: &'a Tokens, p: Props<'a>) -> Element<'a, Message> {
     let content: Element<'a, Message> = match section {
         Section::Accounts => accounts(t, &p),
         Section::Appearance => appearance(t, p.settings),
-        Section::Git => git(t, &p),
         Section::Tools => tools(t, &p),
         Section::Confirmations => confirmations(t, p.settings),
     };
@@ -222,12 +217,30 @@ pub fn view<'a>(t: &'a Tokens, p: Props<'a>) -> Element<'a, Message> {
     .spacing(12)
     .height(Length::Fixed((t.font_size * 30.0).round()));
 
-    container(column![header, hline(t), body].spacing(10))
-        .padding(Padding::from([12, 16]))
-        .width(Length::Fill)
-        .max_width(t.cols(104))
-        .style(style::accent_panel(t, t.accent()))
-        .into()
+    // gf can't do anything without git: say so above every section.
+    let missing = p.git_missing.then(|| {
+        colored(
+            t,
+            format!(
+                "⚠ git was not found (`{}`). Install git, then restart gf.",
+                p.git
+            ),
+            t.warning(),
+        )
+    });
+    container(
+        Column::new()
+            .push(header)
+            .extend(missing.map(Element::from))
+            .push(hline(t))
+            .push(body)
+            .spacing(10),
+    )
+    .padding(Padding::from([12, 16]))
+    .width(Length::Fill)
+    .max_width(t.cols(104))
+    .style(style::accent_panel(t, t.accent()))
+    .into()
 }
 
 fn hline<'a>(t: &'a Tokens) -> Element<'a, Message> {
@@ -486,10 +499,8 @@ fn helper_line<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
                 ),
                 None => dim(t, "git config --global credential.helper <helper>").into(),
             };
-            row![warning, fix]
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .into()
+            // The fix on its own line: beside the warning it wrapped.
+            column![warning, fix].spacing(4).into()
         }
     }
 }
@@ -555,60 +566,6 @@ fn theme_row<'a>(t: &'a Tokens, name: &'static str) -> Element<'a, Message> {
         .style(style::row_button(t, selected))
         .on_press_maybe((!selected).then_some(Message::SetTheme(name)))
         .into()
-}
-
-/// `●`/`○` choice row.
-fn choice<'a>(
-    t: &'a Tokens,
-    selected: bool,
-    label: &'a str,
-    note: &'a str,
-    on_press: Message,
-) -> Element<'a, Message> {
-    let content = row![
-        colored(
-            t,
-            if selected { "●" } else { "○" },
-            if selected { t.accent() } else { t.dim }
-        ),
-        container(mono(t, label)).width(t.cols(12)),
-        dim(t, note),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-    widgets::list_row(t, content, selected, on_press)
-}
-
-fn git<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
-    let executable: Element<'a, Message> = if p.git_missing {
-        colored(t, format!("⚠ {} was not found", p.git), t.warning()).into()
-    } else {
-        mono(t, p.git.clone()).into()
-    };
-    let gix = p.settings.git.gix_fetch;
-    column![
-        heading(t, "GIT", None, None),
-        labeled(t, "program", executable),
-        heading(t, "FETCH WITH", None, None),
-        choice(
-            t,
-            !gix,
-            "git",
-            "`git fetch`, the default",
-            Message::SetGixFetch(false)
-        ),
-        choice(
-            t,
-            gix,
-            "gix",
-            "in-process, quicker on large repositories; git when gix can't",
-            Message::SetGixFetch(true),
-        ),
-        heading(t, "CREDENTIALS", None, None),
-        helper_line(t, p),
-    ]
-    .spacing(10)
-    .into()
 }
 
 fn tools<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
@@ -697,7 +654,7 @@ mod tests {
         assert_eq!(Section::Accounts.step(true), Section::Accounts);
         assert_eq!(Section::Accounts.step(false), Section::Appearance);
         assert_eq!(Section::Confirmations.step(false), Section::Confirmations);
-        assert_eq!(Section::nth(4), Some(Section::Confirmations));
-        assert_eq!(Section::nth(5), None);
+        assert_eq!(Section::nth(3), Some(Section::Confirmations));
+        assert_eq!(Section::nth(4), None);
     }
 }
