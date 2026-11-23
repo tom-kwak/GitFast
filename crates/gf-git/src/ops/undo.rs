@@ -894,7 +894,10 @@ impl CliBackend {
                 HeadMode::Keep => "--keep",
                 HeadMode::Mixed => "--mixed",
             };
-            self.command(["reset", "-q", flag, "--end-of-options", oid])
+            // `oid` is a full object id, never an option or a path. git 2.43
+            // rejects `--end-of-options` in `reset`, so the revision goes
+            // first and a bare `--` marks the (empty) path list.
+            self.command(["reset", "-q", flag, oid, "--"])
         };
         match (&to.branch, &to.oid) {
             // Unborn: undoing the first commit removes the branch it made

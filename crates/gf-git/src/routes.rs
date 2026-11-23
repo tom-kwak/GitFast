@@ -425,7 +425,14 @@ impl Repository {
     pub async fn branches(&self) -> Result<Vec<Branch>> {
         gix_then_cli!(self, RefOps::branches())
     }
+    /// Tags for display: versions newest first (`v1.10.0` above `v1.9.0`),
+    /// then other names. Each backend returns plain name order.
     pub async fn tags(&self) -> Result<Vec<Tag>> {
+        let mut tags = self.tags_by_name().await?;
+        gf_core::model::sort_tags_newest_first(&mut tags);
+        Ok(tags)
+    }
+    async fn tags_by_name(&self) -> Result<Vec<Tag>> {
         gix_then_cli!(self, RefOps::tags())
     }
     /// Commits reachable from HEAD that no remote-tracking branch contains:

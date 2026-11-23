@@ -1,6 +1,8 @@
 //! Reactions to feature outputs: each feature asks, the app decides what
 //! git work to run (directly, or after a confirmation dialog).
 
+use std::path::PathBuf;
+
 use gf_core::model::{Branch, Oid, RefKind};
 use gf_git::{CommitOptions, FileVersion, PullMode, StashOptions};
 use iced::Task;
@@ -938,38 +940,57 @@ impl App {
         })
     }
 
-    fn checkout(&mut self, b: Branch) -> Task<Message> {
+    pub(super) fn checkout(&mut self, b: Branch) -> Task<Message> {
         if self.checkout_pending() {
             return Task::none();
         }
         let target = b.name.as_str().to_owned();
+        // Held by another worktree: git would refuse, so offer its tab.
+        if let Some(snap) = self.active_tab().and_then(|t| t.snapshot.clone())
+            && let Some(w) = snap.worktree_for_checkout(&b)
+            && let Some(name) = w.branch.clone()
+        {
+            return self.ask_worktree_tab(&name, w.path.clone());
+        }
         let tokens = &self.tokens;
         if b.name.kind() == RefKind::RemoteBranch
             && let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(snap) = tab.snapshot.clone()
-            && let Some(local) = local_checkout_target(&snap, &b)
+            && let Some(local) = snap.local_for_remote(&b)
         {
-            if local.is_head
-                || snap
-                    .worktrees
-                    .iter()
-                    .any(|w| w.branch.as_deref() == Some(local.name.short()))
-            {
-                let select = tab.sidebar.select_local_branch(local, &snap, tokens);
-                return Task::batch([
-                    select.map(Message::Sidebar),
-                    self.on_sidebar(sidebar::Output::ShowRevision(Some(
-                        local.name.as_str().to_owned(),
-                    ))),
-                ]);
+            if !local.is_head {
+                return self.checkout_branch(target, local.name.short().to_owned(), false);
             }
-            return self.checkout_branch(target, local.name.short().to_owned(), false);
+            let select = tab.sidebar.select_local_branch(local, &snap, tokens);
+            return Task::batch([
+                select.map(Message::Sidebar),
+                self.on_sidebar(sidebar::Output::ShowRevision(Some(
+                    local.name.as_str().to_owned(),
+                ))),
+            ]);
         }
         self.checkout_branch(
             target,
             b.name.short().to_owned(),
             b.name.kind() == RefKind::RemoteBranch,
         )
+    }
+
+    /// "Go to that worktree's tab?" for a branch another worktree holds.
+    pub(super) fn ask_worktree_tab(&mut self, branch: &str, path: PathBuf) -> Task<Message> {
+        self.confirm(Confirm::change(
+            "worktree-tab",
+            "Branch in another worktree",
+            vec![
+                format!(
+                    "{branch} is checked out in {}",
+                    crate::widgets::format::tilde(&path)
+                ),
+                "Go to that worktree's tab?".into(),
+            ],
+            "Go to tab",
+            Purpose::OpenWorktreeTab(path),
+        ))
     }
 
     fn checkout_branch(&mut self, target: String, name: String, remote: bool) -> Task<Message> {
@@ -1439,32 +1460,6 @@ impl App {
             PromptCommand::Quit => iced::exit(),
         }
     }
-}
-
-/// Prefer the checked-out branch (even if renamed), then the usual local
-/// name, then an unambiguous tracking branch.
-fn local_checkout_target<'a>(snap: &'a Snapshot, remote: &Branch) -> Option<&'a Branch> {
-    let tracking = snap.branches.iter().filter(|b| {
-        b.name.kind() == RefKind::LocalBranch
-            && b.upstream
-                .as_ref()
-                .is_some_and(|upstream| upstream.name == remote.name)
-    });
-    let usual_name =
-        gf_git::remote_branch(&snap.remotes, remote.name.as_str()).map(|(_, head)| head);
-    tracking
-        .clone()
-        .find(|b| b.is_head)
-        .or_else(|| {
-            tracking
-                .clone()
-                .find(|b| Some(b.name.short()) == usual_name.as_deref())
-        })
-        .or_else(|| {
-            let mut candidates = tracking;
-            let first = candidates.next()?;
-            candidates.next().is_none().then_some(first)
-        })
 }
 
 fn is_number(args: &[String]) -> bool {

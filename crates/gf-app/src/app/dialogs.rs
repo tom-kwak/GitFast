@@ -72,6 +72,8 @@ pub enum Purpose {
     },
     PullStrategy(gf_core::model::RepoId),
     CheckoutDetached(String),
+    /// Go to the tab of the worktree that has a branch checked out.
+    OpenWorktreeTab(PathBuf),
     Checkout {
         target: String,
         name: String,
@@ -137,8 +139,6 @@ pub enum Purpose {
     },
     /// A failure report was dismissed; nothing to run.
     Failure,
-    /// Remove a repository from the recent list (the folder is untouched).
-    ForgetRecent(PathBuf),
     SkipOperation,
     AbortOperation,
     /// Undo (or redo) the next step; the check box stashes first.
@@ -617,7 +617,6 @@ impl App {
         let value = |i: usize| values.get(i).cloned().unwrap_or_default();
         let check = |i: usize| checks.get(i).copied().unwrap_or(false);
         match purpose {
-            Purpose::ForgetRecent(path) => self.forget_recent(&path),
             Purpose::Discard {
                 tracked,
                 untracked,
@@ -775,6 +774,7 @@ impl App {
                     PullMode::Merge
                 },
             ),
+            Purpose::OpenWorktreeTab(path) => self.update(Message::Open(path)),
             Purpose::CheckoutDetached(rev) => {
                 let short: String = rev.chars().take(7).collect();
                 self.checkout_op(

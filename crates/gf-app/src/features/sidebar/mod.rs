@@ -1064,7 +1064,22 @@ impl State {
         let danger = |key: char, label: &str, hint: &str, a: Action| {
             Entry::caution(key, label, hint, Message::Act(a))
         };
-        let checkout = || item('o', "checkout", "switch your files to it", Action::Checkout);
+        let held_elsewhere = match self.selected.as_ref() {
+            Some(Selection::Ref(r)) => snap
+                .branches
+                .iter()
+                .find(|b| b.name.as_str() == r)
+                .is_some_and(|b| snap.worktree_for_checkout(b).is_some()),
+            _ => false,
+        };
+        let checkout = || {
+            let hint = if held_elsewhere {
+                "open its worktree tab"
+            } else {
+                "switch your files to it"
+            };
+            item('o', "checkout", hint, Action::Checkout)
+        };
         let merge = || {
             item(
                 'm',
@@ -1517,6 +1532,34 @@ mod tests {
         assert!(
             matches!(out, Some(Output::NewBranch { from: Some(f), branch_here: false }) if f == "refs/heads/dev")
         );
+    }
+
+    #[test]
+    fn checkout_hint_points_at_the_worktree_tab() {
+        let mut snap = snap();
+        snap.worktrees = vec![gf_git::Worktree {
+            path: "/wt/dev".into(),
+            head: None,
+            branch: Some("dev".into()),
+            bare: false,
+            locked: false,
+            prunable: false,
+        }];
+        let mut s = State::default();
+        let _ = s.update_with(
+            Message::Select(Selection::Ref("refs/heads/dev".into())),
+            Some(&snap),
+        );
+        let hint = |s: &State, snap: &Snapshot| {
+            let menu = s.menu(snap).expect("menu");
+            menu.entries.iter().find_map(|e| match e {
+                Entry::Item { key: 'o', hint, .. } => Some(hint.clone()),
+                _ => None,
+            })
+        };
+        assert_eq!(hint(&s, &snap).as_deref(), Some("open its worktree tab"));
+        snap.worktrees.clear();
+        assert_eq!(hint(&s, &snap).as_deref(), Some("switch your files to it"));
     }
 
     #[test]

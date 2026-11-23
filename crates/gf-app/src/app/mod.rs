@@ -20,8 +20,12 @@ mod advanced;
 mod branch_delete;
 mod dialogs;
 mod focus;
+#[cfg(test)]
+mod keyboard_tests;
 mod ops;
 mod outputs;
+#[cfg(test)]
+mod regression_tests;
 mod reveal;
 mod settings;
 #[cfg(test)]
@@ -1580,20 +1584,7 @@ impl App {
                 self.picker = None;
                 Task::batch([self.restore_focus(), self.select_tab(i)])
             }
-            Output::Forget(path) => {
-                let shown = widgets::format::tilde(&path);
-                self.confirm(dialogs::Confirm::change(
-                    "forget-recent",
-                    "Forget repository",
-                    vec![
-                        format!("Remove {shown} from the recent list?"),
-                        "The folder and its files are not touched; open it again to bring it back."
-                            .into(),
-                    ],
-                    "Forget",
-                    Purpose::ForgetRecent(path),
-                ))
-            }
+            Output::Forget(path) => self.forget_recent(&path),
             Output::Completed => Task::batch([
                 operation::focus(repo_picker::FILTER_ID),
                 operation::move_cursor_to_end(repo_picker::FILTER_ID),
@@ -1609,7 +1600,8 @@ impl App {
         }
     }
 
-    /// Removes `path` from the recent list (and from the open window).
+    /// Removes `path` from the recent list (and from the open window); the
+    /// folder is untouched, so no confirmation.
     fn forget_recent(&mut self, path: &Path) -> Task<Message> {
         self.settings.repos.recent.retain(|p| p != path);
         self.save_settings();

@@ -74,14 +74,16 @@ impl ReflogOps for CliBackend {
             ResetMode::Mixed => "--mixed",
             ResetMode::Hard => "--hard",
         };
-        self.exec(self.command(["reset", flag, "--end-of-options", to.as_str()]))
+        // `--end-of-options` is rejected by `reset` in git 2.43; `to` is a
+        // full object id, so the revision goes first and `--` ends it.
+        self.exec(self.command(["reset", flag, to.as_str(), "--"]))
             .await?;
         Ok(())
     }
 
     async fn undo_to(&self, to: &Oid, soft: bool) -> Result<()> {
         let mode = if soft { "--soft" } else { "--keep" };
-        self.exec(self.command(["reset", mode, "--end-of-options", to.as_str()]))
+        self.exec(self.command(["reset", mode, to.as_str(), "--"]))
             .await?;
         Ok(())
     }
