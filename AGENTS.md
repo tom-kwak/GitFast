@@ -48,7 +48,7 @@ gf(Git Fast)는 Rust + iced 0.14로 만든 Git GUI 클라이언트입니다. mac
 - **문서 갱신**: 동작을 바꾸면 같은 작업에서 관련 문서를 고칩니다.
   - git 명령의 백엔드 → GIX_MIGRATION.md §2 표
   - 규칙·구조 → DEVELOPMENT.md
-  - 사용자에게 보이는 기능 → 릴리스할 때 README "Why gf"와 release notes
+  - 사용자에게 보이는 기능 → 릴리스할 때 README(측정값·기능 섹션)와 release notes. README에는 사실만 쓰고, 수치에는 출처와 측정 조건을 붙입니다
 
 ## 툴체인
 

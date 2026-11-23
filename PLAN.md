@@ -94,7 +94,7 @@
 
 ## 5. 아직 없는 기능 후보
 
-상용 툴(SourceTree, GitKraken, Fork, Tower, Sublime Merge, SmartGit)을 참고한 목록 중 아직 구현하지 않은 것입니다. 이미 있는 기능은 [README](README.md) "Why gf"에 있습니다.
+상용 툴(SourceTree, GitKraken, Fork, Tower, Sublime Merge, SmartGit)을 참고한 목록 중 아직 구현하지 않은 것입니다. 이미 있는 기능은 [README](README.md)와 릴리스 노트에 있습니다.
 
 - **보기**: 이미지 diff, 저장소 그룹(워크스페이스)
 - **편집**: 커밋 템플릿·Conventional Commits 도우미·Co-author, 외부 머지툴 연동, 드래그&드롭으로 merge/rebase/cherry-pick
