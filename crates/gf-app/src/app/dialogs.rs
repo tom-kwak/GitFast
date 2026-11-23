@@ -137,8 +137,6 @@ pub enum Purpose {
     },
     /// A failure report was dismissed; nothing to run.
     Failure,
-    /// Remove a repository from the recent list (the folder is untouched).
-    ForgetRecent(PathBuf),
     SkipOperation,
     AbortOperation,
     /// Undo (or redo) the next step; the check box stashes first.
@@ -617,7 +615,6 @@ impl App {
         let value = |i: usize| values.get(i).cloned().unwrap_or_default();
         let check = |i: usize| checks.get(i).copied().unwrap_or(false);
         match purpose {
-            Purpose::ForgetRecent(path) => self.forget_recent(&path),
             Purpose::Discard {
                 tracked,
                 untracked,

@@ -4043,3 +4043,18 @@ async fn a_batch_stops_at_the_first_step_that_fails() {
         ui.flash()
     );
 }
+
+#[tokio::test]
+async fn forgetting_a_recent_repository_needs_no_confirmation() {
+    let mut ui = Ui::open_with(|_| {}).await;
+    let gone = PathBuf::from("/nowhere/old-tree");
+    ui.app.settings.repos.recent = vec![gone.clone()];
+    let _ = ui.send(Message::OpenPicker).await;
+
+    let _ = ui
+        .send(Message::Picker(repo_picker::Message::Forget(gone)))
+        .await;
+
+    assert!(ui.app.dialog.is_none(), "forgetting asks nothing");
+    assert!(ui.app.settings.repos.recent.is_empty());
+}

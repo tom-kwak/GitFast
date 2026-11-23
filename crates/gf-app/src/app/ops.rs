@@ -924,6 +924,21 @@ impl App {
                     std::iter::once(p.clone()).chain(resolved)
                 })
                 .collect();
+            // A removed tree is not a repository to come back to: drop it
+            // from the recent list too (welcome page and open window).
+            let before = self.settings.repos.recent.len();
+            self.settings
+                .repos
+                .recent
+                .retain(|r| !gone.iter().any(|g| r == g));
+            if self.settings.repos.recent.len() != before {
+                self.save_settings();
+                for g in &gone {
+                    if let Some(p) = self.picker.as_mut() {
+                        p.forgotten(g);
+                    }
+                }
+            }
             for i in (0..self.tabs.len()).rev() {
                 if gone.iter().any(|p| self.tabs[i].repo.cwd().starts_with(p)) {
                     tasks.push(self.close_tab(i));
