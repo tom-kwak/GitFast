@@ -565,12 +565,12 @@ impl Repository {
     ) -> Result<()> {
         WorktreeOps::add_worktree(&self.cli, path, branch, new_branch, start).await
     }
-    /// Runs in the other tree's folder, which gix would open anew: CLI.
+    /// What the tree at `path` is doing; gix opens that tree on its own.
     pub async fn worktree_status(&self, path: &Path, base: Option<&str>) -> Result<WorktreeStatus> {
-        WorktreeOps::worktree_status(&self.cli, path, base).await
+        gix_then_cli!(self, WorktreeOps::worktree_status(path, base))
     }
     pub async fn default_base(&self) -> Result<Option<String>> {
-        WorktreeOps::default_base(&self.cli).await
+        gix_then_cli!(self, WorktreeOps::default_base())
     }
     /// Keeps (or with `None` forgets) the branch `branch` goes back into.
     pub async fn set_branch_base(&self, branch: &str, base: Option<&str>) -> Result<()> {
@@ -590,14 +590,14 @@ impl Repository {
 }
 
 impl Repository {
-    // ---- UndoOps (CLI)
+    // ---- UndoOps (capture gix first; the rest CLI)
     /// Files a stash entry changes (what applying it touches).
     pub async fn stash_paths(&self, index: usize) -> Result<Vec<PathBuf>> {
         UndoOps::stash_paths(&self.cli, index).await
     }
     /// The state of everything `scope` covers, for undo / redo.
     pub async fn capture(&self, scope: &Scope) -> Result<Capture> {
-        UndoOps::capture(&self.cli, scope).await
+        gix_then_cli!(self, UndoOps::capture(scope))
     }
     /// Puts back a captured state (see `ops::undo`).
     pub async fn restore(

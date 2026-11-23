@@ -26,17 +26,26 @@ impl Repository {
     /// working tree, the working tree root, or a bare repository).
     pub async fn open(path: impl AsRef<Path>, runner: GitRunner) -> Result<Self> {
         let path = path.as_ref();
-        let probe = GitCommand::new(["rev-parse", "--is-bare-repository", "--absolute-git-dir"])
-            .current_dir(path)
-            .read_only()
-            .allow_failure();
+        // One process for all three: in a bare repository (or inside
+        // `.git`) git prints the first two answers, then fails on
+        // `--show-toplevel`.
+        let probe = GitCommand::new([
+            "rev-parse",
+            "--is-bare-repository",
+            "--absolute-git-dir",
+            "--show-toplevel",
+        ])
+        .current_dir(path)
+        .read_only()
+        .allow_failure();
         let out = runner.run(&probe).await?;
-        if !out.success() {
-            return Err(GfError::NotARepository(path.to_path_buf()));
-        }
         let stdout = out.stdout_str();
         let mut lines = stdout.lines();
-        let is_bare = lines.next() == Some("true");
+        let is_bare = match lines.next() {
+            Some("true") => true,
+            Some("false") => false,
+            _ => return Err(GfError::NotARepository(path.to_path_buf())),
+        };
         let git_dir = PathBuf::from(
             lines
                 .next()
@@ -45,7 +54,14 @@ impl Repository {
 
         let workdir = if is_bare {
             None
+        } else if out.success() {
+            let top = lines
+                .next()
+                .ok_or_else(|| GfError::parse("rev-parse", stdout.clone()))?;
+            Some(PathBuf::from(top))
         } else {
+            // Not bare and no work tree (run inside `.git`): ask again on
+            // its own, so the error is git's own.
             let top = runner
                 .run(
                     &GitCommand::new(["rev-parse", "--show-toplevel"])

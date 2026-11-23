@@ -13,8 +13,8 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use gf_git::backend::{DiffOps, LogOps, RefOps, StashOps, StatusOps};
-use gf_git::{GitRunner, LogOrder, LogQuery, Repository};
+use gf_git::backend::{DiffOps, LogOps, RefOps, StashOps, StatusOps, UndoOps, WorktreeOps};
+use gf_git::{GitRunner, LogOrder, LogQuery, Repository, Scope};
 
 const RUNS: usize = 5;
 
@@ -80,4 +80,22 @@ async fn compare_backends() {
     bench!(repo, "tags", RefOps::tags());
     bench!(repo, "unpushed_count", RefOps::unpushed_count());
     bench!(repo, "stashes", StashOps::stashes());
+    bench!(repo, "default_base", WorktreeOps::default_base());
+    let base = repo.default_base().await.unwrap();
+    bench!(
+        repo,
+        "worktree_status",
+        WorktreeOps::worktree_status(std::path::Path::new(&path), base.as_deref())
+    );
+    // What a branch operation captures for undo; no work tree files, so
+    // nothing is written to the repository.
+    let branch = repo.status().await.unwrap().head.branch;
+    let scope = Scope {
+        head: true,
+        refs: branch.iter().map(|b| format!("refs/heads/{b}")).collect(),
+        stash: true,
+        config: branch.iter().map(|b| format!("branch.{b}")).collect(),
+        ..Scope::default()
+    };
+    bench!(repo, "undo capture", UndoOps::capture(&scope));
 }

@@ -196,7 +196,7 @@ fn ref_tips(repo: &gix::Repository, prefix: Option<&str>) -> Result<Vec<ObjectId
     Ok(tips)
 }
 
-fn count(repo: &gix::Repository, tip: ObjectId, hidden: ObjectId) -> Result<u32> {
+pub(super) fn count(repo: &gix::Repository, tip: ObjectId, hidden: ObjectId) -> Result<u32> {
     let mut n = 0u32;
     for info in repo
         .rev_walk([tip])
@@ -364,7 +364,7 @@ fn unpushed_limited(
 }
 
 /// Newest-first reflog lines of `name` (`HEAD`, `refs/stash`).
-fn reflog_lines(
+pub(super) fn reflog_lines(
     repo: &gix::Repository,
     name: &str,
     limit: usize,
@@ -686,10 +686,16 @@ impl WorktreeOps for GixBackend {
 
     async fn worktree_status(
         &self,
-        _: &std::path::Path,
-        _: Option<&str>,
+        path: &std::path::Path,
+        base: Option<&str>,
     ) -> Result<crate::ops::worktree::WorktreeStatus> {
-        unsupported("worktree status")
+        // Another tree's folder: its own repository handle, not ours.
+        let (path, base) = (path.to_path_buf(), base.map(str::to_owned));
+        tokio::task::spawn_blocking(move || {
+            super::gix_worktree::worktree_status(&path, base.as_deref())
+        })
+        .await
+        .map_err(|e| err(format!("task: {e}")))?
     }
 
     async fn set_branch_base(&self, _: &str, _: Option<&str>) -> Result<()> {
@@ -697,7 +703,7 @@ impl WorktreeOps for GixBackend {
     }
 
     async fn default_base(&self) -> Result<Option<String>> {
-        unsupported("default base")
+        self.blocking(super::gix_worktree::default_base).await
     }
 
     async fn lock_worktree(&self, _: &std::path::Path, _: bool) -> Result<()> {

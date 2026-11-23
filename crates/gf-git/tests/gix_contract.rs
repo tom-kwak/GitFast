@@ -13,9 +13,9 @@ use common::open;
 use gf_core::model::Oid;
 use gf_git::backend::{
     BranchOps, CliBackend, DiffOps, GixBackend, LogOps, RebaseOps, RefOps, ReflogOps, RemoteOps,
-    StashOps, StatusOps, TagOps, WorktreeOps,
+    StashOps, StatusOps, TagOps, UndoOps, WorktreeOps,
 };
-use gf_git::{LogOrder, LogQuery, Repository};
+use gf_git::{LogOrder, LogQuery, Repository, Scope};
 use gf_test_support::TestRepo;
 
 /// Runs `f` on both backends and asserts equal results (errors compare by
@@ -795,4 +795,303 @@ async fn fetch_routing_cancel_and_fallbacks() {
         .await
         .unwrap();
     assert!(a.git(&["branch", "-r"]).contains("origin/fresh"));
+}
+
+/// Like [`same`], but gix must serve the call: `Unsupported` fails.
+async fn served<'a, T, F, Fut>(repo: &'a Repository, what: &str, f: F)
+where
+    T: PartialEq + Debug,
+    F: Fn(Backend<'a>) -> Fut,
+    Fut: Future<Output = gf_core::Result<T>>,
+{
+    let (cli, gix) = repo.backends();
+    let gix = gix.expect("gix backend available");
+    let a = f(Backend::Cli(cli)).await;
+    let b = f(Backend::Gix(gix)).await;
+    match (a, b) {
+        (Ok(a), Ok(b)) => assert_eq!(b, a, "{what}: gix (left) differs from git CLI (right)"),
+        (a, b) => panic!("{what}: cli {a:?} vs gix {b:?}"),
+    }
+}
+
+/// Every tree's status, with and without a default base, on both backends.
+async fn worktree_statuses_match(repo: &Repository, trees: &[std::path::PathBuf], what: &str) {
+    served(repo, &format!("{what}: default_base"), |b| async move {
+        call!(b, WorktreeOps::default_base())
+    })
+    .await;
+    for tree in trees {
+        for base in [None, Some("main"), Some("origin/main")] {
+            served(
+                repo,
+                &format!("{what}: worktree_status {} {base:?}", tree.display()),
+                |b| async move { call!(b, WorktreeOps::worktree_status(tree, base)) },
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn worktree_status_matches_the_git_cli() {
+    let (_origin, work, linked) = fixture();
+    let dir = |name: &str| linked.path().join(name);
+    let add = |args: &[&str]| {
+        let mut a = vec!["worktree", "add", "-q"];
+        a.extend_from_slice(args);
+        work.git(&a);
+    };
+    // Made from main: the reflog names its base. Then one commit of its
+    // own, so it had work.
+    add(&["-b", "topic", dir("topic").to_str().unwrap(), "main"]);
+    std::fs::write(dir("topic").join("t.txt"), "t\n").unwrap();
+    let topic = dir("topic");
+    let in_topic = |args: &[&str]| {
+        let mut a = vec!["-C", topic.to_str().unwrap()];
+        a.extend_from_slice(args);
+        work.git(&a);
+    };
+    in_topic(&["add", "t.txt"]);
+    in_topic(&["commit", "-q", "-m", "T: topic\nsecond subject line"]);
+    // Just made, nothing of its own; and one whose base is recorded.
+    add(&["-b", "fresh", dir("fresh").to_str().unwrap(), "feature"]);
+    add(&["-b", "noted", dir("noted").to_str().unwrap()]);
+    work.git(&["config", "branch.noted.gf-base", "feature"]);
+    add(&["--detach", dir("detached").to_str().unwrap(), "HEAD~2"]);
+
+    // Changes in the main tree: staged, unstaged, a wholly untracked
+    // folder (one entry with --untracked-files=normal) and loose files.
+    work.write("a.txt", "changed\n");
+    work.write("b.txt", "staged\n");
+    work.git(&["add", "b.txt"]);
+    work.write("new/deep/x.txt", "x\n");
+    work.write("new/y.txt", "y\n");
+    work.write("loose.txt", "l\n");
+
+    let repo = open(&work).await;
+    let trees = vec![
+        work.path().to_path_buf(),
+        dir("wt"),
+        dir("topic"),
+        dir("fresh"),
+        dir("noted"),
+        dir("detached"),
+    ];
+    worktree_statuses_match(&repo, &trees, "fixture").await;
+
+    // Without origin/HEAD the default falls back to main / master.
+    work.git(&["remote", "set-head", "origin", "-d"]);
+    worktree_statuses_match(&repo, &trees[..1], "no origin/HEAD").await;
+}
+
+#[tokio::test]
+async fn worktree_status_of_a_conflict_matches() {
+    let repo = TestRepo::new();
+    repo.write("c.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["switch", "-q", "-c", "other"]);
+    repo.write("c.txt", "other\n");
+    repo.commit_all("other");
+    repo.git(&["switch", "-q", "main"]);
+    repo.write("c.txt", "main\n");
+    repo.commit_all("main");
+    let out = repo.git_output(&["merge", "other"]);
+    assert!(!out.status.success());
+    let r = open(&repo).await;
+    worktree_statuses_match(&r, &[repo.path().to_path_buf()], "conflict").await;
+}
+
+fn paths(list: &[&str]) -> Vec<std::path::PathBuf> {
+    list.iter().map(std::path::PathBuf::from).collect()
+}
+
+/// Every part of an undo scope, captured by both backends. The blobs gix
+/// writes must have the ids git gives the same bytes.
+#[tokio::test]
+async fn undo_captures_match_the_git_cli() {
+    let (_origin, work, _linked) = fixture();
+    work.write("dir/one.txt", "1\n");
+    work.write("dir/sub/two.txt", "2\n");
+    work.write("dirt.txt", "not under dir/\n");
+    work.write("exec.sh", "echo\n");
+    work.write("with space ü.txt", "s\n");
+    work.git(&["add", "."]);
+    work.git(&["update-index", "--chmod=+x", "exec.sh"]);
+    work.git(&["commit", "-q", "-m", "files"]);
+    work.write("dir/one.txt", "changed\n");
+    work.git(&["add", "dir/one.txt"]);
+    work.write("dir/one.txt", "changed again\n");
+    work.write("intent.txt", "i\n");
+    work.git(&["add", "-N", "intent.txt"]);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("dirt.txt", work.path().join("link")).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        work.path().join("exec.sh"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    // Config: this section, a dotted subsection that is not it, a
+    // repeated key, mixed case, quoting and the same section twice.
+    work.git(&["config", "branch.main.gf-base", "develop"]);
+    work.git(&["config", "branch.main.x.remote", "not-mine"]);
+    work.git(&["config", "--add", "branch.main.multi", "1"]);
+    work.git(&["config", "--add", "branch.main.multi", "2"]);
+    work.git(&["config", "Core.someThing", "Value"]);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(work.path().join(".git/config"))
+        .and_then(|mut f| {
+            std::io::Write::write_all(
+                &mut f,
+                b"[branch \"main\"]\n\tlater = \"quoted \\\"x\\\"\"\n",
+            )
+        })
+        .unwrap();
+
+    let scope = Scope {
+        head: true,
+        index: paths(&[
+            "dir",
+            "exec.sh",
+            "intent.txt",
+            "missing.txt",
+            "with space ü.txt",
+            "dir/sub/",
+        ]),
+        files: paths(&[
+            "dir/one.txt",
+            "exec.sh",
+            "link",
+            "missing.txt",
+            "dir",
+            "with space ü.txt",
+        ]),
+        refs: vec![
+            "refs/heads/main".into(),
+            "refs/heads/feature".into(),
+            "refs/tags/v1".into(),
+            "refs/tags/v2".into(),
+            "refs/heads/nope".into(),
+            "main".into(),
+        ],
+        stash: true,
+        config: vec!["branch.main".into(), "core".into(), "branch.gone".into()],
+        submodules: Vec::new(),
+    };
+    let repo = open(&work).await;
+    served(&repo, "capture", |b| {
+        let scope = &scope;
+        async move { call!(b, UndoOps::capture(scope)) }
+    })
+    .await;
+
+    // Detached (files untouched), and an empty scope.
+    work.git(&["update-ref", "--no-deref", "HEAD", "HEAD~1"]);
+    served(&repo, "capture detached", |b| async move {
+        call!(b, UndoOps::capture(&Scope::head()))
+    })
+    .await;
+    served(&repo, "capture empty", |b| async move {
+        call!(b, UndoOps::capture(&Scope::default()))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn undo_captures_of_conflicts_unborn_and_submodules_match() {
+    // Conflict stages in the index.
+    let repo = TestRepo::new();
+    repo.write("c.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["switch", "-q", "-c", "other"]);
+    repo.write("c.txt", "other\n");
+    repo.commit_all("other");
+    repo.git(&["switch", "-q", "main"]);
+    repo.write("c.txt", "main\n");
+    repo.commit_all("main");
+    assert!(!repo.git_output(&["merge", "other"]).status.success());
+    let r = open(&repo).await;
+    let scope = Scope {
+        head: true,
+        index: paths(&["c.txt"]),
+        files: paths(&["c.txt"]),
+        ..Scope::default()
+    };
+    served(&r, "capture conflict", |b| {
+        let scope = &scope;
+        async move { call!(b, UndoOps::capture(scope)) }
+    })
+    .await;
+
+    // Unborn branch.
+    let empty = TestRepo::new();
+    empty.write("new.txt", "n\n");
+    empty.git(&["add", "new.txt"]);
+    let r = open(&empty).await;
+    let scope = Scope {
+        head: true,
+        index: paths(&["new.txt"]),
+        stash: true,
+        ..Scope::default()
+    };
+    served(&r, "capture unborn", |b| {
+        let scope = &scope;
+        async move { call!(b, UndoOps::capture(scope)) }
+    })
+    .await;
+
+    // Submodules: checked out at another commit, and one not initialized.
+    let (_sub, sup) = with_submodules();
+    let r = open(&sup).await;
+    let scope = Scope {
+        submodules: paths(&["clean", "moved", "missing"]),
+        index: paths(&["moved", "staged"]),
+        ..Scope::default()
+    };
+    served(&r, "capture submodules", |b| {
+        let scope = &scope;
+        async move { call!(b, UndoOps::capture(scope)) }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn undo_capture_leaves_valueless_config_keys_to_the_cli() {
+    let work = TestRepo::new();
+    work.write("a.txt", "a\n");
+    work.commit_all("A");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(work.path().join(".git/config"))
+        .and_then(|mut f| std::io::Write::write_all(&mut f, b"[branch \"main\"]\n\tflag\n"))
+        .unwrap();
+    work.git(&["config", "branch.side.empty", ""]);
+    let repo = open(&work).await;
+    let (_, gix) = repo.backends();
+    let side = Scope {
+        config: vec!["branch.side".into()],
+        ..Scope::default()
+    };
+    let out = UndoOps::capture(gix.unwrap(), &side).await;
+    assert!(
+        matches!(out, Err(gf_core::GfError::Unsupported(_))),
+        "{out:?}"
+    );
+    let scope = Scope {
+        config: vec!["branch.main".into()],
+        ..Scope::default()
+    };
+    let (_, gix) = repo.backends();
+    let out = UndoOps::capture(gix.unwrap(), &scope).await;
+    assert!(
+        matches!(out, Err(gf_core::GfError::Unsupported(_))),
+        "{out:?}"
+    );
+    // The router still answers, through the CLI.
+    let got = repo.capture(&scope).await.unwrap();
+    assert_eq!(
+        got.config,
+        [("branch.main.flag".to_owned(), "true".to_owned())]
+    );
 }
