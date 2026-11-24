@@ -1433,6 +1433,7 @@ impl App {
     fn add_tab(&mut self, repo: Repository) -> Task<Message> {
         // Already open (possibly via another path inside it): just switch.
         if let Some(i) = self.tabs.iter().position(|t| t.repo.cwd() == repo.cwd()) {
+            self.tabs[i].worktrees.select_here();
             return self.select_tab(i);
         }
         let cwd = repo.cwd().to_path_buf();

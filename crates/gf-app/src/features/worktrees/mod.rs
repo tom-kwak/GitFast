@@ -11,7 +11,9 @@
 //!
 //! - Line 1: branch, files touched lately (`⚡`), lock, and what is
 //!   uncommitted there (`●N`, `✕N` conflicts). In front, `●` marks the tree
-//!   this tab shows and `◉` one open in another tab.
+//!   this tab shows and `◉` one open in another tab. That tree is also
+//!   the selected card until another is picked, and again whenever the tab
+//!   is opened from another tree.
 //! - Line 2: in words, the branch it came from and how it stands against
 //!   it: commits it has that the base lacks (`ahead`), commits the base got
 //!   since (`behind`), or `merged` once the base has its work; then the
@@ -379,6 +381,21 @@ impl State {
             c.in_tab = self.tabs.iter().any(is);
             c.current = is(&self.here);
         }
+        // With nothing picked, the tree this tab shows is the one marked.
+        if self.selected.is_none() {
+            self.selected = self
+                .cards
+                .iter()
+                .find(|c| c.current)
+                .map(|c| c.tree.path.clone());
+        }
+    }
+
+    /// Drops the selection so the tree this tab shows is marked again
+    /// (when the tab is opened or switched to from another tree).
+    pub fn select_here(&mut self) {
+        self.selected = None;
+        self.mark_tabs();
     }
 
     /// Reads every tree's status in the background. A read already running
@@ -1600,6 +1617,19 @@ mod tests {
     }
 
     #[test]
+    fn the_tabs_own_tree_is_selected_until_another_is_picked() {
+        let mut s = state();
+        assert_eq!(s.selected().map(Card::name).as_deref(), Some("main"));
+        let _ = s.update(Message::Select("/a".into()));
+        s.set_worktrees(&[tree("/r", "main"), tree("/b", "b"), tree("/a", "a")]);
+        assert_eq!(s.selected().map(Card::name).as_deref(), Some("a"), "kept");
+        // Opening the tab again (from another tree) marks its own tree.
+        s.set_tabs(vec!["/r".into(), "/b".into()], "/b".into());
+        s.select_here();
+        assert_eq!(s.selected().map(Card::name).as_deref(), Some("b"));
+    }
+
+    #[test]
     fn tabs_match_by_the_resolved_folder() {
         let mut s = state();
         s.set_tabs(vec!["/real/a".into()], "/r".into());
@@ -1618,6 +1648,7 @@ mod tests {
     fn keys_move_and_act_on_the_selection() {
         let t = crate::theme::preset("gf-dark");
         let mut s = state();
+        s.selected = None;
         let m = s.nav(Nav::plain(Key::Down), &t).expect("moves");
         assert!(matches!(m.message, Some(Message::Select(p)) if p.as_path() == Path::new("/r")));
         let m = s.nav(Nav::plain(Key::Char('l')), &t).expect("used");
