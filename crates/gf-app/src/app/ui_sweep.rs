@@ -1151,6 +1151,7 @@ fn reselect(messages: &[String]) -> bool {
         "LocalDiff(SelectFile(",
         "Blame(Select(",
         "CodeDialog(Pressed(",
+        "Settings(Section(",
     ];
     messages.len() == 1 && picks.iter().any(|p| messages[0].starts_with(p))
 }
