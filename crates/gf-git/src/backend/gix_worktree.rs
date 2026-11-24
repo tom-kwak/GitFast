@@ -17,6 +17,7 @@ use super::gix_status::status_with;
 use crate::cli::parse::log::split_message;
 use crate::ops::worktree::{
     ACTIVITY_SAMPLE, LastCommit, USUAL_BASES, WorktreeStatus, parse_created_from, status_counts,
+    touched,
 };
 
 /// `git config --get <section>.<sub>.<key>`: the last value, trimmed;
@@ -192,6 +193,11 @@ pub(super) fn worktree_status(path: &Path, base: Option<&str>) -> Result<Worktre
         s.base = Some(base);
         s.base_guessed = guessed;
     }
+    let committed = match (&s.merge_base, head, s.ahead_of_base) {
+        (Some(fork), Some(head), 1..) => committed_paths(&repo, fork, head)?,
+        _ => Vec::new(),
+    };
+    s.touched = touched(&report, committed);
     let mut newest: Option<SystemTime> = None;
     for e in report
         .entries
@@ -207,7 +213,45 @@ pub(super) fn worktree_status(path: &Path, base: Option<&str>) -> Result<Worktre
     Ok(s)
 }
 
+/// Files changed between `fork` and `head` (`git diff --name-only
+/// --no-renames`): no renames, so a moved file counts at both paths.
+fn committed_paths(
+    repo: &gix::Repository,
+    fork: &gf_core::model::Oid,
+    head: ObjectId,
+) -> Result<Vec<std::path::PathBuf>> {
+    let tree = |id: ObjectId| -> Result<gix::Tree<'_>> {
+        repo.find_commit(id).map_err(err)?.tree().map_err(err)
+    };
+    let fork = ObjectId::from_hex(fork.as_str().as_bytes()).map_err(err)?;
+    let (old, new) = (tree(fork)?, tree(head)?);
+    let options = gix::diff::Options::default().with_rewrites(None);
+    let changes = repo
+        .diff_tree_to_tree(Some(&old), Some(&new), Some(options))
+        .map_err(err)?;
+    Ok(changes
+        .iter()
+        .filter(|c| !c.entry_mode().is_tree())
+        .map(|c| super::gix_status::path(c.location()))
+        .collect())
+}
+
 /// See `CliBackend::default_base`.
+/// See `WorktreeOps::pull_rebases`.
+pub(super) fn pull_rebases(path: &Path, branch: &str) -> Result<bool> {
+    let repo = gix::open(path).map_err(err)?;
+    let config = repo.config_snapshot();
+    let read = |section: &str, sub: Option<&str>| {
+        config
+            .plumbing()
+            .string_by(section, sub.map(|s| s.as_bytes().as_bstr()), "rebase")
+            .map(|v| text(v.as_ref()).trim().to_owned())
+            .filter(|v| !v.is_empty())
+    };
+    let value = read("branch", Some(branch)).or_else(|| read("pull", None));
+    Ok(value.as_deref().is_some_and(crate::ops::worktree::rebases))
+}
+
 pub(super) fn default_base(repo: &gix::Repository) -> Result<Option<String>> {
     let local = |name: &str| exists(repo, &format!("refs/heads/{name}")).then(|| name.to_owned());
     if let Some(r) = repo

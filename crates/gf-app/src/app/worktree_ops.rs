@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use iced::Task;
 
 use super::dialogs::{Confirm, Purpose, worktree_label};
-use super::{App, Message, Shortcut};
+use super::{App, Message, OpKind, RepoId, Shortcut};
 use crate::features::command_log::NoteKind;
 use crate::features::dialog::{Dialog, Suggestion};
 use crate::features::diff_view::DiffSource;
@@ -121,37 +121,78 @@ impl App {
                 into,
                 real,
                 count,
+                from,
             } => {
-                let here = self
-                    .active_tab()
-                    .is_some_and(|t| same_folder(t.repo.cwd(), &into, real.as_deref()));
-                let place = if here {
-                    "Runs here, in this tab.".to_owned()
-                } else {
-                    format!("Runs in {}, which opens in a tab.", tilde(&into))
-                };
+                let place = self.runs_where(&into, real.as_deref());
                 let commits = format::count(count, "commit");
-                self.confirm(
-                    Confirm::change(
-                        "merge",
-                        "Merge",
-                        vec![
-                            format!("Merge {branch} into {base} ({commits})?"),
-                            place,
-                            "Fast-forwards when it can; conflicts stop for you to resolve.".into(),
-                        ],
-                        "Merge",
-                        Purpose::MergeIntoBase { branch, into, real },
-                    )
-                    .check("always create a merge commit (--no-ff)", false),
+                let clean = from.map(|tree| CleanAfterMerge {
+                    tree,
+                    branch: branch.clone(),
+                    base: base.clone(),
+                });
+                let offer_clean = clean.is_some();
+                let mut confirm = Confirm::change(
+                    "merge",
+                    "Merge",
+                    vec![
+                        format!("Merge {branch} into {base} ({commits})?"),
+                        place,
+                        "Fast-forwards when it can; conflicts stop for you to resolve.".into(),
+                    ],
+                    "Merge",
+                    Purpose::MergeIntoBase {
+                        branch: branch.clone(),
+                        into,
+                        real,
+                        clean,
+                    },
                 )
+                .check("always create a merge commit (--no-ff)", false);
+                if offer_clean {
+                    // Off by default: removing is not undone with ⌘Z.
+                    confirm = confirm.check(
+                        format!("then remove the worktree and branch {branch}"),
+                        false,
+                    );
+                }
+                self.confirm(confirm)
             }
             Output::SetBase {
                 branch,
                 base,
                 guessed,
             } => self.base_branch_dialog(branch, base, guessed),
-            Output::New => self.new_worktree_dialog(),
+            Output::Update {
+                branch,
+                base,
+                tree,
+                real,
+                behind,
+            } => {
+                let Some(tab) = self.active_tab() else {
+                    return Task::none();
+                };
+                let repo = tab.repo.clone();
+                let update = UpdateFromBase {
+                    branch,
+                    base,
+                    tree,
+                    real,
+                    behind,
+                };
+                // Read where it runs: that tree's config decides.
+                Task::perform(
+                    async move {
+                        let rebase = repo
+                            .pull_rebases(&update.tree, &update.branch)
+                            .await
+                            .unwrap_or(false);
+                        (update, rebase)
+                    },
+                    |(update, rebase)| Message::UpdateModeRead(update, rebase),
+                )
+            }
+            Output::New => self.new_worktree_dialog(None),
             Output::Collapse => self.on_shortcut(Shortcut::ToggleRefs),
             Output::Menu { show, menu } => {
                 let task = show.map_or_else(Task::none, |rev| {
@@ -164,31 +205,101 @@ impl App {
 
     /// Merges `branch` in the tab of the tree at `into` (opening it first
     /// when no tab shows it): conflicts then stop where they are resolved.
+    ///
+    /// With `clean`, a merge that ends without conflicts goes on to remove
+    /// the merged tree and its branch (see [`CleanAfterMerge`]).
     pub(super) fn merge_in_tree(
         &mut self,
         branch: String,
         into: PathBuf,
         real: Option<&Path>,
         no_ff: bool,
+        clean: Option<CleanAfterMerge>,
+    ) -> Task<Message> {
+        let what = Integrate::Merge {
+            branch,
+            no_ff,
+            clean,
+        };
+        self.integrate_in_tree(into, real, what)
+    }
+
+    /// Runs `what` in the tab of the tree at `path` (opening it first when
+    /// no tab shows it), so conflicts stop where they are resolved.
+    pub(super) fn integrate_in_tree(
+        &mut self,
+        path: PathBuf,
+        real: Option<&Path>,
+        what: Integrate,
     ) -> Task<Message> {
         let tab = self
             .tabs
             .iter()
-            .position(|t| same_folder(t.repo.cwd(), &into, real));
+            .position(|t| same_folder(t.repo.cwd(), &path, real));
         match tab {
             Some(i) => {
                 let select = self.select_tab(i);
-                Task::batch([select, self.run_merge(branch, no_ff)])
+                Task::batch([select, self.integrate_here(what)])
             }
             None => {
-                self.merge_after_open = Some(MergeAfterOpen {
-                    path: into.clone(),
-                    branch,
-                    no_ff,
+                self.integrate_after_open = Some(IntegrateAfterOpen {
+                    path: path.clone(),
+                    what,
                 });
-                self.update(Message::Open(into))
+                self.update(Message::Open(path))
             }
         }
+    }
+
+    /// Says where [`Self::integrate_in_tree`] runs for the tree at `path`.
+    fn runs_where(&self, path: &Path, real: Option<&Path>) -> String {
+        let shows = |t: &crate::repo_tab::RepoTab| same_folder(t.repo.cwd(), path, real);
+        if self.active_tab().is_some_and(shows) {
+            "Runs here, in this tab.".to_owned()
+        } else if self.tabs.iter().any(shows) {
+            format!("Runs in {}, in its tab.", tilde(path))
+        } else {
+            format!("Runs in {}, which opens in a tab.", tilde(path))
+        }
+    }
+
+    /// Runs `what` in the active tab.
+    pub(super) fn integrate_here(&mut self, what: Integrate) -> Task<Message> {
+        match what {
+            Integrate::Merge {
+                branch,
+                no_ff,
+                clean,
+            } => self.merge_then_clean(branch, no_ff, clean),
+            Integrate::Rebase { onto } => self.run_rebase_onto(onto),
+        }
+    }
+
+    /// Asks before bringing `base`'s new commits into the tree of
+    /// `branch`, merging or rebasing as `git pull` there would.
+    pub(super) fn on_update_mode(&mut self, update: UpdateFromBase, rebase: bool) -> Task<Message> {
+        let place = self.runs_where(&update.tree, update.real.as_deref());
+        let lines = vec![
+            format!(
+                "Bring {} from {} into {}?",
+                format::count(update.behind, "commit"),
+                update.base,
+                update.branch
+            ),
+            place,
+        ];
+        self.confirm(
+            Confirm::change(
+                "update-from-base",
+                "Update from base",
+                lines,
+                "Update",
+                Purpose::UpdateFromBase(update),
+            )
+            .undoable()
+            // As `git pull` does there (pull.rebase); one click to change.
+            .check("rebase instead of merge", rebase),
+        )
     }
 
     /// Asks which local branch `branch` goes back into, with the local
@@ -273,12 +384,101 @@ impl App {
     }
 }
 
-/// A merge waiting for its tree's tab ([`App::merge_in_tree`]).
+/// A merge or rebase waiting for its tree's tab
+/// ([`App::integrate_in_tree`]).
 #[derive(Debug, Clone)]
-pub(super) struct MergeAfterOpen {
+pub(super) struct IntegrateAfterOpen {
     pub path: PathBuf,
+    pub what: Integrate,
+}
+
+/// What [`App::integrate_in_tree`] runs.
+#[derive(Debug, Clone)]
+pub(super) enum Integrate {
+    /// Merge `branch` into the tree's branch (worktrees' `m`).
+    Merge {
+        branch: String,
+        no_ff: bool,
+        clean: Option<CleanAfterMerge>,
+    },
+    /// Replay the tree's branch onto `onto` (`u`, rebasing).
+    Rebase { onto: String },
+}
+
+/// Bringing `base`'s `behind` new commits into `branch`, checked out at
+/// `tree` (`real`: resolved).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpdateFromBase {
     pub branch: String,
-    pub no_ff: bool,
+    pub base: String,
+    pub tree: PathBuf,
+    pub real: Option<PathBuf>,
+    pub behind: u32,
+}
+
+/// The tree (and branch) to remove once its branch is merged into `base`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CleanAfterMerge {
+    pub tree: PathBuf,
+    pub branch: String,
+    pub base: String,
+}
+
+impl App {
+    /// Merges `branch` in the active tab; with `clean`, removes the merged
+    /// tree and branch once the merge is done without conflicts.
+    ///
+    /// Then the merge is not recorded for ⌘Z: undoing it would leave the
+    /// branch's commits on no branch.
+    pub(super) fn merge_then_clean(
+        &mut self,
+        branch: String,
+        no_ff: bool,
+        clean: Option<CleanAfterMerge>,
+    ) -> Task<Message> {
+        let Some(clean) = clean else {
+            return self.run_merge(branch, no_ff);
+        };
+        let Some(id) = self.active_tab().map(|t| t.repo.id()) else {
+            return Task::none();
+        };
+        self.clean_after_merge = Some((id, clean));
+        self.run_merge_recorded(branch, no_ff, false)
+    }
+
+    /// The merge in `id` ended: removes what [`Self::merge_then_clean`]
+    /// set aside when it went through, else says how to do it later.
+    pub(super) fn clean_after_merge(
+        &mut self,
+        id: RepoId,
+        result: &Result<gf_git::Integration, String>,
+    ) -> Task<Message> {
+        let Some((_, clean)) = self.clean_after_merge.take_if(|(r, _)| *r == id) else {
+            return Task::none();
+        };
+        match result {
+            Ok(gf_git::Integration::Done) => {
+                let CleanAfterMerge { tree, branch, base } = clean;
+                let trees = vec![(tree.clone(), Some(branch.clone()))];
+                self.op(
+                    format!("remove worktree {} and branch {branch}", tilde(&tree)),
+                    OpKind::RemoveWorktrees(vec![tree]),
+                    move |r| async move {
+                        super::dialogs::cleanup_worktrees(&r, &base, &trees, true).await
+                    },
+                )
+            }
+            Ok(gf_git::Integration::Conflicts(_)) => {
+                self.log.note(
+                    NoteKind::Info,
+                    format!("{} was left as it is", tilde(&clean.tree)),
+                    vec!["finish the merge, then remove it from the worktrees panel".into()],
+                );
+                Task::none()
+            }
+            Err(_) => Task::none(),
+        }
+    }
 }
 
 /// `cwd` (a tab's folder, resolved) is the tree at `path` (`real`: resolved).

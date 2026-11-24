@@ -572,6 +572,11 @@ impl Repository {
     pub async fn default_base(&self) -> Result<Option<String>> {
         gix_then_cli!(self, WorktreeOps::default_base())
     }
+    /// Whether `git pull` on `branch` in the tree at `path` rebases (see
+    /// `WorktreeOps::pull_rebases`).
+    pub async fn pull_rebases(&self, path: &Path, branch: &str) -> Result<bool> {
+        gix_then_cli!(self, WorktreeOps::pull_rebases(path, branch))
+    }
     /// The branch work in this tree goes back into, when it is known for
     /// sure: recorded for the branch checked out here (`gf-base`,
     /// `gh-merge-base`) or named by its creation. `None` when it is only a

@@ -93,6 +93,37 @@ pub struct WorktreeStatus {
     /// Newest modification time among the changed files: whether someone
     /// (an agent) is editing in this tree right now.
     pub last_activity: Option<SystemTime>,
+    /// Files the work here touches, sorted: changed by its commits since
+    /// [`Self::merge_base`] (renames as both paths) and changed, staged or
+    /// untracked now (an untracked folder ends in `/`). `None` when there
+    /// are more than [`TOUCHED_CAP`]: too many to compare usefully.
+    pub touched: Option<Vec<PathBuf>>,
+}
+
+/// Most files [`WorktreeStatus::touched`] lists.
+pub const TOUCHED_CAP: usize = 2000;
+
+/// [`WorktreeStatus::touched`]: `committed` and the uncommitted paths of
+/// `report`, sorted and once each.
+pub(crate) fn touched(report: &StatusReport, mut committed: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+    for e in &report.entries {
+        match e {
+            StatusEntry::Ignored { .. } => {}
+            StatusEntry::Changed {
+                path, orig_path, ..
+            } => {
+                committed.push(path.clone());
+                committed.extend(orig_path.clone());
+            }
+            other => committed.push(other.path().clone()),
+        }
+        if committed.len() > 2 * TOUCHED_CAP {
+            return None;
+        }
+    }
+    committed.sort_unstable();
+    committed.dedup();
+    (committed.len() <= TOUCHED_CAP).then_some(committed)
 }
 
 impl WorktreeStatus {
@@ -431,6 +462,27 @@ impl WorktreeOps for CliBackend {
                 s.base_guessed = guessed;
             }
         }
+        // What its commits changed, when it has any of its own.
+        let committed = match (&s.merge_base, s.ahead_of_base) {
+            (Some(fork), 1..) => {
+                let fork = fork.to_string();
+                let args = [
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    "--no-renames",
+                    "--no-ext-diff",
+                    "--end-of-options",
+                    &fork,
+                    "HEAD",
+                ];
+                self.read_in(path, &args)
+                    .await
+                    .map(|o| crate::ops::log::parse_tree_paths(&o))
+            }
+            _ => Some(Vec::new()),
+        };
+        s.touched = committed.and_then(|c| touched(&report, c));
         let mut newest = None;
         for e in report
             .entries
@@ -447,6 +499,18 @@ impl WorktreeOps for CliBackend {
         }
         s.last_activity = newest;
         Ok(s)
+    }
+
+    async fn pull_rebases(&self, path: &Path, branch: &str) -> Result<bool> {
+        let key = format!("branch.{branch}.rebase");
+        let value = match self.line_in(path, &["config", "--get", &key]).await {
+            Some(v) => Some(v),
+            None => {
+                self.line_in(path, &["config", "--get", "pull.rebase"])
+                    .await
+            }
+        };
+        Ok(value.as_deref().is_some_and(rebases))
     }
 
     async fn default_base(&self) -> Result<Option<String>> {
@@ -507,8 +571,62 @@ impl WorktreeOps for CliBackend {
     }
 }
 
+/// A `pull.rebase` / `branch.<b>.rebase` value asks for a rebase: any but
+/// git's false (`false`, `no`, `off`, `0`).
+pub(crate) fn rebases(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "false" | "no" | "off" | "0" | ""
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn touched_joins_commits_and_changes_up_to_the_cap() {
+        use gf_core::model::{StatusEntry, StatusReport};
+        use std::path::PathBuf;
+        let report = StatusReport {
+            entries: vec![
+                StatusEntry::Untracked {
+                    path: "new/".into(),
+                },
+                StatusEntry::Ignored {
+                    path: "target/".into(),
+                },
+            ],
+            ..StatusReport::default()
+        };
+        let committed = vec![PathBuf::from("b.rs"), PathBuf::from("a.rs")];
+        assert_eq!(
+            super::touched(&report, committed),
+            Some(vec!["a.rs".into(), "b.rs".into(), "new/".into()])
+        );
+        let many = (0..=super::TOUCHED_CAP)
+            .map(|i| PathBuf::from(format!("f{i}")))
+            .collect();
+        assert_eq!(super::touched(&report, many), None, "past the cap");
+    }
+
+    #[test]
+    fn pull_rebase_values_read_like_git() {
+        for v in [
+            "true",
+            "merges",
+            "interactive",
+            "i",
+            "m",
+            "yes",
+            "1",
+            "TRUE",
+        ] {
+            assert!(super::rebases(v), "{v}");
+        }
+        for v in ["false", "no", "off", "0", " False "] {
+            assert!(!super::rebases(v), "{v}");
+        }
+    }
+
     use super::*;
 
     #[test]

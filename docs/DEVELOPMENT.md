@@ -74,7 +74,7 @@ src/
 │  ├─ undoing.rs     ⌘Z/⌘⇧Z: 가드 확인 → (확인창) → 복원, undo 목록
 │  ├─ dialogs.rs     공통 확인 다이얼로그(Confirm, Purpose)
 │  ├─ focus.rs       키 라우팅(메뉴→다이얼로그→입력창→패널), 패널 테두리
-│  ├─ worktree_ops.rs  worktrees 패널의 Output 처리(열기, 제거, merge into base …)
+│  ├─ worktree_ops.rs  worktrees 패널의 Output 처리(열기, 제거, merge into base, update from base …)
 │  ├─ branch_delete.rs 여러 ref를 골라 한 번에 삭제
 │  ├─ reveal.rs      blame 등에서 커밋을 히스토리에서 찾아 선택·스크롤
 │  ├─ settings.rs    설정 화면(섹션별) → 공유 설정, 서버 로그인(ACCOUNTS: 토큰 상태·확인)과 인증 실패 시 로그인 후 재실행

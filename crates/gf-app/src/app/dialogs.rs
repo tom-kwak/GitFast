@@ -198,12 +198,17 @@ pub enum Purpose {
     LockWorktree(PathBuf, bool),
     PruneWorktrees,
     /// Merge `branch` into its base, checked out in the tree at `into`
-    /// (`real`: resolved). Check: always a merge commit.
+    /// (`real`: resolved). Checks: always a merge commit; then remove
+    /// `clean` (offered only when there is one).
     MergeIntoBase {
         branch: String,
         into: PathBuf,
         real: Option<PathBuf>,
+        clean: Option<super::worktree_ops::CleanAfterMerge>,
     },
+    /// Bring the base's new commits into a tree's branch. Check: rebase
+    /// instead of merge.
+    UpdateFromBase(super::worktree_ops::UpdateFromBase),
     /// Field: the local branch `branch` goes back into; empty forgets it
     /// (it is guessed again). `local`: the branches that can be.
     SetBranchBase {
@@ -416,7 +421,9 @@ impl App {
         self.open_dialog(dialog)
     }
 
-    pub(super) fn new_worktree_dialog(&mut self) -> Task<Message> {
+    /// Asks for a new worktree; `branch`: the branch field filled in
+    /// (picked from the branch menu).
+    pub(super) fn new_worktree_dialog(&mut self, branch: Option<String>) -> Task<Message> {
         let Some(tab) = self.active_tab() else {
             return Task::none();
         };
@@ -464,9 +471,15 @@ impl App {
             .as_ref()
             .map(|snap| branch_suggestions(&snap.branches, &checked_out))
             .unwrap_or_default();
+        let body = branch.as_ref().map_or_else(
+            || "Check a branch out in its own folder.".to_owned(),
+            |b| format!("Check {b} out in its own folder."),
+        );
+        // An existing branch was picked: where a new one starts is moot.
+        let picked = branch.is_some();
         let mut dialog = Dialog::confirm(
             "New worktree",
-            vec!["Check a branch out in its own folder.".into()],
+            vec![body],
             "Add",
             Purpose::AddWorktree {
                 root: root.clone(),
@@ -475,15 +488,23 @@ impl App {
                 checked_out,
             },
         )
-        .field("branch", "", "new or existing branch")
-        .suggest(suggestions, "no such branch — a new one is made")
+        .field(
+            "branch",
+            branch.clone().unwrap_or_default(),
+            "new or existing branch",
+        )
+        .suggest(suggestions, "new branch")
         .field(
             "folder",
             "",
-            format!("{}/<branch>", crate::widgets::format::tilde(&root)),
+            // The folder it gets, once the branch is known.
+            branch.as_deref().map_or_else(
+                || format!("{}/<branch>", crate::widgets::format::tilde(&root)),
+                |b| crate::widgets::format::tilde(&root.join(worktree_folder_name(b))),
+            ),
         )
         .check("open it in a tab", true);
-        if let Some(base) = base {
+        if let Some(base) = base.filter(|_| !picked) {
             // From a branch work goes into (develop), start there; from a
             // feature branch, at the base.
             let at_head = ["main", "master", "develop", "development", "dev", "trunk"]
@@ -1013,8 +1034,26 @@ impl App {
                     move |r| async move { r.lock_worktree(&path, locked).await },
                 )
             }
-            Purpose::MergeIntoBase { branch, into, real } => {
-                self.merge_in_tree(branch, into, real.as_deref(), check(0))
+            Purpose::MergeIntoBase {
+                branch,
+                into,
+                real,
+                clean,
+            } => {
+                let clean = clean.filter(|_| check(1));
+                self.merge_in_tree(branch, into, real.as_deref(), check(0), clean)
+            }
+            Purpose::UpdateFromBase(u) => {
+                let what = if check(0) {
+                    super::worktree_ops::Integrate::Rebase { onto: u.base }
+                } else {
+                    super::worktree_ops::Integrate::Merge {
+                        branch: u.base,
+                        no_ff: false,
+                        clean: None,
+                    }
+                };
+                self.integrate_in_tree(u.tree, u.real.as_deref(), what)
             }
             Purpose::SetBranchBase { branch, .. } => {
                 let base = Some(value(0)).filter(|b| !b.is_empty());
@@ -1260,7 +1299,7 @@ pub(super) fn worktree_label(path: &std::path::Path) -> String {
 /// branches). Each tree is checked again first: still clean and with no
 /// commit outside `base` — it may have changed since the dialog opened.
 /// Goes on past a failing tree and reports the failures at the end.
-async fn cleanup_worktrees(
+pub(super) async fn cleanup_worktrees(
     r: &gf_git::Repository,
     base: &str,
     trees: &[(PathBuf, Option<String>)],

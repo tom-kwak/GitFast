@@ -118,6 +118,23 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Shortens a path to `max` characters by dropping whole leading folders
+/// (`…/gf-worktrees/<branch>`), so the end, which tells paths apart, stays.
+pub fn truncate_front(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len <= max {
+        return s.to_owned();
+    }
+    let keep = max.saturating_sub(1);
+    let tail: String = s.chars().skip(len - keep).collect();
+    // Start at a separator when there is one, so no folder is cut in half.
+    let tail = match tail.find(crate::platform::is_path_sep) {
+        Some(at) if at + 1 < tail.len() => &tail[at..],
+        _ => tail.as_str(),
+    };
+    format!("…{tail}")
+}
+
 /// Truncates to `max` display columns (wide characters count two) with a
 /// trailing `…`, so monospace columns line up.
 pub fn truncate_columns(s: &str, max: usize) -> String {
@@ -278,6 +295,12 @@ mod tests {
     fn truncates_and_expands() {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("abc", 4), "abc");
+        assert_eq!(truncate_front("/a/b", 8), "/a/b");
+        assert_eq!(
+            truncate_front("/home/me/repo-worktrees/<branch>", 26),
+            "…/repo-worktrees/<branch>"
+        );
+        assert_eq!(truncate_front("abcdefghij", 5), "…ghij");
         if let Some(home) = crate::platform::home_dir() {
             assert_eq!(expand_tilde("~/x"), home.join("x"));
             assert_eq!(expand_tilde("~"), home);

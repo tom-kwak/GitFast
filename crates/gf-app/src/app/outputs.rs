@@ -741,6 +741,7 @@ impl App {
             sidebar::Output::Merge(branch) => self.ask_merge(branch),
             sidebar::Output::RebaseOnto(onto) => self.ask_rebase_onto(onto),
             sidebar::Output::Compare(branch) => self.show_compare(&branch),
+            sidebar::Output::NewWorktree(branch) => self.new_worktree_dialog(Some(branch)),
             sidebar::Output::Collapse => self.on_shortcut(Shortcut::ToggleRefs),
             sidebar::Output::StashDrop(i) => self.confirm(
                 Confirm::delete(

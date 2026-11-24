@@ -279,6 +279,8 @@ pub enum Action {
     RebaseOnto,
     /// Show the diff between the current branch and the selected one.
     Compare,
+    /// Check the selected branch out in a new worktree.
+    NewWorktree,
     /// Open the selected submodule in a new tab.
     Open,
     UpdateSubmodules,
@@ -321,6 +323,8 @@ pub enum Output {
     RebaseOnto(String),
     /// Diff the checked-out commit against this branch.
     Compare(Branch),
+    /// Ask for a new worktree with this (local) branch checked out.
+    NewWorktree(String),
     /// Open a repository folder (a submodule) in a new tab.
     OpenRepo(std::path::PathBuf),
     UpdateSubmodules,
@@ -1101,6 +1105,17 @@ impl State {
             };
             item('o', "checkout", hint, Action::Checkout)
         };
+        // A branch another worktree has cannot go to a new one too.
+        let new_worktree = || {
+            (!held_elsewhere).then(|| {
+                item(
+                    'w',
+                    "new worktree…",
+                    "check it out in its own folder",
+                    Action::NewWorktree,
+                )
+            })
+        };
         let merge = || {
             item(
                 'm',
@@ -1140,26 +1155,49 @@ impl State {
                     item('r', "rename…", "change the branch name", Action::Rename),
                     item('p', "push", "send its commits to the remote", Action::Push),
                 ],
-                Some(b) if b.name.kind() == RefKind::LocalBranch => vec![
-                    checkout(),
-                    merge(),
-                    rebase(),
-                    compare(),
-                    Entry::Separator,
-                    item('r', "rename…", "change the branch name", Action::Rename),
-                    item('p', "push", "send its commits to the remote", Action::Push),
-                    Entry::Separator,
-                    danger('d', "delete…", "remove the branch", Action::Delete),
-                ],
-                Some(_) => vec![
-                    checkout(),
-                    merge(),
-                    rebase(),
-                    compare(),
-                    branch_here(),
-                    Entry::Separator,
-                    danger('d', "delete…", "remove it on the remote", Action::Delete),
-                ],
+                Some(b) if b.name.kind() == RefKind::LocalBranch => [
+                    Some(checkout()),
+                    new_worktree(),
+                    Some(merge()),
+                    Some(rebase()),
+                    Some(compare()),
+                    Some(Entry::Separator),
+                    Some(item(
+                        'r',
+                        "rename…",
+                        "change the branch name",
+                        Action::Rename,
+                    )),
+                    Some(item(
+                        'p',
+                        "push",
+                        "send its commits to the remote",
+                        Action::Push,
+                    )),
+                    Some(Entry::Separator),
+                    Some(danger('d', "delete…", "remove the branch", Action::Delete)),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+                Some(_) => [
+                    Some(checkout()),
+                    new_worktree(),
+                    Some(merge()),
+                    Some(rebase()),
+                    Some(compare()),
+                    Some(branch_here()),
+                    Some(Entry::Separator),
+                    Some(danger(
+                        'd',
+                        "delete…",
+                        "remove it on the remote",
+                        Action::Delete,
+                    )),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
                 None => vec![
                     item('p', "push", "publish the tag to the remote", Action::Push),
                     Entry::Separator,
@@ -1262,6 +1300,16 @@ impl State {
                         Action::Merge => Some(Output::Merge(b.name.short().to_owned())),
                         Action::RebaseOnto => Some(Output::RebaseOnto(b.name.short().to_owned())),
                         Action::Compare if !b.is_head => Some(Output::Compare(b.clone())),
+                        Action::NewWorktree if !b.is_head => {
+                            let short = b.name.short();
+                            let local = match b.name.kind() {
+                                RefKind::RemoteBranch => {
+                                    short.split_once('/').map_or(short, |(_, name)| name)
+                                }
+                                _ => short,
+                            };
+                            Some(Output::NewWorktree(local.to_owned()))
+                        }
                         _ => None,
                     }
                 } else {
@@ -1603,6 +1651,44 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_no_worktree_has_can_go_to_a_new_one() {
+        let mut snap = snap();
+        let mut s = State::default();
+        let _ = s.update_with(
+            Message::Select(Selection::Ref("refs/heads/dev".into())),
+            Some(&snap),
+        );
+        let offers = |s: &State, snap: &Snapshot| {
+            s.menu(snap)
+                .expect("menu")
+                .entries
+                .iter()
+                .any(|e| matches!(e, Entry::Item { key: 'w', .. }))
+        };
+        assert!(offers(&s, &snap));
+        let out = s
+            .update_with(Message::Act(Action::NewWorktree), Some(&snap))
+            .output;
+        assert!(matches!(out, Some(Output::NewWorktree(b)) if b == "dev"));
+        // Held by another worktree: that one is opened instead (checkout).
+        snap.worktrees = vec![gf_git::Worktree {
+            path: "/wt/dev".into(),
+            head: None,
+            branch: Some("dev".into()),
+            bare: false,
+            locked: false,
+            prunable: false,
+        }];
+        assert!(!offers(&s, &snap));
+        // The checked-out branch is already in this worktree.
+        let _ = s.update_with(
+            Message::Select(Selection::Ref("refs/heads/main".into())),
+            Some(&snap),
+        );
+        assert!(!offers(&s, &snap));
+    }
+
+    #[test]
     fn filter_is_case_insensitive() {
         let mut s = State::default();
         let _ = s.update(Message::Filter("FEAT".into()));
@@ -1678,7 +1764,7 @@ mod tests {
                 Entry::Separator => None,
             })
             .collect();
-        assert_eq!(keys, vec!['o', 'm', 'e', 'c', 'r', 'p', 'd']);
+        assert_eq!(keys, vec!['o', 'w', 'm', 'e', 'c', 'r', 'p', 'd']);
         // The checked-out branch cannot be merged into itself.
         let _ = s.update_with(
             Message::RightClick(Selection::Ref("refs/heads/main".into())),
