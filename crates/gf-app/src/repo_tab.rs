@@ -898,6 +898,11 @@ pub struct RepoTab {
     /// Parts asked for and not read yet: while a refresh runs, or while
     /// the tab is in the background (see [`RepoTab::load_due`]).
     pub queued: Parts,
+    /// Another tree of the repository changed the refs or the worktrees
+    /// they all share: read the refs when the tab is next shown. Nothing on
+    /// a background tab shows them (its label is its own HEAD), so this
+    /// waits, unlike [`Self::queued`] refs.
+    pub shared_refs_stale: bool,
     /// Files changed for the queued parts.
     pub touched: Touched,
     /// Files changed for the refresh that is running.
@@ -957,6 +962,7 @@ impl RepoTab {
             refresh_asked: false,
             // Read by `App::load_due` once the tab's turn comes.
             queued: Parts::RELOAD,
+            shared_refs_stale: false,
             touched: Touched::all(),
             loading_touched: Touched::default(),
             error: None,
