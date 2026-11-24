@@ -5,21 +5,31 @@
 //! overlay right under it, as wide as it, on top of everything (the rows
 //! below do not move). Built like iced's tooltip: the list lives in the
 //! base's widget tree, so its buttons keep working as usual.
+//!
+//! A press anywhere but on the base or the list closes it (`on_dismiss`),
+//! and still does what it does there (focus another field, pick an
+//! option …).
 
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, overlay, renderer};
 use iced::{Element, Event, Length, Point, Rectangle, Size, Vector, mouse};
 
-/// `base` with `list` (when `Some`) dropped down under it.
-pub fn dropdown<'a, M: 'a>(
+/// `base` with `list` (when `Some`) dropped down under it, as wide as
+/// `base` less `trailing` (a ▾ button at its end the list leaves
+/// uncovered). A press outside both publishes `on_dismiss`.
+pub fn dropdown<'a, M: Clone + 'a>(
     base: impl Into<Element<'a, M>>,
     list: Option<Element<'a, M>>,
+    trailing: f32,
+    on_dismiss: M,
 ) -> Element<'a, M> {
     let open = list.is_some();
     Element::new(Dropdown {
         base: base.into(),
         list: list.unwrap_or_else(|| iced::widget::space().into()),
         open,
+        trailing,
+        on_dismiss,
     })
 }
 
@@ -27,9 +37,11 @@ struct Dropdown<'a, M> {
     base: Element<'a, M>,
     list: Element<'a, M>,
     open: bool,
+    trailing: f32,
+    on_dismiss: M,
 }
 
-impl<M> Widget<M, iced::Theme, iced::Renderer> for Dropdown<'_, M> {
+impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Dropdown<'_, M> {
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.base), Tree::new(&self.list)]
     }
@@ -146,13 +158,15 @@ impl<M> Widget<M, iced::Theme, iced::Renderer> for Dropdown<'_, M> {
             self.base
                 .as_widget_mut()
                 .overlay(base_tree, layout, renderer, viewport, translation);
-        let bounds = layout.bounds();
+        let bounds = layout.bounds() + translation;
         let list = self.open.then(|| {
             overlay::Element::new(Box::new(List {
                 list: &mut self.list,
                 tree: list_tree,
-                position: Point::new(bounds.x, bounds.y + bounds.height) + translation,
-                width: bounds.width,
+                position: Point::new(bounds.x, bounds.y + bounds.height),
+                width: (bounds.width - self.trailing).max(0.0),
+                anchor: bounds,
+                on_dismiss: self.on_dismiss.clone(),
             }))
         });
         let all: Vec<_> = base.into_iter().chain(list).collect();
@@ -166,9 +180,12 @@ struct List<'a, 'b, M> {
     tree: &'b mut Tree,
     position: Point,
     width: f32,
+    /// The base, where a press leaves the list open.
+    anchor: Rectangle,
+    on_dismiss: M,
 }
 
-impl<M> overlay::Overlay<M, iced::Theme, iced::Renderer> for List<'_, '_, M> {
+impl<M: Clone> overlay::Overlay<M, iced::Theme, iced::Renderer> for List<'_, '_, M> {
     fn layout(&mut self, renderer: &iced::Renderer, bounds: Size) -> layout::Node {
         let room = (bounds.height - self.position.y).max(0.0);
         let limits = layout::Limits::new(Size::new(self.width, 0.0), Size::new(self.width, room));
@@ -206,6 +223,14 @@ impl<M> overlay::Overlay<M, iced::Theme, iced::Renderer> for List<'_, '_, M> {
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, M>,
     ) {
+        // Not captured: what is under the pointer still gets the press.
+        if let Event::Mouse(mouse::Event::ButtonPressed(_)) = event
+            && let Some(at) = cursor.position()
+            && !layout.bounds().contains(at)
+            && !self.anchor.contains(at)
+        {
+            shell.publish(self.on_dismiss.clone());
+        }
         self.list.as_widget_mut().update(
             self.tree,
             event,

@@ -565,6 +565,19 @@ impl<P: Clone> Dialog<P> {
         self
     }
 
+    /// Puts a row of options (see [`Self::options_in_a_row`]) into a
+    /// dialog already open, or takes it out with `None`.
+    pub fn set_options_in_a_row(&mut self, row: Option<(String, Vec<Opt>, usize)>) {
+        self.choice = row.map(|(label, options, selected)| Choice {
+            label,
+            options,
+            selected,
+            inline: false,
+            hovered: None,
+            in_a_row: true,
+        });
+    }
+
     /// A line with a button that opens a page (see [`Link`]).
     pub fn link(mut self, link: Link) -> Self {
         self.link = Some(link);
@@ -872,13 +885,17 @@ impl<P: Clone> Dialog<P> {
                 // The list drops down under the input alone (▾ stays
                 // beside it), and only when there is something to pick.
                 let list = (f.open && !f.matches().is_empty()).then(|| suggestion_list(t, i, f));
-                row![
-                    widgets::dropdown::dropdown(input, list),
-                    widgets::tip(t, toggle, "existing ones  ↓".into())
-                ]
-                .spacing(2)
-                .align_y(iced::Alignment::Center)
-                .into()
+                // The ▾ is part of the base: pressing it toggles the list
+                // rather than dismissing it first.
+                let base = row![input, widgets::tip(t, toggle, "existing ones  ↓".into())]
+                    .spacing(2)
+                    .align_y(iced::Alignment::Center);
+                widgets::dropdown::dropdown(
+                    base,
+                    list,
+                    toggle_width + 2.0,
+                    Message::CloseSuggestions,
+                )
             };
             // What is typed matches nothing: said beside the label, so
             // nothing below is covered.
