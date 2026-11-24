@@ -394,17 +394,12 @@ impl App {
         )
         .field("server", server, "github.com")
         .suggest(servers, "not a server of the open tabs");
-        let options = Provider::ALL
-            .iter()
-            .map(|p| Opt::new(p.pick_label()))
-            .collect();
-        let selected = service_index(provider);
         let mut dialog = dialog
             .field("user name", user, "your user name on the server")
             .field("token", "", "personal access token or password")
             .secret()
-            .options_in_a_row("service", options, selected)
             .link(token_link(known.as_ref(), provider));
+        dialog.set_options_in_a_row(service_row(known.as_ref(), provider));
         dialog.error = ask.error;
         let task = self.open_dialog(dialog);
         match first_empty {
@@ -422,9 +417,10 @@ impl App {
     }
 
     /// Keeps the log-in dialog in step after one of its messages: a
-    /// server typed in picks its service again, and the token line
-    /// follows the server and the service. `server_before` is the server
-    /// field's value before the message.
+    /// server typed in picks its service again (and shows the service
+    /// row only when its name tells nothing), and the token line follows
+    /// the server and the service. `server_before` is the server field's
+    /// value before the message.
     pub(super) fn sync_login_dialog(&mut self, server_before: Option<&str>) {
         let Some(server) = self
             .dialog
@@ -436,21 +432,20 @@ impl App {
             return;
         };
         let known = credential::server_of(&server);
-        let guess = (server_before != Some(server.as_str()))
-            .then(|| service_index(self.service_of(known.as_ref())));
+        let guessed = self.service_of(known.as_ref());
+        let typed = server_before != Some(server.as_str());
         let Some(dialog) = self.dialog.as_mut() else {
             return;
         };
-        let Some(choice) = dialog.choice.as_mut() else {
-            return;
-        };
-        if let Some(i) = guess {
-            choice.selected = i;
+        if typed {
+            dialog.set_options_in_a_row(service_row(known.as_ref(), guessed));
         }
-        let provider = Provider::ALL
-            .get(choice.selected)
-            .copied()
-            .unwrap_or(Provider::Other);
+        // A pick holds while the other fields are typed in.
+        let provider = dialog
+            .choice
+            .as_ref()
+            .and_then(|c| Provider::ALL.get(c.selected).copied())
+            .unwrap_or(guessed);
         dialog.link = Some(token_link(known.as_ref(), provider));
     }
 
@@ -982,12 +977,35 @@ fn service_index(provider: Provider) -> usize {
         .unwrap_or(Provider::ALL.len() - 1)
 }
 
+/// The log-in dialog's service row, asked only for a server whose name
+/// tells nothing (a self-hosted `git.example.com`); `github.com` and the
+/// like need no pick. `provider` is the one selected.
+fn service_row(
+    server: Option<&(String, String)>,
+    provider: Provider,
+) -> Option<(String, Vec<Opt>, usize)> {
+    server
+        .filter(|(_, host)| Provider::of(host) == Provider::Other)
+        .map(|_| {
+            let options = Provider::ALL
+                .iter()
+                .map(|p| Opt::new(p.pick_label()))
+                .collect();
+            ("service".to_owned(), options, service_index(provider))
+        })
+}
+
 /// The log-in dialog's token line: what to make and, for a known service,
-/// a button to the page that makes it.
+/// a button to the page that makes it. It names the service, as the row
+/// to pick one is left out where the name tells it.
 fn token_link(server: Option<&(String, String)>, provider: Provider) -> Link {
     let page = server.and_then(|(protocol, host)| provider.token_page(protocol, host));
+    let hint = provider.token_hint();
     Link {
-        text: format!("Use {} as the password.", provider.token_hint()),
+        text: match provider {
+            Provider::Other => format!("Use {hint} as the password."),
+            p => format!("{}: use {hint} as the password.", p.name()),
+        },
         open: page.map(|page| ("Get token ↗".to_owned(), page)),
     }
 }

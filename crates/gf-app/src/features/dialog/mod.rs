@@ -565,6 +565,19 @@ impl<P: Clone> Dialog<P> {
         self
     }
 
+    /// Puts a row of options (see [`Self::options_in_a_row`]) into a
+    /// dialog already open, or takes it out with `None`.
+    pub fn set_options_in_a_row(&mut self, row: Option<(String, Vec<Opt>, usize)>) {
+        self.choice = row.map(|(label, options, selected)| Choice {
+            label,
+            options,
+            selected,
+            inline: false,
+            hovered: None,
+            in_a_row: true,
+        });
+    }
+
     /// A line with a button that opens a page (see [`Link`]).
     pub fn link(mut self, link: Link) -> Self {
         self.link = Some(link);
