@@ -338,9 +338,45 @@ async fn worktrees() {
         list.iter().map(|w| w.branch.clone()).collect::<Vec<_>>()
     );
     assert_ne!(from_linked[0].branch.as_deref(), Some("side"));
+    assert!(linked.is_linked_worktree());
+    assert!(!r.is_linked_worktree());
 
     r.remove_worktree(&path, false).await.unwrap();
     assert_eq!(r.worktrees().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn work_base_is_only_the_one_known_for_sure() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.commit_all("a");
+    repo.git(&["branch", "develop"]);
+    // No message: nothing names where it came from.
+    repo.git(&["update-ref", "refs/heads/loose", "HEAD"]);
+    let r = open(&repo).await;
+    let extra = tempfile::tempdir().unwrap();
+    let made = extra.path().join("made");
+    r.add_worktree(&made, "feature/x", true, Some("develop"))
+        .await
+        .unwrap();
+    let linked = gf_git::Repository::open(&made, common::runner(&repo))
+        .await
+        .unwrap();
+    assert_eq!(
+        linked.work_base().await.unwrap().as_deref(),
+        Some("develop")
+    );
+    // Nothing records where `loose` came from: a guess is not enough.
+    let guessed = extra.path().join("loose");
+    r.add_worktree(&guessed, "loose", false, None)
+        .await
+        .unwrap();
+    let linked = gf_git::Repository::open(&guessed, common::runner(&repo))
+        .await
+        .unwrap();
+    assert_eq!(linked.work_base().await.unwrap(), None);
+    // On the default base itself: nothing to go back into.
+    assert_eq!(r.work_base().await.unwrap(), None);
 }
 
 #[tokio::test]

@@ -38,6 +38,7 @@ use iced::{Background, Border, Element, Length, Padding, mouse};
 
 use crate::feature::{Cx, Feature, Update};
 use crate::theme::{Tokens, style};
+use crate::widgets::fuzzy::{self, fuzzy};
 use crate::widgets::{self, colored, dim, format, mono};
 
 /// Id of the filter field (focused when the window opens).
@@ -532,7 +533,7 @@ fn matches(
                 return Some((0, index, Vec::new()));
             }
             if let Some((score, marks)) = fuzzy(query, &e.name) {
-                return Some((score + 1000, index, marks));
+                return Some((score + fuzzy::RANK, index, marks));
             }
             fuzzy(query, &format::tilde(&e.path)).map(|(score, _)| (score, index, Vec::new()))
         })
@@ -593,31 +594,6 @@ fn path_items(
         None => Item::Found(f),
     }));
     (items, dir)
-}
-
-/// Case-insensitive subsequence match of `needle` in `hay`: a score
-/// (higher is better: consecutive letters and word starts count more) and
-/// the char positions matched.
-pub(crate) fn fuzzy(needle: &str, hay: &str) -> Option<(i32, Vec<usize>)> {
-    let hay: Vec<char> = hay.chars().collect();
-    let mut marks = Vec::new();
-    let mut score = 0;
-    let mut from = 0;
-    for n in needle.chars().filter(|c| !c.is_whitespace()) {
-        let n = n.to_lowercase().next().unwrap_or(n);
-        let at = (from..hay.len()).find(|&i| hay[i].to_lowercase().next() == Some(n))?;
-        score += 1;
-        if marks.last().is_some_and(|&last: &usize| last + 1 == at) {
-            score += 5;
-        }
-        if at == 0 || matches!(hay[at - 1], '/' | '\\' | '-' | '_' | '.' | ' ') {
-            score += 8;
-        }
-        score -= i32::try_from(at - from).unwrap_or(i32::MAX).min(10) / 4;
-        marks.push(at);
-        from = at + 1;
-    }
-    Some((score, marks))
 }
 
 fn row_height(t: &Tokens) -> f32 {
@@ -1004,11 +980,10 @@ mod tests {
     }
 
     #[test]
-    fn word_starts_and_runs_score_higher() {
-        let (a, marks) = fuzzy("gd", "github-desktop").unwrap();
+    fn word_starts_match_and_loose_letters_do_not() {
+        let (_, marks) = fuzzy("gd", "github-desktop").unwrap();
         assert_eq!(marks, [0, 7]);
-        let (b, _) = fuzzy("gd", "xgxxxxxd").unwrap();
-        assert!(a > b);
+        assert!(fuzzy("gd", "xgxxxxxd").is_none(), "letters from anywhere");
         assert!(fuzzy("zz", "gf").is_none());
     }
 

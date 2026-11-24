@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 use gf_core::model::Oid;
 
+use crate::widgets::fuzzy;
+
 #[derive(Debug, Clone)]
 struct Candidate {
     path: PathBuf,
@@ -58,99 +60,19 @@ impl Index {
                 .collect();
         }
 
-        let needle: Vec<char> = query
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .map(lower)
-            .collect();
+        let needle = fuzzy::needle(query);
         let mut scored: Vec<_> = self
             .candidates
             .iter()
             .enumerate()
             .filter_map(|(candidate, entry)| {
-                path_match(&needle, &entry.key)
+                fuzzy::score(&needle, &entry.key)
                     .map(|(score, marks)| (score, Hit { candidate, marks }))
             })
             .collect();
         scored.sort_by_key(|(score, _)| Reverse(*score));
         scored.into_iter().map(|(_, hit)| hit).collect()
     }
-}
-
-fn lower(c: char) -> char {
-    c.to_lowercase().next().unwrap_or(c)
-}
-
-fn boundary(hay: &[char], at: usize) -> bool {
-    at == 0 || matches!(hay[at - 1], '/' | '-' | '_' | '.' | ' ')
-}
-
-/// Scores `hay` (a repository path) against `needle` (lowercase, no
-/// spaces) and returns the character indices to highlight.
-///
-/// A contiguous match wins over a scattered one, and the file name over
-/// the folders: `core` marks `core` in `src/core.rs`, not the `c` of `src`.
-/// Scattered matches try every start and keep the best-scoring one, rather
-/// than the first letters found from the left.
-fn path_match(needle: &[char], hay: &str) -> Option<(i32, Vec<usize>)> {
-    let hay: Vec<char> = hay.chars().collect();
-    let low: Vec<char> = hay.iter().copied().map(lower).collect();
-    let n = needle.len();
-    if n == 0 || n > low.len() {
-        return None;
-    }
-    let name_start = hay.iter().rposition(|&c| c == '/').map_or(0, |i| i + 1);
-    let in_name = |at: usize| if at >= name_start { 20 } else { 0 };
-
-    // Contiguous: the best occurrence (in the name, at a word start, rightmost).
-    let substring = (0..=low.len() - n)
-        .filter(|&at| low[at..at + n] == *needle)
-        .map(|at| {
-            let score = 1000 + in_name(at) + if boundary(&hay, at) { 10 } else { 0 };
-            (score, at)
-        })
-        .max_by_key(|&(score, at)| (score, at));
-    if let Some((score, at)) = substring {
-        let score = score - i32::try_from(low.len()).unwrap_or(i32::MAX).min(200) / 20;
-        return Some((score, (at..at + n).collect()));
-    }
-
-    // Scattered: greedy from each possible first letter, best score wins.
-    let mut best: Option<(i32, Vec<usize>)> = None;
-    for start in (0..low.len()).filter(|&i| low[i] == needle[0]) {
-        let mut marks = Vec::with_capacity(n);
-        let mut score = 0;
-        let mut from = start;
-        for &c in needle {
-            let Some(at) = (from..low.len()).find(|&i| low[i] == c) else {
-                marks.clear();
-                break;
-            };
-            score += 1;
-            if marks.last().is_some_and(|&last: &usize| last + 1 == at) {
-                score += 5;
-            }
-            if boundary(&hay, at) {
-                score += 8;
-            }
-            if at >= name_start {
-                score += 3;
-            }
-            if !marks.is_empty() {
-                score -= i32::try_from(at - from).unwrap_or(i32::MAX).min(10) / 4;
-            }
-            marks.push(at);
-            from = at + 1;
-        }
-        if marks.len() != n {
-            // A later start cannot match either: it has fewer letters left.
-            break;
-        }
-        if best.as_ref().is_none_or(|(b, _)| score > *b) {
-            best = Some((score, marks));
-        }
-    }
-    best
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,6 +367,38 @@ mod tests {
         assert_eq!(marked(&index, &hits[0]), "MV");
         let hits = index.filter("app main");
         assert_eq!(marked(&index, &hits[0]), "AppMain");
+    }
+
+    #[test]
+    fn scattered_letters_must_start_words() {
+        let index = Index::prepare(
+            [
+                "crates/gf-app/Cargo.toml",
+                "crates/gf-app/src/widgets/memo.rs",
+                "crates/gf-app/src/features/diff_view/mod.rs",
+                "tests/smoke.rs",
+            ]
+            .map(PathBuf::from)
+            .to_vec(),
+        );
+        let found = |q: &str| -> Vec<String> {
+            index
+                .filter(q)
+                .iter()
+                .map(|h| index.label(h.candidate).expect("label").to_owned())
+                .collect()
+        };
+        // t·e·s·t picked out of `Cargo.toml` and folder names is no match.
+        assert_eq!(found("test"), ["tests/smoke.rs"]);
+        assert_eq!(found("readme"), Vec::<String>::new());
+        // Word starts still abbreviate: diff_view/mod, gf-app.
+        assert_eq!(
+            found("dvm"),
+            ["crates/gf-app/src/features/diff_view/mod.rs"]
+        );
+        let hit = &index.filter("dvm")[0];
+        assert_eq!(marked(&index, hit), "dvm");
+        assert_eq!(found("gfacargo"), ["crates/gf-app/Cargo.toml"]);
     }
 
     #[test]

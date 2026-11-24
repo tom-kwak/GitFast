@@ -853,6 +853,10 @@ async fn worktree_status_matches_the_git_cli() {
     };
     in_topic(&["add", "t.txt"]);
     in_topic(&["commit", "-q", "-m", "T: topic\nsecond subject line"]);
+    // A move counts at both paths; an untracked file is touched too.
+    in_topic(&["mv", "a.txt", "moved-a.txt"]);
+    in_topic(&["commit", "-q", "-m", "move a"]);
+    std::fs::write(dir("topic").join("u.txt"), "u\n").unwrap();
     // Just made, nothing of its own; and one whose base is recorded.
     add(&["-b", "fresh", dir("fresh").to_str().unwrap(), "feature"]);
     add(&["-b", "noted", dir("noted").to_str().unwrap()]);
@@ -878,6 +882,15 @@ async fn worktree_status_matches_the_git_cli() {
         dir("detached"),
     ];
     worktree_statuses_match(&repo, &trees, "fixture").await;
+    let topic_status = repo
+        .worktree_status(&dir("topic"), Some("main"))
+        .await
+        .unwrap();
+    assert_eq!(
+        topic_status.touched,
+        Some(paths(&["a.txt", "moved-a.txt", "t.txt", "u.txt"])),
+        "its commits since main and what is not committed"
+    );
 
     // Without origin/HEAD the default falls back to main / master.
     work.git(&["remote", "set-head", "origin", "-d"]);
@@ -899,6 +912,44 @@ async fn worktree_status_of_a_conflict_matches() {
     assert!(!out.status.success());
     let r = open(&repo).await;
     worktree_statuses_match(&r, &[repo.path().to_path_buf()], "conflict").await;
+}
+
+#[tokio::test]
+async fn pull_rebases_matches_the_git_cli() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    repo.commit_all("a");
+    let wt = repo.path().with_extension("pull-rebase-wt");
+    repo.git(&["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()]);
+    let r = open(&repo).await;
+    let check = |what: &'static str| {
+        let (r, wt) = (&r, wt.clone());
+        async move {
+            for branch in ["main", "side", "release.1"] {
+                let wt = wt.clone();
+                same(r, &format!("{what}: {branch}"), |b| {
+                    let wt = wt.clone();
+                    async move { call!(b, WorktreeOps::pull_rebases(&wt, branch)) }
+                })
+                .await;
+            }
+        }
+    };
+    check("unset").await;
+    assert!(!r.pull_rebases(&wt, "side").await.unwrap(), "unset merges");
+    repo.git(&["config", "pull.rebase", "merges"]);
+    check("pull.rebase merges").await;
+    repo.git(&["config", "branch.side.rebase", "false"]);
+    repo.git(&["config", "branch.release.1.rebase", "true"]);
+    check("branch overrides").await;
+    let read = |b: &'static str| {
+        let (r, wt) = (&r, wt.clone());
+        async move { r.pull_rebases(&wt, b).await.unwrap() }
+    };
+    assert!(read("main").await, "pull.rebase merges rebases");
+    assert!(!read("side").await, "the branch's own false wins");
+    assert!(read("release.1").await, "a dotted branch name");
+    let _ = std::fs::remove_dir_all(&wt);
 }
 
 fn paths(list: &[&str]) -> Vec<std::path::PathBuf> {

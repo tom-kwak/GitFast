@@ -169,6 +169,8 @@ pub enum RemoteOp {
 
 #[derive(Debug, PartialEq, Eq)]
 enum CheckoutPhase {
+    /// A linked tree reads its base before switching (see `guard_base`).
+    Guarding(RepoId),
     Measuring(RepoId),
     Running,
     RefreshQueued,
@@ -365,6 +367,16 @@ pub enum Message {
         changed: usize,
         blocked: Result<Vec<PathBuf>, String>,
     },
+    /// The base of a linked tree, read before switching it to `name`.
+    /// Whether `git pull` rebases in the tree an update from its base
+    /// runs in: the dialog's default.
+    UpdateModeRead(worktree_ops::UpdateFromBase, bool),
+    WorkBaseRead {
+        repo: RepoId,
+        name: String,
+        remote: bool,
+        base: Option<String>,
+    },
     /// Where a commit to find is in the main history (see `reveal`).
     CommitLocated {
         repo: RepoId,
@@ -455,7 +467,9 @@ pub struct App {
     window_focused: bool,
     /// A merge to run once the tree it runs in is open in a tab (merging a
     /// worktree's branch into its base, from the worktrees view).
-    merge_after_open: Option<worktree_ops::MergeAfterOpen>,
+    integrate_after_open: Option<worktree_ops::IntegrateAfterOpen>,
+    /// A tree to remove once the merge running in that tab goes through.
+    clean_after_merge: Option<(RepoId, worktree_ops::CleanAfterMerge)>,
     /// Repositories being opened (for the busy indicator).
     opening: usize,
     /// Panel the arrow keys drive while no text field has focus.
@@ -551,7 +565,8 @@ impl App {
             git_missing: false,
             modifiers: keyboard::Modifiers::empty(),
             window_focused: true,
-            merge_after_open: None,
+            integrate_after_open: None,
+            clean_after_merge: None,
             opening: 0,
             focus: Pane::default(),
             typing: no_tabs,
@@ -1083,12 +1098,12 @@ impl App {
             }
             Message::Opened(path, result) => {
                 self.opening = self.opening.saturating_sub(1);
-                let merge = self.merge_after_open.take_if(|m| m.path == path);
+                let after = self.integrate_after_open.take_if(|m| m.path == path);
                 match result {
                     Ok(repo) => {
                         let tab = self.add_tab(*repo);
-                        match merge {
-                            Some(m) => Task::batch([tab, self.run_merge(m.branch, m.no_ff)]),
+                        match after {
+                            Some(a) => Task::batch([tab, self.integrate_here(a.what)]),
                             None => tab,
                         }
                     }
@@ -1259,6 +1274,13 @@ impl App {
                 changed,
                 blocked,
             } => self.show_switch(repo, name, remote, from, changed, blocked),
+            Message::WorkBaseRead {
+                repo,
+                name,
+                remote,
+                base,
+            } => self.on_work_base(repo, name, remote, base),
+            Message::UpdateModeRead(update, rebase) => self.on_update_mode(update, rebase),
             Message::Banner(m) => self.on_banner(m),
             Message::Conflict(m) => self.on_conflict_message(m),
             Message::Blame(m) => self.on_blame_message(m),

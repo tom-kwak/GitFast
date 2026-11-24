@@ -133,7 +133,7 @@ impl LogQuery {
     }
 }
 
-fn parse_tree_paths(out: &[u8]) -> Vec<PathBuf> {
+pub(crate) fn parse_tree_paths(out: &[u8]) -> Vec<PathBuf> {
     split_records(out, 0).map(bytes_to_path).collect()
 }
 

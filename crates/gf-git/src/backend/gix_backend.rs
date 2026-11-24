@@ -702,6 +702,14 @@ impl WorktreeOps for GixBackend {
         unsupported("branch base")
     }
 
+    async fn pull_rebases(&self, path: &std::path::Path, branch: &str) -> Result<bool> {
+        // Read in that tree: per-worktree config can differ.
+        let (path, branch) = (path.to_path_buf(), branch.to_owned());
+        tokio::task::spawn_blocking(move || super::gix_worktree::pull_rebases(&path, &branch))
+            .await
+            .map_err(|e| err(format!("task: {e}")))?
+    }
+
     async fn default_base(&self) -> Result<Option<String>> {
         self.blocking(super::gix_worktree::default_base).await
     }

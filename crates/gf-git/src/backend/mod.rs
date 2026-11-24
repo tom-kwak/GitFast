@@ -506,6 +506,11 @@ pub trait WorktreeOps {
     /// (or `origin/HEAD` itself), else `main` or `master`.
     fn default_base(&self) -> impl Future<Output = Result<Option<String>>> + Send;
 
+    /// Whether `git pull` on `branch` in the tree at `path` rebases:
+    /// `branch.<branch>.rebase`, else `pull.rebase`, read there; unset is
+    /// a merge. `merges` and `interactive` rebase too.
+    fn pull_rebases(&self, path: &Path, branch: &str) -> impl Future<Output = Result<bool>> + Send;
+
     /// Locks (`git worktree lock`) or unlocks a linked working tree.
     fn lock_worktree(&self, path: &Path, locked: bool) -> impl Future<Output = Result<()>> + Send;
 

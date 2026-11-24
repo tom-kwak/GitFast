@@ -5,6 +5,7 @@ pub mod dropdown;
 pub mod file_search;
 pub mod file_tree;
 pub mod format;
+pub mod fuzzy;
 pub mod graph_canvas;
 pub mod memo;
 pub mod pointer;

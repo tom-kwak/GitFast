@@ -2762,6 +2762,118 @@ async fn remote_checkout_switches_to_an_existing_tracking_branch() {
     );
 }
 
+/// A linked worktree on `work`, made from `feature`, open in the
+/// active tab (the fixture's main tree stays on `main`).
+async fn linked_from_feature(folder: &std::path::Path) -> Ui {
+    let path = folder.join("linked");
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["branch", "other"]);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work",
+            path.to_str().expect("path"),
+            "feature",
+        ]);
+    })
+    .await;
+    let _ = ui.send(Message::Open(path)).await;
+    assert!(ui.app.active_tab().expect("tab").repo.is_linked_worktree());
+    ui
+}
+
+#[tokio::test]
+async fn a_linked_worktree_looks_at_its_base_detached_instead_of_taking_it() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/feature".into()),
+        )))
+        .await;
+    let _ = ui.send(selected_checkout()).await;
+    let dialog = ui.app.dialog.as_ref().expect("asks about the base");
+    assert_eq!(dialog.title, "Switch to the base branch");
+    assert!(matches!(
+        &dialog.purpose,
+        Purpose::LinkedBase { main: Some(_), .. }
+    ));
+
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let linked = folder.path().join("linked");
+    let head = |args: &[&str]| {
+        let mut all = vec!["-C", linked.to_str().expect("path")];
+        all.extend_from_slice(args);
+        ui.fixture.repo.git(&all).trim().to_owned()
+    };
+    assert_eq!(head(&["branch", "--show-current"]), "", "detached");
+    assert_eq!(
+        head(&["rev-parse", "HEAD"]),
+        head(&["rev-parse", "feature"])
+    );
+    // `feature` stays free for the main tree.
+    let _ = ui.fixture.repo.git(&["switch", "-q", "feature"]);
+}
+
+#[tokio::test]
+async fn a_linked_worktree_can_open_the_main_tree_instead_of_its_base() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/feature".into()),
+        )))
+        .await;
+    let _ = ui.send(selected_checkout()).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Check(0))).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let tab = ui.app.active_tab().expect("tab");
+    assert!(!tab.repo.is_linked_worktree(), "the main worktree's tab");
+    assert_eq!(
+        ui.fixture
+            .repo
+            .git(&[
+                "-C",
+                folder.path().join("linked").to_str().expect("path"),
+                "branch",
+                "--show-current"
+            ])
+            .trim(),
+        "work"
+    );
+}
+
+#[tokio::test]
+async fn a_linked_worktree_switches_to_other_branches_as_usual() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/other".into()),
+        )))
+        .await;
+    let _ = ui.send(selected_checkout()).await;
+    if let Some(d) = ui.app.dialog.as_ref() {
+        assert_ne!(d.title, "Switch to the base branch");
+        let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    }
+    let linked = folder.path().join("linked");
+    assert_eq!(
+        ui.fixture
+            .repo
+            .git(&[
+                "-C",
+                linked.to_str().expect("path"),
+                "branch",
+                "--show-current"
+            ])
+            .trim(),
+        "other"
+    );
+}
+
 async fn checkout_fixture() -> Ui {
     Ui::open_with(|repo| {
         repo.git(&["reset", "--hard"]);
@@ -3270,6 +3382,262 @@ async fn a_worktrees_branch_merges_into_its_base_in_the_tab_of_the_base() {
     let log = ui.fixture.repo.git(&["log", "--format=%s", "-1", "main"]);
     assert_eq!(log.trim(), "feat work");
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_branch_from_the_branch_menu_goes_to_a_new_worktree() {
+    let mut ui = Ui::open_with(|_| {}).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/feature".into()),
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Act(
+            sidebar::Action::NewWorktree,
+        )))
+        .await;
+    assert!(ui.shows("Check feature out in its own folder."));
+    assert!(
+        !ui.shows("a new branch starts at"),
+        "the branch exists: no start to pick"
+    );
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(ui.app.tabs.len(), 2, "the new worktree opened in a tab");
+    let tree = ui.app.tabs[1].repo.cwd().to_path_buf();
+    let head = ui.fixture.repo.git(&[
+        "-C",
+        &tree.display().to_string(),
+        "branch",
+        "--show-current",
+    ]);
+    assert_eq!(head.trim(), "feature");
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
+}
+
+/// A tree on `feat` (from main, opened in its own tab) with one commit
+/// changing `file` to `text`, selected in the worktrees panel of main's
+/// tab; main's own tree is clean. Returns the tree's folder.
+async fn feat_tree_with_a_commit(file: &str, text: &str) -> (Ui, PathBuf) {
+    let mut ui = Ui::open_with(|r| {
+        r.git(&["reset", "-q", "--hard"]);
+        r.git(&["clean", "-qfd"]);
+    })
+    .await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(0, "feat".into())))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let tree = ui.app.tabs[1].repo.cwd().to_path_buf();
+    let dir = tree.display().to_string();
+    std::fs::write(tree.join(file), text).expect("write");
+    ui.fixture.repo.git(&["-C", &dir, "add", file]);
+    ui.fixture
+        .repo
+        .git(&["-C", &dir, "commit", "-qm", "feat work"]);
+    let _ = ui.send(Message::WorktreePoll).await;
+    let path = ui.app.tabs[ui.app.active]
+        .worktrees
+        .cards()
+        .iter()
+        .find(|c| c.tree.branch.as_deref() == Some("feat"))
+        .expect("feat card")
+        .tree
+        .path
+        .clone();
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Select(path)))
+        .await;
+    (ui, tree)
+}
+
+/// Two trees made from main (not opened in tabs), from main's tab.
+async fn two_trees(a: &str, b: &str) -> (Ui, PathBuf, PathBuf) {
+    let mut ui = Ui::open_with(|r| {
+        r.git(&["reset", "-q", "--hard"]);
+        r.git(&["clean", "-qfd"]);
+    })
+    .await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    for branch in [a, b] {
+        let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+        let _ = ui
+            .send(Message::Dialog(dialog::Message::Field(0, branch.into())))
+            .await;
+        let _ = ui.send(Message::Dialog(dialog::Message::Check(0))).await;
+        let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    }
+    let tree = |branch: &str| {
+        ui.app.tabs[0]
+            .worktrees
+            .cards()
+            .iter()
+            .find(|c| c.tree.branch.as_deref() == Some(branch))
+            .expect("card")
+            .tree
+            .path
+            .clone()
+    };
+    let (ta, tb) = (tree(a), tree(b));
+    (ui, ta, tb)
+}
+
+#[tokio::test]
+async fn worktrees_changing_the_same_file_are_flagged() {
+    let (mut ui, a, b) = two_trees("feat", "fix").await;
+    // feat commits a change to it; fix has it uncommitted.
+    std::fs::write(a.join("shared.txt"), "feat\n").expect("write");
+    let dir = a.display().to_string();
+    ui.fixture.repo.git(&["-C", &dir, "add", "shared.txt"]);
+    ui.fixture.repo.git(&["-C", &dir, "commit", "-qm", "feat"]);
+    std::fs::write(b.join("shared.txt"), "fix\n").expect("write");
+    std::fs::write(b.join("only-fix.txt"), "x\n").expect("write");
+    let _ = ui.send(Message::WorktreePoll).await;
+    let overlap = |ui: &Ui, path: &std::path::Path| {
+        ui.app.tabs[0]
+            .worktrees
+            .cards()
+            .iter()
+            .find(|c| c.tree.path == path)
+            .and_then(|c| c.overlap.clone())
+    };
+    let o = overlap(&ui, &a).expect("feat is flagged");
+    assert_eq!(o.files, 1);
+    assert!(o.tip.contains("fix: shared.txt"), "{}", o.tip);
+    assert!(overlap(&ui, &b).is_some_and(|o| o.tip.contains("feat: shared.txt")));
+    assert!(ui.shows("⚠1"), "a badge on the card");
+    // Once fix drops its change, nothing is shared.
+    std::fs::remove_file(b.join("shared.txt")).expect("rm");
+    let _ = ui.send(Message::WorktreePoll).await;
+    assert!(overlap(&ui, &a).is_none());
+    assert!(!ui.shows("⚠1"));
+    let _ = std::fs::remove_dir_all(a.parent().expect("root"));
+}
+
+/// main moves on by a commit; the feat tree (from
+/// [`feat_tree_with_a_commit`]) is asked to catch up from main's tab, with
+/// `pull.rebase` set to `rebase`.
+async fn update_feat_from_main(rebase: bool) -> (Ui, PathBuf) {
+    let (mut ui, tree) = feat_tree_with_a_commit("feat.txt", "feat\n").await;
+    if rebase {
+        ui.fixture.repo.git(&["config", "pull.rebase", "true"]);
+    }
+    let main = ui.fixture.repo.path().display().to_string();
+    std::fs::write(ui.fixture.repo.path().join("main.txt"), "main\n").expect("write");
+    ui.fixture.repo.git(&["-C", &main, "add", "main.txt"]);
+    ui.fixture
+        .repo
+        .git(&["-C", &main, "commit", "-qm", "main work"]);
+    // Ask from main's tab: the update runs in feat's.
+    let _ = ui.send(Message::Key(Shortcut::SelectTab(0))).await;
+    assert_eq!(ui.app.active, 0);
+    let _ = ui.send(Message::WorktreePoll).await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Select(tree.clone())))
+        .await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::Update,
+        )))
+        .await;
+    assert!(ui.shows("Bring 1 commit from main into feat?"));
+    let check = if rebase {
+        "■ rebase instead of merge"
+    } else {
+        "□ rebase instead of merge"
+    };
+    assert!(ui.shows(check), "the default follows pull.rebase");
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(ui.app.active, 1, "it runs in the tab of feat");
+    let dir = tree.display().to_string();
+    let behind = ui
+        .fixture
+        .repo
+        .git(&["-C", &dir, "rev-list", "--count", "feat..main"]);
+    assert_eq!(behind.trim(), "0", "feat has main's commit");
+    (ui, tree)
+}
+
+#[tokio::test]
+async fn a_worktree_catches_up_with_its_base_by_a_merge() {
+    let (ui, tree) = update_feat_from_main(false).await;
+    let merges = ui
+        .fixture
+        .repo
+        .git(&["rev-list", "--merges", "--count", "main..feat"]);
+    assert_eq!(merges.trim(), "1", "a merge commit");
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
+}
+
+#[tokio::test]
+async fn a_worktree_catches_up_with_its_base_by_a_rebase_when_pull_rebases() {
+    let (ui, tree) = update_feat_from_main(true).await;
+    let merges = ui
+        .fixture
+        .repo
+        .git(&["rev-list", "--merges", "--count", "main..feat"]);
+    assert_eq!(merges.trim(), "0", "replayed, no merge commit");
+    let ahead = ui.fixture.repo.git(&["rev-list", "--count", "main..feat"]);
+    assert_eq!(ahead.trim(), "1", "feat's own commit on top of main");
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
+}
+
+#[tokio::test]
+async fn a_merged_worktree_and_its_branch_go_away_when_asked() {
+    let (mut ui, tree) = feat_tree_with_a_commit("feat.txt", "feat\n").await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::Merge,
+        )))
+        .await;
+    assert!(ui.shows("then remove the worktree and branch feat"));
+    let _ = ui.send(Message::Dialog(dialog::Message::Check(1))).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let log = ui.fixture.repo.git(&["log", "--format=%s", "-1", "main"]);
+    assert_eq!(log.trim(), "feat work", "merged");
+    assert!(!tree.exists(), "the tree is removed");
+    let branches = ui.fixture.repo.git(&["branch", "--list", "feat"]);
+    assert!(branches.trim().is_empty(), "the branch is deleted");
+    assert_eq!(ui.app.tabs.len(), 1, "its tab is closed");
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
+}
+
+#[tokio::test]
+async fn a_worktree_stays_when_its_merge_stops_on_conflicts() {
+    let (mut ui, tree) = feat_tree_with_a_commit("clash.txt", "feat\n").await;
+    // main changes the same file its own way.
+    let main = ui.fixture.repo.path().display().to_string();
+    std::fs::write(ui.fixture.repo.path().join("clash.txt"), "main\n").expect("write");
+    ui.fixture.repo.git(&["-C", &main, "add", "clash.txt"]);
+    ui.fixture
+        .repo
+        .git(&["-C", &main, "commit", "-qm", "main work"]);
+    let _ = ui.send(Message::WorktreePoll).await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::Merge,
+        )))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Check(1))).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert!(tree.exists(), "the tree stays");
+    let branches = ui.fixture.repo.git(&["branch", "--list", "feat"]);
+    assert!(!branches.trim().is_empty(), "the branch stays");
+    assert!(
+        ui.fixture.repo.path().join(".git/MERGE_HEAD").exists(),
+        "the merge stopped on the conflict"
+    );
+    assert!(
+        ui.app.clean_after_merge.is_none(),
+        "nothing is left to run later"
+    );
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
 }
 
 #[tokio::test]
