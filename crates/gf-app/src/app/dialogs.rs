@@ -139,6 +139,21 @@ pub enum Purpose {
     },
     /// A failure report was dismissed; nothing to run.
     Failure,
+    /// Fields: server, user name, token (see `App::login_dialog`); then
+    /// run the push/pull/fetch the server refused, if any.
+    LogIn(Option<Box<super::settings::Retry>>),
+    /// Fetch all remotes of the active tab (a retry after logging in).
+    Fetch,
+    /// Run a git command typed at the prompt (a retry after logging in).
+    RunGit(Vec<String>),
+    /// Fields: URL, folder. Clone it there, then open it.
+    Clone,
+    /// Forget the login (`settings.accounts`) in git's credential helper.
+    LogOut(gf_config::Account),
+    /// Set git's global `credential.helper` so logins can be kept.
+    UseCredentialHelper(String),
+    /// Field: one of the TOOLS settings (Settings → TOOLS).
+    SetTool(super::settings::Tool),
     SkipOperation,
     AbortOperation,
     /// Undo (or redo) the next step; the check box stashes first.
@@ -877,7 +892,10 @@ impl App {
             }
             Purpose::PushTag { remote, name } => self.op(
                 format!("push tag {name}"),
-                OpKind::Generic,
+                OpKind::Remote(super::RemoteOp::PushTag {
+                    remote: remote.clone(),
+                    name: name.clone(),
+                }),
                 // Recorded as on the remote, so push stops counting it.
                 move |r| async move { r.push_tags(&remote, &[name]).await },
             ),
@@ -891,6 +909,13 @@ impl App {
             Purpose::BisectStart { good } => self
                 .bisect_step(move |r| async move { r.bisect_start("HEAD", good.as_str()).await }),
             Purpose::Failure => self.restore_focus(),
+            Purpose::LogIn(retry) => self.log_in(&values, retry),
+            Purpose::Fetch => self.on_toolbar(crate::features::toolbar::Message::Fetch),
+            Purpose::RunGit(args) => self.run_git(args),
+            Purpose::Clone => self.run_clone(&value(0), &value(1)),
+            Purpose::LogOut(account) => self.log_out(account),
+            Purpose::UseCredentialHelper(helper) => self.use_credential_helper(helper),
+            Purpose::SetTool(tool) => self.set_tool(tool, &value(0)),
             Purpose::Squash { repo, ids } => {
                 let message = super::advanced::commit_message(&value(0), &value(1));
                 self.run_squash(repo, ids, message, check(0))
@@ -1018,7 +1043,7 @@ impl App {
                     .unwrap_or_default();
                 self.op_recorded(
                     "update submodules",
-                    OpKind::Generic,
+                    OpKind::Remote(super::RemoteOp::UpdateSubmodules),
                     Some(Record::new(undo::submodules(subs))),
                     |r| async move { r.update_submodules().await },
                 )
@@ -1038,9 +1063,11 @@ impl App {
                 Some(Record::new(undo::file_and_index(".gitattributes".into()))),
                 move |r| async move { r.lfs_untrack(&pattern).await },
             ),
-            Purpose::LfsPull => self.op("lfs pull", OpKind::Generic, |r| async move {
-                r.lfs_pull().await
-            }),
+            Purpose::LfsPull => self.op(
+                "lfs pull",
+                OpKind::Remote(super::RemoteOp::LfsPull),
+                |r| async move { r.lfs_pull().await },
+            ),
             Purpose::ResolveBlocks {
                 path,
                 segments,
@@ -1142,6 +1169,9 @@ fn validate(purpose: &Purpose, values: &[String]) -> Option<String> {
                 None
             }
         }
+        Purpose::LogIn(_) => super::settings::check_login(values),
+        Purpose::SetTool(tool) => super::settings::check_tool(*tool, first),
+        Purpose::Clone => super::clone::check_clone(values),
         Purpose::Publish { .. } if first.is_empty() => Some("choose a remote".into()),
         Purpose::AddWorktree { .. } if worktree_folder_name(first).is_empty() => {
             Some("a branch is required".into())

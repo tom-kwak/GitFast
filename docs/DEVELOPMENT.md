@@ -77,7 +77,8 @@ src/
 │  ├─ worktree_ops.rs  worktrees 패널의 Output 처리(열기, 제거, merge into base …)
 │  ├─ branch_delete.rs 여러 ref를 골라 한 번에 삭제
 │  ├─ reveal.rs      blame 등에서 커밋을 히스토리에서 찾아 선택·스크롤
-│  ├─ settings.rs    설정 화면·프롬프트 → 공유 설정
+│  ├─ settings.rs    설정 화면(섹션별) → 공유 설정, 서버 로그인(ACCOUNTS: 토큰 상태·확인)과 인증 실패 시 로그인 후 재실행
+│  ├─ clone.rs       open 창의 URL clone(폴더 묻기 → 백그라운드 clone, 상태 줄 진행률·Esc 취소 → 탭으로 열기)
 │  ├─ ui_sweep.rs    헤드리스 앱 드라이버(`Ui`)와 UI 스윕(§1, §8)
 │  └─ regression_tests.rs, keyboard_tests.rs   실제 App으로 돌리는 회귀 테스트
 ├─ features/<name>/mod.rs   피처 하나 = 폴더 하나
@@ -264,6 +265,7 @@ gf는 성능이 가장 중요합니다. 새 코드는 아래 규칙을 지킵니
    - 로드 시간은 `RUST_LOG=gf=debug`의 `snapshot loaded` 줄에서 봅니다.
    - gix와 CLI 비교는 `tests/gix_bench.rs`로 합니다.
    - 메모리(탭 여러 개, 큰 diff, 깊은 히스토리)는 [tools/mem-bench](../tools/mem-bench/README.md)로 잽니다.
+   - 다른 Git GUI(GitHub Desktop 등)와의 메모리 비교는 [tools/gui-bench](../tools/gui-bench/README.md)로 잽니다(macOS, 사람이 직접 조작).
    - 최적화는 결과가 같다는 테스트와 함께 넣습니다.
 
 ## 8. 테스트 작성법
@@ -274,6 +276,9 @@ gf는 성능이 가장 중요합니다. 새 코드는 아래 규칙을 지킵니
   - `Ui::open_with(|repo| …)`로 fixture 저장소를 준비하고, `ui.click("label")`·`ui.send(Message::…)`로 조작하고, `ui.shows(..)`·`ui.flash()`로 확인합니다.
   - 저장소를 바꾸는 동작은 `app/regression_tests.rs`, 키 라우팅은 `app/keyboard_tests.rs`(`Message::KeyInput`)에 둡니다. 기존 기능을 바꾸기 전에 지금 동작을 고정하는 테스트를 먼저 추가합니다.
 - **gf-git**: 파서는 실제 git 출력으로 단위 테스트하고, 시나리오는 `crates/gf-git/tests/`에서 `gf-test-support`의 `TestRepo`로 테스트합니다. gix 구현은 `tests/gix_contract.rs`에서 CLI와 결과가 같은지 비교합니다.
+- **서버 연동(로그인·clone·push·fetch)**: 평소에는 `credential.helper = store --file=<임시 파일>`과 `url.<로컬 경로>.insteadOf`로 네트워크 없이 테스트합니다(`ui_sweep.rs`의 `with_store_helper`, `example_server`). 개발자의 키체인은 건드리지 않습니다.
+  - 실제 GitLab으로 확인하려면 `app/ui_sweep/gitlab_e2e.rs`를 씁니다(`--ignored`). 비공개 프로젝트 `<user>/gf-demo`와 큰 `<user>/gf-big`(~150MB)이 필요합니다.
+  - 실행: `GF_GITLAB_URL=http://localhost:8929 GF_GITLAB_USER=root GF_GITLAB_TOKEN=<PAT> cargo test -p gf-app gitlab_e2e -- --ignored --test-threads=1`
 - **경로 비교**: `p.as_path() == Path::new("x")`처럼 씁니다. clippy `cmp_owned`를 피하기 위해서입니다.
 - **테스트 이름**은 동작을 문장으로 씁니다. 예: `arrows_skip_headers_and_space_stages`.
 

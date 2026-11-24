@@ -173,12 +173,18 @@ impl App {
             });
         }
         if self.settings_open && self.dialog.is_none() {
-            match k.nav.map(|nav| nav.key) {
-                Some(Key::Up) => self.cycle_theme(true),
-                Some(Key::Down) => self.cycle_theme(false),
-                _ => return run(self, k.shortcut),
-            }
-            return Task::none();
+            let section = self.settings_page.section;
+            return match k.nav.map(|nav| nav.key) {
+                Some(Key::Up) => self.show_settings_section(section.step(true)),
+                Some(Key::Down) => self.show_settings_section(section.step(false)),
+                Some(key @ (Key::Left | Key::Right))
+                    if section == crate::features::settings_view::Section::Appearance =>
+                {
+                    self.cycle_theme(key == Key::Left);
+                    Task::none()
+                }
+                _ => run(self, k.shortcut),
+            };
         }
         if k.shortcut == Some(Shortcut::Settings) {
             return self.on_shortcut(Shortcut::Settings);

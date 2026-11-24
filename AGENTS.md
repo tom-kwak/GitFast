@@ -13,7 +13,7 @@ gf(Git Fast)는 Rust + iced 0.14로 만든 Git GUI 클라이언트입니다. mac
 | 화면·상호작용을 설계할 때 | [PLAN.md](PLAN.md) §4-1 터미널 스타일, §4-2 상호작용 원칙 |
 | 다음에 무엇을 만들지 볼 때 | [PLAN.md](PLAN.md) §8 마일스톤 |
 | git 명령을 추가·변경할 때 | [docs/GIX_MIGRATION.md](docs/GIX_MIGRATION.md): 명령별 백엔드(gix/CLI) 표와 계약 테스트 |
-| 메모리를 잴 때 | [tools/mem-bench/README.md](tools/mem-bench/README.md) |
+| 메모리를 잴 때 | [tools/mem-bench/README.md](tools/mem-bench/README.md), 다른 Git GUI와 비교는 [tools/gui-bench/README.md](tools/gui-bench/README.md) |
 | 릴리스할 때 | [README.md](README.md) "Releasing", `docs/release-notes/<version>.md` |
 
 문서와 코드가 다르면 **코드가 기준**입니다. 다른 점을 발견하면 같은 작업에서 문서를 고칩니다.

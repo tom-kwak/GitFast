@@ -10,6 +10,7 @@ use gf_test_support::TestRepo;
 
 use super::ui_sweep::Ui;
 use super::*;
+use crate::features::diff_view::{self, DiffSource};
 use crate::features::history::CommitAction;
 use crate::features::sidebar::{self, Selection};
 
@@ -598,4 +599,56 @@ async fn pruning_forgets_a_worktree_whose_folder_is_gone_but_keeps_its_branch() 
             .git(&["branch", "--list", "feature"])
             .contains("feature")
     );
+}
+
+#[tokio::test]
+async fn compare_shows_the_diff_between_the_current_branch_and_the_selected_one() {
+    let mut ui = Ui::open_with(feature_with_a_commit).await;
+    let head = oid(&ui.fixture.repo, "feature");
+    let main = oid(&ui.fixture.repo, "main");
+
+    select_branch(&mut ui, "main").await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Act(
+            sidebar::Action::Compare,
+        )))
+        .await;
+
+    let tab = ui.app.active_tab().expect("tab");
+    assert_eq!(
+        tab.diff(diff_view::Role::Commit).source(),
+        Some(&DiffSource::Compare {
+            base: "feature".into(),
+            other: "main".into(),
+            from: head,
+            to: main,
+        })
+    );
+}
+
+#[tokio::test]
+async fn compare_with_the_current_branch_itself_does_nothing() {
+    let mut ui = Ui::open_with(feature_with_a_commit).await;
+    select_branch(&mut ui, "feature").await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Act(
+            sidebar::Action::Compare,
+        )))
+        .await;
+    let tab = ui.app.active_tab().expect("tab");
+    assert!(tab.diff(diff_view::Role::Commit).source().is_none());
+}
+
+#[tokio::test]
+async fn compare_works_from_the_branch_menu_and_lists_the_changed_files() {
+    let mut ui = Ui::open_with(feature_with_a_commit).await;
+
+    let _ = ui.right_click("main").await;
+    assert!(ui.shows("compare with current"), "the menu offers it");
+    let _ = ui.click("compare with current").await;
+    ui.settle();
+
+    assert!(ui.shows("feature → main"), "titled with both names");
+    // `feature` added feature.txt, so against `main` it is a deletion.
+    assert!(ui.shows("feature.txt"), "the changed file is listed");
 }
