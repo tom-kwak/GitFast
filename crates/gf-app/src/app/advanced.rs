@@ -6,7 +6,7 @@
 
 use std::future::Future;
 
-use gf_core::model::{Commit, Oid, RepoId};
+use gf_core::model::{Branch, Commit, Oid, RepoId};
 use gf_git::{BisectProgress, HeadMode, Integration, MergeStyle, Repository, Scope};
 use iced::Task;
 
@@ -182,6 +182,25 @@ impl App {
             .and_then(|t| t.snapshot.as_ref())
             .and_then(|s| s.status.head.branch.clone())
             .unwrap_or_else(|| "HEAD".into())
+    }
+
+    /// Shows what differs between the checked-out commit and `branch`.
+    pub(super) fn show_compare(&mut self, branch: &Branch) -> Task<Message> {
+        let Some(from) = self
+            .active_tab()
+            .and_then(|t| t.snapshot.as_ref())
+            .and_then(|s| s.status.head.oid.clone())
+        else {
+            self.flash(NoteKind::Info, "nothing to compare: no commits yet");
+            return Task::none();
+        };
+        let base = self.current_branch();
+        self.show_diff(DiffSource::Compare {
+            base,
+            other: branch.name.short().to_owned(),
+            from,
+            to: branch.target.clone(),
+        })
     }
 
     pub(super) fn ask_merge(&mut self, branch: String) -> Task<Message> {

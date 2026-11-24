@@ -277,6 +277,8 @@ pub enum Action {
     Merge,
     /// Rebase the current branch onto the selected one.
     RebaseOnto,
+    /// Show the diff between the current branch and the selected one.
+    Compare,
     /// Open the selected submodule in a new tab.
     Open,
     UpdateSubmodules,
@@ -317,6 +319,8 @@ pub enum Output {
     Merge(String),
     /// Rebase the current branch onto this branch (short name).
     RebaseOnto(String),
+    /// Diff the checked-out commit against this branch.
+    Compare(Branch),
     /// Open a repository folder (a submodule) in a new tab.
     OpenRepo(std::path::PathBuf),
     UpdateSubmodules,
@@ -1113,6 +1117,14 @@ impl State {
                 Action::RebaseOnto,
             )
         };
+        let compare = || {
+            item(
+                'c',
+                "compare with current",
+                "diff the checked-out branch against it",
+                Action::Compare,
+            )
+        };
         let branch_here = || {
             item(
                 'b',
@@ -1132,6 +1144,7 @@ impl State {
                     checkout(),
                     merge(),
                     rebase(),
+                    compare(),
                     Entry::Separator,
                     item('r', "rename…", "change the branch name", Action::Rename),
                     item('p', "push", "send its commits to the remote", Action::Push),
@@ -1142,6 +1155,7 @@ impl State {
                     checkout(),
                     merge(),
                     rebase(),
+                    compare(),
                     branch_here(),
                     Entry::Separator,
                     danger('d', "delete…", "remove it on the remote", Action::Delete),
@@ -1247,6 +1261,7 @@ impl State {
                         Action::Push => Some(Output::PushBranch(b.clone())),
                         Action::Merge => Some(Output::Merge(b.name.short().to_owned())),
                         Action::RebaseOnto => Some(Output::RebaseOnto(b.name.short().to_owned())),
+                        Action::Compare if !b.is_head => Some(Output::Compare(b.clone())),
                         _ => None,
                     }
                 } else {
@@ -1660,7 +1675,7 @@ mod tests {
                 Entry::Separator => None,
             })
             .collect();
-        assert_eq!(keys, vec!['o', 'm', 'e', 'r', 'p', 'd']);
+        assert_eq!(keys, vec!['o', 'm', 'e', 'c', 'r', 'p', 'd']);
         // The checked-out branch cannot be merged into itself.
         let _ = s.update_with(
             Message::RightClick(Selection::Ref("refs/heads/main".into())),
@@ -1677,6 +1692,13 @@ mod tests {
                 .entries
                 .iter()
                 .any(|e| matches!(e, Entry::Item { key: 'm', .. }))
+        );
+        assert!(
+            !menu
+                .entries
+                .iter()
+                .any(|e| matches!(e, Entry::Item { key: 'c', .. })),
+            "the checked-out branch cannot be compared with itself"
         );
     }
 
