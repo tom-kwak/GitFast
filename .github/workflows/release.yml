@@ -230,9 +230,11 @@ jobs:
         run: |
           version="${TAG#release-}"
           # This release's own installers: the tag is in them, so they need
-          # no argument (a pre-release too).
+          # no argument (a pre-release too). install.ps1 is checked out with
+          # CRLF (.gitattributes), so its line is not anchored at `$`: the
+          # \r stays where it is.
           sed "s/^TAG=\$/TAG=$TAG/" src/scripts/install.sh > dist/install.sh
-          sed "s/^    \$tag = ''\$/    \$tag = '$TAG'/" src/scripts/install.ps1 > dist/install.ps1
+          sed "s/^    \$tag = ''/    \$tag = '$TAG'/" src/scripts/install.ps1 > dist/install.ps1
           grep -q "^TAG=$TAG\$" dist/install.sh
           grep -qF "\$tag = '$TAG'" dist/install.ps1
           # A pre-release is not "latest": its page links its own installers.
