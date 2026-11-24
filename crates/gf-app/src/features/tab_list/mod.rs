@@ -17,9 +17,10 @@
 use iced::widget::{Column, Row, button, container, mouse_area, row, stack, text_input};
 use iced::{Color, Element, Length, Padding, mouse};
 
-use crate::features::repo_picker::{elide_path, fuzzy};
+use crate::features::repo_picker::elide_path;
 use crate::repo_tab::RepoTab;
 use crate::theme::{Tokens, style};
+use crate::widgets::fuzzy::{self, fuzzy};
 use crate::widgets::{self, colored, dim, format};
 
 pub const FILTER_ID: &str = "gf-tab-list-filter";
@@ -314,7 +315,7 @@ fn matches(keys: &[Key], filter: &str) -> Vec<Hit> {
         .enumerate()
         .filter_map(|(tab, k)| {
             if let Some((score, marks)) = fuzzy(filter, &k.name) {
-                return Some((score + 1000, Hit { tab, marks }));
+                return Some((score + fuzzy::RANK, Hit { tab, marks }));
             }
             fuzzy(filter, &k.path).map(|(score, _)| {
                 (
