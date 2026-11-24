@@ -536,13 +536,13 @@ impl State {
         add(
             'o',
             "open in tab",
-            "work in this tree in its own tab",
+            "work on it in its own tab",
             Action::Open,
         );
         add(
             'c',
             "compare with base",
-            "the changes of its commits since it left the base",
+            "what it changed since it branched off",
             Action::Compare,
         );
         let base = card.status.as_ref().and_then(|s| s.base.clone());
@@ -551,14 +551,14 @@ impl State {
             add(
                 'm',
                 &merge,
-                "in the tree that has it checked out",
+                "runs where the base is checked out",
                 Action::Merge,
             );
         }
         add(
             'b',
             "base branch…",
-            "the branch it came from and goes back into",
+            "the branch it merges into",
             Action::SetBase,
         );
         add(
@@ -580,15 +580,15 @@ impl State {
         add(
             'l',
             "lock",
-            "keep git from removing or pruning it",
+            "protect it from remove and prune",
             Action::Lock,
         );
         add('l', "unlock", "allow removing it again", Action::Unlock);
         if self.output_for(Action::Remove).is_some() {
             let (label, hint) = if card.tree.prunable {
-                ("prune…", "forget trees whose folder is gone")
+                ("prune…", "clean up worktrees whose folder was deleted")
             } else {
-                ("remove…", "delete the folder")
+                ("remove…", "delete its folder; the branch stays")
             };
             entries.push(Entry::Separator);
             entries.push(Entry::caution(
@@ -687,7 +687,7 @@ impl State {
             widgets::tip(
                 t,
                 badge("missing".into(), t.error()),
-                "its folder is gone — prune forgets it".into(),
+                "folder deleted · prune cleans it up".into(),
             )
         } else if let Some(e) = &c.error {
             widgets::tip(t, badge("?".into(), t.error()), format::truncate(e, 200))
@@ -743,7 +743,7 @@ impl State {
                 widgets::tip(
                     t,
                     badge("locked".into(), t.warning()),
-                    "git will not remove or prune it".into(),
+                    "can't be removed until unlocked".into(),
                 ),
                 6,
             ));
@@ -752,7 +752,7 @@ impl State {
         let name_cols = scale_columns(cols.saturating_sub(used + 1), t.small() / t.font_size);
         let name_color = if c.current { t.head() } else { t.branch() };
         let mark: Element<'a, Message> = if c.current {
-            widgets::tip(t, colored(t, "●", t.head()), "this tab's tree".into())
+            widgets::tip(t, colored(t, "●", t.head()), "open in this tab".into())
         } else if c.in_tab {
             widgets::tip(t, colored(t, "◉", t.accent()), "open in another tab".into())
         } else {
@@ -815,23 +815,24 @@ impl State {
                 }
                 if let Some(base) = &s.base {
                     if s.merged() {
-                        tip.push(format!("its commits are in {base}: it can go"));
+                        tip.push(format!("all merged into {base} · safe to remove"));
                     } else if s.ahead_of_base > 0 {
                         tip.push(format!(
-                            "{} commit(s) not in {base} yet · c compares",
-                            s.ahead_of_base
+                            "{} not in {base} yet · c compares",
+                            format::count(s.ahead_of_base, "commit")
                         ));
                     }
                     if s.behind_base > 0 && !s.merged() {
-                        tip.push(format!("{base} has {} commit(s) it lacks", s.behind_base));
+                        tip.push(format!(
+                            "{base} has {} it lacks",
+                            format::count(s.behind_base, "commit")
+                        ));
                     }
                     if s.ahead_of_base > 0 && self.tree_of(base).is_some() {
                         tip.push(format!("m merges it into {base}"));
                     }
                     tip.push(if s.base_guessed {
-                        format!(
-                            "{base} is a guess: nothing recorded where it came from · b sets it"
-                        )
+                        format!("{base} is a guess · b sets the real one")
                     } else {
                         "b changes the base".to_owned()
                     });
@@ -1077,7 +1078,7 @@ impl Feature for State {
             actions = actions.push(widgets::tip(
                 t,
                 widgets::text_button(t, "prune", None, Some(Message::Prune)),
-                "forget trees whose folder is gone".to_owned(),
+                "clean up worktrees whose folder was deleted".to_owned(),
             ));
         }
         if finished > 0 {
@@ -1090,7 +1091,7 @@ impl Feature for State {
                     Some(Message::Cleanup),
                 ),
                 format!(
-                    "remove the trees already merged into {}",
+                    "remove worktrees merged into {}",
                     self.base.as_deref().unwrap_or("the base")
                 ),
             ));

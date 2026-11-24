@@ -2795,7 +2795,7 @@ async fn a_linked_worktree_looks_at_its_base_detached_instead_of_taking_it() {
         .await;
     let _ = ui.send(selected_checkout()).await;
     let dialog = ui.app.dialog.as_ref().expect("asks about the base");
-    assert_eq!(dialog.title, "Base branch");
+    assert_eq!(dialog.title, "Switch to the base branch");
     assert!(matches!(
         &dialog.purpose,
         Purpose::LinkedBase { main: Some(_), .. }
@@ -2830,7 +2830,7 @@ async fn a_linked_worktree_can_open_the_main_tree_instead_of_its_base() {
     let _ = ui.send(Message::Dialog(dialog::Message::Check(0))).await;
     let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
     let tab = ui.app.active_tab().expect("tab");
-    assert!(!tab.repo.is_linked_worktree(), "the main tree's tab");
+    assert!(!tab.repo.is_linked_worktree(), "the main worktree's tab");
     assert_eq!(
         ui.fixture
             .repo
@@ -2856,7 +2856,7 @@ async fn a_linked_worktree_switches_to_other_branches_as_usual() {
         .await;
     let _ = ui.send(selected_checkout()).await;
     if let Some(d) = ui.app.dialog.as_ref() {
-        assert_ne!(d.title, "Base branch");
+        assert_ne!(d.title, "Switch to the base branch");
         let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
     }
     let linked = folder.path().join("linked");

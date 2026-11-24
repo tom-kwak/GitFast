@@ -982,14 +982,11 @@ impl App {
         self.confirm(Confirm::change(
             "worktree-tab",
             "Branch in another worktree",
-            vec![
-                format!(
-                    "{branch} is checked out in {}",
-                    crate::widgets::format::tilde(&path)
-                ),
-                "Go to that worktree's tab?".into(),
-            ],
-            "Go to tab",
+            vec![format!(
+                "{branch} is already checked out in {}.",
+                crate::widgets::format::tilde(&path)
+            )],
+            "Open that worktree",
             Purpose::OpenWorktreeTab(path),
         ))
     }
@@ -1074,10 +1071,10 @@ impl App {
             .map(|w| w.path.clone());
         let mut confirm = Confirm::change(
             "linked-base",
-            "Base branch",
+            "Switch to the base branch",
             vec![
-                format!("{local} is this worktree's base."),
-                "Taking it here locks it out of the main tree.".into(),
+                format!("{local} is the branch this worktree merges into."),
+                "Checking it out here blocks it for every other worktree.".into(),
             ],
             "View detached",
             Purpose::LinkedBase {
@@ -1087,8 +1084,11 @@ impl App {
         )
         .always()
         .undoable();
-        if main.is_some() {
-            confirm = confirm.check("go to the main tree instead", false);
+        if let Some(main) = &main {
+            confirm = confirm.check(
+                format!("open {} instead", crate::widgets::format::tilde(main)),
+                false,
+            );
         }
         self.confirm(confirm)
     }

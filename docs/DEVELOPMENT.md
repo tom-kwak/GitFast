@@ -180,6 +180,13 @@ mod tests { /* update/nav 단위 테스트 */ }
    - `Menu { title, entries: vec![Entry::item(key, label, hint, msg), Entry::Separator, Entry::caution(..)] }`를 `Output`으로 넘깁니다.
    - App은 `open_menu(menu.map(Message::X))`로 엽니다.
 9. **긴 작업은 비동기**로 처리합니다. 진행 표시는 스피너와 상태줄, 결과는 명령 로그와 flash에 남깁니다.
+10. **안내 문구**(다이얼로그·툴팁·메뉴 힌트·빈 상태)는 처음 보는 사람이 한 번에 이해하게 씁니다.
+    - **화면에 보이는 이름만** 씁니다: 브랜치 이름, 폴더 경로(`widgets::format::tilde`). "main tree", "linked" 같은 내부 용어는 쓰지 않습니다. `main` 브랜치와 헷갈리는 말도 피합니다.
+    - **같은 것은 같은 말로** 부릅니다: 작업 트리 하나는 *worktree*, 그 디렉터리는 *folder*, 작업이 돌아갈 브랜치는 *base*입니다. *tree*만 따로 쓰지 않습니다.
+    - **다이얼로그 본문은 2줄 이내**로 씁니다. 1줄은 무슨 일인지, 2줄은 결과(사라지는 것·남는 것)입니다. 그 경우에만 해당하는 경고(예: 커밋하지 않은 변경 N개)는 한 줄 더 붙일 수 있습니다. 버튼이 답이 되도록 질문을 반복하지 않습니다.
+    - **버튼은 하는 동작**으로 씁니다(`Remove`, `View detached`, `Open that worktree`). 체크박스는 켰을 때 하는 일을 씁니다.
+    - **개수는 `widgets::format::count`**로 씁니다(`1 commit`, `3 commits`). `(s)`를 붙이지 않습니다.
+    - 툴팁·메뉴 힌트는 소문자로 시작하는 짧은 구로, 그 동작의 결과를 말합니다(`delete its folder; the branch stays`).
 
 ---
 

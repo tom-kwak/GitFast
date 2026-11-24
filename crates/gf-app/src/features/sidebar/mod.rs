@@ -1095,7 +1095,7 @@ impl State {
         };
         let checkout = || {
             let hint = if held_elsewhere {
-                "open its worktree tab"
+                "open the worktree that has it"
             } else {
                 "switch your files to it"
             };
@@ -1594,7 +1594,10 @@ mod tests {
                 _ => None,
             })
         };
-        assert_eq!(hint(&s, &snap).as_deref(), Some("open its worktree tab"));
+        assert_eq!(
+            hint(&s, &snap).as_deref(),
+            Some("open the worktree that has it")
+        );
         snap.worktrees.clear();
         assert_eq!(hint(&s, &snap).as_deref(), Some("switch your files to it"));
     }

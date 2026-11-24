@@ -79,6 +79,14 @@ pub fn repo_path(path: &Path) -> String {
 }
 
 /// Replaces the home directory prefix with `~`.
+/// `1 commit`, `3 commits`: a count with its noun, no `(s)`.
+pub fn count(n: impl Into<u64>, noun: &str) -> String {
+    match n.into() {
+        1 => format!("1 {noun}"),
+        n => format!("{n} {noun}s"),
+    }
+}
+
 pub fn tilde(path: &Path) -> String {
     if let Some(home) = crate::platform::home_dir()
         && let Ok(rest) = path.strip_prefix(&home)
@@ -169,6 +177,13 @@ pub fn code_text(s: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn counts_say_one_or_many() {
+        assert_eq!(super::count(1u32, "commit"), "1 commit");
+        assert_eq!(super::count(0u32, "worktree"), "0 worktrees");
+        assert_eq!(super::count(3usize as u64, "change"), "3 changes");
+    }
+
     use super::*;
 
     #[test]

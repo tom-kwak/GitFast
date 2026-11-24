@@ -1188,9 +1188,9 @@ fn validate(purpose: &Purpose, values: &[String]) -> Option<String> {
         Purpose::AddWorktree { .. } if worktree_folder_name(first).is_empty() => {
             Some("a branch is required".into())
         }
-        Purpose::AddWorktree { checked_out, .. } if checked_out.iter().any(|b| b == first) => {
-            Some(format!("{first} is checked out in another worktree"))
-        }
+        Purpose::AddWorktree { checked_out, .. } if checked_out.iter().any(|b| b == first) => Some(
+            format!("{first} is already checked out in another worktree"),
+        ),
         Purpose::SetBranchBase { branch, .. } if first == branch => {
             Some(format!("{branch} cannot go into itself"))
         }

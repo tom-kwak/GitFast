@@ -12,7 +12,7 @@ use crate::features::command_log::NoteKind;
 use crate::features::dialog::{Dialog, Suggestion};
 use crate::features::diff_view::DiffSource;
 use crate::features::{sidebar, worktrees};
-use crate::widgets::format::tilde;
+use crate::widgets::format::{self, tilde};
 
 impl App {
     pub(super) fn on_worktrees(&mut self, out: worktrees::Output) -> Task<Message> {
@@ -65,19 +65,19 @@ impl App {
                     (
                         "Lock worktree",
                         "Lock",
-                        "git then refuses to remove or prune it.",
+                        "It can't be removed or pruned until you unlock it.",
                     )
                 } else {
                     (
                         "Unlock worktree",
                         "Unlock",
-                        "It can be removed or pruned again.",
+                        "It can be removed and pruned again.",
                     )
                 };
                 self.confirm(Confirm::change(
                     "worktree-lock",
                     title,
-                    vec![format!("{verb} {}?", worktree_label(&path)), line.into()],
+                    vec![format!("{verb} {}?", tilde(&path)), line.into()],
                     verb,
                     Purpose::LockWorktree(path, locked),
                 ))
@@ -86,7 +86,10 @@ impl App {
             Output::Prune => self.confirm(Confirm::change(
                 "worktree-prune",
                 "Prune worktrees",
-                vec!["Forget the trees whose folder is gone? Their branches stay.".into()],
+                vec![
+                    "Clean up worktrees whose folder was deleted?".into(),
+                    "Their branches stay.".into(),
+                ],
                 "Prune",
                 Purpose::PruneWorktrees,
             )),
@@ -98,10 +101,13 @@ impl App {
                 self.confirm(
                     Confirm::delete(
                         "Remove merged worktrees",
-                        vec![format!(
-                            "Remove {} clean tree(s) already merged into {base}?",
-                            trees.len()
-                        )],
+                        vec![
+                            format!(
+                                "Remove {} merged into {base}?",
+                                format::count(trees.len() as u64, "worktree")
+                            ),
+                            "Only ones with no uncommitted changes.".into(),
+                        ],
                         "Remove",
                         Purpose::CleanupWorktrees { base, trees },
                     )
@@ -120,24 +126,19 @@ impl App {
                     .active_tab()
                     .is_some_and(|t| same_folder(t.repo.cwd(), &into, real.as_deref()));
                 let place = if here {
-                    "It runs here, in this tab's tree.".to_owned()
+                    "Runs here, in this tab.".to_owned()
                 } else {
-                    format!("It runs in the tree of {base}, which opens in its tab.")
+                    format!("Runs in {}, which opens in a tab.", tilde(&into))
                 };
-                let commits = if count == 1 {
-                    "1 commit".to_owned()
-                } else {
-                    format!("{count} commits")
-                };
+                let commits = format::count(count, "commit");
                 self.confirm(
                     Confirm::change(
                         "merge",
                         "Merge",
                         vec![
-                            format!("Merge {branch} into {base}? ({commits})"),
+                            format!("Merge {branch} into {base} ({commits})?"),
                             place,
-                            "Fast-forwards when possible; conflicts stop there for you to resolve."
-                                .into(),
+                            "Fast-forwards when it can; conflicts stop for you to resolve.".into(),
                         ],
                         "Merge",
                         Purpose::MergeIntoBase { branch, into, real },
@@ -220,15 +221,13 @@ impl App {
                 )
             })
             .collect();
-        let mut lines = vec![format!(
-            "The branch {branch} came from: merges go back into it."
-        )];
+        let mut lines = vec![format!("The branch {branch} merges into.")];
         if guessed && let Some(base) = &base {
             lines.push(format!(
-                "{base} is a guess (the nearest of the usual branches): nothing recorded where it came from."
+                "{base} is a guess: nothing records where {branch} came from."
             ));
         }
-        lines.push("Empty: guess it again.".into());
+        lines.push("Leave it empty to guess again.".into());
         let dialog = Dialog::confirm(
             "Base branch",
             lines,
@@ -250,16 +249,19 @@ impl App {
             detached,
             changed,
         } = removal;
-        let mut lines = vec![format!("Remove the worktree of {name}?")];
+        let mut lines = vec![format!("Delete {}?", tilde(&path))];
         lines.push(if detached {
-            "Its folder is deleted. It is on no branch: commits only it has are lost.".into()
+            "It is on no branch: commits made only there are lost.".into()
         } else {
-            format!("Its folder is deleted; the branch {name} stays.")
+            format!("The branch {name} stays.")
         });
         // Unknown: git's own check (it refuses with changes) stays.
         let dirty = changed.is_some_and(|n| n > 0);
         if let Some(n) = changed.filter(|n| *n > 0) {
-            lines.push(format!("{n} uncommitted change(s) there are lost too."));
+            lines.push(format!(
+                "{} there are lost too.",
+                format::count(n as u64, "uncommitted change")
+            ));
         }
         let confirm = Confirm::delete(
             "Remove worktree",
