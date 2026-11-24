@@ -46,6 +46,11 @@ macOS 11+ (Apple silicon, Intel) · Windows 10+ x64 · Git 2.43.1+. Run again to
 - **Command log** (`⌘J`): every git command gf ran, with output, exit status
   and duration. The `gf ❯` line runs any git command.
 - **Tabs**: one per repository.
+- **Clone and logins**: `⌘O` accepts a URL and clones it in the background.
+  Settings keeps your HTTPS git logins in git's own credential helper, and a
+  fetch, pull or push that fails on authentication asks for a login and retries.
+- **Compare**: the branch menu's "compare with current" (`c`) diffs the
+  checked-out commit against that branch.
 
 ## Speed: `git` CLI vs. gf
 
@@ -131,12 +136,12 @@ On Windows, `⌘` is `Ctrl` (`⌘⇧Z` is `Ctrl+Shift+Z`).
 ## Releasing
 
 ```bash
-git tag release-0.0.9 && git push origin release-0.0.9   # version from Cargo.toml
+git tag release-0.0.10 && git push origin release-0.0.10   # version from Cargo.toml
 ```
 
 The [release workflow](.github/workflows/release.yml) checks, builds and publishes
 the macOS and Windows packages with `docs/release-notes/<version>.md`.
-`0.0.9-rc.1` style versions become pre-releases, each with its own `install.sh`.
+`0.0.10-rc.1` style versions become pre-releases, each with its own `install.sh`.
 
 ## Development
 
