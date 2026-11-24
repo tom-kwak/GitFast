@@ -491,8 +491,10 @@ impl Repository {
     }
 
     // ---- SubmoduleOps
+    /// gix answers when there is none (no gitlink in the index); the
+    /// CLI lists them.
     pub async fn submodules(&self) -> Result<Vec<Submodule>> {
-        SubmoduleOps::submodules(&self.cli).await
+        gix_then_cli!(self, SubmoduleOps::submodules())
     }
     /// `git submodule update --init --recursive`: checks out the recorded
     /// commits, initializing new submodules.

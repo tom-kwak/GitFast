@@ -13,7 +13,7 @@ use common::open;
 use gf_core::model::Oid;
 use gf_git::backend::{
     BranchOps, CliBackend, DiffOps, GixBackend, LogOps, RebaseOps, RefOps, ReflogOps, RemoteOps,
-    StashOps, StatusOps, TagOps, UndoOps, WorktreeOps,
+    StashOps, StatusOps, SubmoduleOps, TagOps, UndoOps, WorktreeOps,
 };
 use gf_git::{LogOrder, LogQuery, Repository, Scope};
 use gf_test_support::TestRepo;
@@ -502,6 +502,14 @@ async fn submodule_status_and_numstat_match() {
         .await;
     }
 
+    // With submodules gix leaves the list to the CLI.
+    let (_, gix) = repo.backends();
+    assert!(matches!(
+        SubmoduleOps::submodules(gix.unwrap()).await,
+        Err(gf_core::GfError::Unsupported(_))
+    ));
+    assert!(!repo.submodules().await.unwrap().is_empty());
+
     // A clone without `--recurse-submodules`: none are initialized.
     sup.git(&["commit", "-qam", "everything"]);
     let clone = sup.clone_repo();
@@ -517,6 +525,35 @@ async fn submodule_status_and_numstat_match() {
         "numstat with uninitialized submodules",
         |b| async move { call!(b, DiffOps::numstat(false)) },
     )
+    .await;
+}
+
+/// No gitlink in the index: gix answers the (empty) submodule list,
+/// also with a `.gitmodules` left behind and in a repository with no commit.
+#[tokio::test]
+async fn no_submodules_are_listed_without_git() {
+    let (_origin, work, _linked) = fixture();
+    let repo = open(&work).await;
+    served(&repo, "submodules: none", |b| async move {
+        call!(b, SubmoduleOps::submodules())
+    })
+    .await;
+
+    work.write(
+        ".gitmodules",
+        "[submodule \"gone\"]\n\tpath = gone\n\turl = ./gone\n",
+    );
+    work.commit_all("stale .gitmodules");
+    served(&repo, "submodules: .gitmodules only", |b| async move {
+        call!(b, SubmoduleOps::submodules())
+    })
+    .await;
+
+    let empty = TestRepo::new();
+    let repo = open(&empty).await;
+    served(&repo, "submodules: unborn", |b| async move {
+        call!(b, SubmoduleOps::submodules())
+    })
     .await;
 }
 

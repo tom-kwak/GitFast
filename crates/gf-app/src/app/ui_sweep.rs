@@ -23,6 +23,8 @@ use super::*;
 use crate::widgets::file_tree;
 
 mod gitlab_e2e;
+mod profile;
+mod sim;
 
 const WINDOW: Size = Size::new(1280.0, 820.0);
 
@@ -43,7 +45,25 @@ impl Fixture {
         static TEMPLATE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
         let template = TEMPLATE.get_or_init(Self::build);
         Self {
-            repo: template.repo.duplicate(),
+            repo: profile::time("fixture copy", || template.repo.duplicate()),
+        }
+    }
+
+    /// A fresh copy of the fixture after `setup` changed it: `setup` runs
+    /// once per `key`, then its result is copied (a sweep gets back to its
+    /// screen hundreds of times, and a merge or rebase each time added up).
+    /// `key` names what `setup` does: the same key, the same setup.
+    pub fn prepared(key: &'static str, setup: fn(&TestRepo)) -> Self {
+        static TEMPLATES: std::sync::Mutex<BTreeMap<&'static str, Fixture>> =
+            std::sync::Mutex::new(BTreeMap::new());
+        let mut templates = TEMPLATES.lock().unwrap_or_else(|e| e.into_inner());
+        let template = templates.entry(key).or_insert_with(|| {
+            let fixture = Self::new();
+            profile::time("setup", || setup(&fixture.repo));
+            fixture
+        });
+        Self {
+            repo: profile::time("fixture copy", || template.repo.duplicate()),
         }
     }
 
@@ -727,6 +747,14 @@ pub(super) struct Ui {
     /// screen it already reached once: those clicks are not checked, and
     /// measuring them was most of the sweep's time.
     measure: bool,
+    /// The widget state the window was last laid out with, as the running
+    /// app keeps it between frames: text is shaped once, not on every
+    /// press (that was most of a sweep's time).
+    widgets: std::cell::RefCell<Option<iced_test::runtime::user_interface::Cache>>,
+    /// The same for [`Self::press`], kept apart: a press only asks what a
+    /// click would send, and must not leave a click behind (the next real
+    /// click on that spot would count as a double-click).
+    probes: std::cell::RefCell<Option<iced_test::runtime::user_interface::Cache>>,
     _home: tempfile::TempDir,
 }
 
@@ -741,7 +769,7 @@ impl Ui {
     pub async fn open() -> Self {
         let mut ui = Self::welcome().await;
         let path = ui.fixture.repo.path().to_path_buf();
-        let _ = ui.send(Message::Open(path)).await;
+        let _ = profile::time_async("open", ui.send(Message::Open(path))).await;
         assert_eq!(ui.app.tabs.len(), 1, "the fixture opens in a tab");
         ui
     }
@@ -750,20 +778,37 @@ impl Ui {
     /// bisect, ...).
     pub async fn open_with(setup: impl FnOnce(&TestRepo)) -> Self {
         let mut ui = Self::welcome().await;
-        setup(&ui.fixture.repo);
+        profile::time("setup", || setup(&ui.fixture.repo));
         let path = ui.fixture.repo.path().to_path_buf();
-        let _ = ui.send(Message::Open(path)).await;
+        let _ = profile::time_async("open", ui.send(Message::Open(path))).await;
         assert_eq!(ui.app.tabs.len(), 1, "the fixture opens in a tab");
         ui
     }
 
     /// gf with no tab open; the fixture is in the recent list.
     pub async fn welcome() -> Self {
-        let fixture = Fixture::new();
+        Self::welcome_to(Fixture::new())
+    }
+
+    /// gf with the fixture open after `setup` changed it, `setup` run once
+    /// per `key` ([`Fixture::prepared`]): for a sweep, which gets back to
+    /// the same screen many times.
+    pub async fn open_prepared(key: &'static str, setup: fn(&TestRepo)) -> Self {
+        let mut ui = Self::welcome_to(Fixture::prepared(key, setup));
+        let path = ui.fixture.repo.path().to_path_buf();
+        let _ = profile::time_async("open", ui.send(Message::Open(path))).await;
+        assert_eq!(ui.app.tabs.len(), 1, "the fixture opens in a tab");
+        ui
+    }
+
+    /// gf with no tab open; `fixture` is in the recent list.
+    fn welcome_to(fixture: Fixture) -> Self {
         let home = tempfile::tempdir().expect("home");
         let mut settings = gf_config::Settings::default();
         settings.remember_repo(fixture.repo.path());
-        let (mut app, _boot) = App::boot(gf_config::AppPaths::under(home.path()), settings);
+        let (mut app, _boot) = profile::time("boot", || {
+            App::boot(gf_config::AppPaths::under(home.path()), settings)
+        });
         // git runs isolated from the developer's config, as in every test.
         app.runner = app
             .runner
@@ -775,6 +820,8 @@ impl Ui {
             fixture,
             others: Vec::new(),
             measure: !REACHING.get(),
+            widgets: std::cell::RefCell::default(),
+            probes: std::cell::RefCell::default(),
             _home: home,
         }
     }
@@ -794,25 +841,22 @@ impl Ui {
                 fx.messages.push(short(&m));
                 tasks.push_back(self.handle_native(m, &mut fx));
             }
-            self.run_tasks(tasks, &mut fx).await;
+            profile::time_async("tasks", self.run_tasks(tasks, &mut fx)).await;
             return fx;
         }
-        let frame = self._home.path().join("frame.png");
-        let _ = std::fs::remove_file(self.frame_file(&frame));
-        if look {
-            let _ = self.looks_like(&frame);
-        }
-        let state_before = self.state();
-        let repo_before = self.repo_state();
+        let frame_before = look.then(|| profile::time("measure › render", || self.frame()));
+        let state_before = profile::time("measure › state", || self.state());
+        let repo_before = profile::time("measure › repo", || self.repo_state());
         let mut tasks = VecDeque::new();
         for m in messages {
             fx.messages.push(short(&m));
             tasks.push_back(self.handle_native(m, &mut fx));
         }
-        self.run_tasks(tasks, &mut fx).await;
-        fx.state_changed = self.state() != state_before;
-        fx.screen_changed = look && !self.looks_like(&frame);
-        fx.repo_changed = self.repo_state() != repo_before;
+        profile::time_async("tasks", self.run_tasks(tasks, &mut fx)).await;
+        fx.state_changed = profile::time("measure › state", || self.state()) != state_before;
+        fx.screen_changed = frame_before
+            .is_some_and(|before| profile::time("measure › render", || self.frame()) != before);
+        fx.repo_changed = profile::time("measure › repo", || self.repo_state()) != repo_before;
         fx
     }
 
@@ -853,30 +897,9 @@ impl Ui {
         }
     }
 
-    /// Whether the window looks like the frame saved at `path` (the first
-    /// call saves it).
-    fn looks_like(&self, path: &std::path::Path) -> bool {
-        let theme = self.app.theme();
-        self.simulator()
-            .snapshot(&theme)
-            .and_then(|s| s.matches_hash(path))
-            .expect("render the window")
-    }
-
-    /// Where [`Self::looks_like`] keeps the frame saved at `path`.
-    fn frame_file(&self, path: &std::path::Path) -> PathBuf {
-        let dir = path.parent().expect("dir");
-        std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| {
-                p.extension().is_some_and(|e| e == "sha256")
-                    && p.file_name()
-                        .is_some_and(|n| n.to_string_lossy().starts_with("frame-"))
-            })
-            .unwrap_or_else(|| dir.join("frame-none.sha256"))
+    /// A hash of the window as drawn.
+    fn frame(&self) -> u64 {
+        self.simulator().frame(&self.app.theme())
     }
 
     /// Everything the app holds, as text (the pointer is left out: every
@@ -928,16 +951,16 @@ impl Ui {
         state.join("\n")
     }
 
-    fn simulator(&self) -> iced_test::Simulator<'_, Message> {
-        let settings = iced_test::core::Settings {
-            default_font: crate::platform::mono_font(),
-            ..iced_test::core::Settings::default()
-        };
-        iced_test::Simulator::with_size(settings, WINDOW, self.app.view())
+    fn simulator(&self) -> sim::Sim<'_> {
+        sim::Sim::new(self.app.view(), &self.widgets)
     }
 
     /// Every piece of text shown, where it can be clicked.
     pub fn targets(&self) -> Vec<Target> {
+        profile::time("targets", || self.find_targets())
+    }
+
+    fn find_targets(&self) -> Vec<Target> {
         let mut found = Vec::new();
         {
             let found = &mut found;
@@ -965,9 +988,13 @@ impl Ui {
 
     /// The messages a press of `button` at `at` produces (nothing runs).
     pub fn press(&self, at: Point, button: mouse::Button) -> Vec<Message> {
-        let mut sim = self.simulator();
+        profile::time("press", || self.press_messages(at, button))
+    }
+
+    fn press_messages(&self, at: Point, button: mouse::Button) -> Vec<Message> {
+        let mut sim = sim::Sim::new(self.app.view(), &self.probes);
         sim.point_at(at);
-        let _ = sim.simulate([
+        sim.simulate([
             iced::Event::Mouse(mouse::Event::CursorMoved { position: at }),
             iced::Event::Mouse(mouse::Event::ButtonPressed(button)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(button)),
@@ -989,12 +1016,12 @@ impl Ui {
         let messages = {
             let mut sim = self.simulator();
             sim.point_at(from);
-            let _ = sim.simulate([
+            sim.simulate([
                 iced::Event::Mouse(mouse::Event::CursorMoved { position: from }),
                 iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             ]);
             sim.point_at(to);
-            let _ = sim.simulate([
+            sim.simulate([
                 iced::Event::Mouse(mouse::Event::CursorMoved { position: to }),
                 iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             ]);
@@ -1008,7 +1035,7 @@ impl Ui {
         let step = |ui: &Self, at: Point, event: mouse::Event| -> Vec<Message> {
             let mut sim = ui.simulator();
             sim.point_at(at);
-            let _ = sim.simulate([
+            sim.simulate([
                 iced::Event::Mouse(mouse::Event::CursorMoved { position: at }),
                 iced::Event::Mouse(event),
             ]);
@@ -1198,6 +1225,8 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Ui>,
 {
+    let started = std::time::Instant::now();
+    let _ = profile::take();
     let mut silent = Vec::new();
     let mut screens = VecDeque::from([Screen {
         name: name.to_owned(),
@@ -1211,6 +1240,7 @@ where
         let Some(base) = reach(&build, &screen.path, std::mem::take(&mut first)).await else {
             continue;
         };
+        let plan_started = std::time::Instant::now();
         let targets = base.targets();
         let labels: std::collections::HashSet<String> =
             targets.iter().map(|t| t.label.clone()).collect();
@@ -1246,13 +1276,14 @@ where
             }
         }
         let modal_before = modal(&base.app);
-        drop(base);
+        profile::record("plan", plan_started.elapsed());
+        profile::time("drop", || drop(base));
         for (target, button, button_name, key) in plan {
             let _ = tried.insert(key.clone());
             let Some(mut ui) = reach(&build, &screen.path, false).await else {
                 continue;
             };
-            let fx = ui.click_at(&target, button).await;
+            let fx = profile::time_async("click", ui.click_at(&target, button)).await;
             let quiet = fx.silent() && !fx.change_reselected && !reselect(&fx.messages);
             println!(
                 "{} › {button_name} {:?} → {}{}",
@@ -1278,31 +1309,41 @@ where
                 "TabList(CloseTab",
                 "Picker(Pick",
             ];
-            if screen.path.len() >= depth()
-                || !(fx.state_changed || fx.repo_changed)
-                || elsewhere.iter().any(|e| fx.messages[0].starts_with(e))
-            {
-                continue;
+            'follow: {
+                if screen.path.len() >= depth()
+                    || !(fx.state_changed || fx.repo_changed)
+                    || elsewhere.iter().any(|e| fx.messages[0].starts_with(e))
+                {
+                    break 'follow;
+                }
+                // Follow clicks that show new buttons: a dialog or menu, or
+                // what a selection brings up.
+                ui.settle();
+                let opened = modal(&ui.app);
+                let new_labels = ui.targets().iter().any(|t| !labels.contains(&t.label));
+                if !(new_labels || opened != modal_before) {
+                    break 'follow;
+                }
+                let id = format!("{opened:?} {}", key.0);
+                if seen_screens.insert(id) {
+                    let mut path = screen.path.clone();
+                    path.push((target.label.clone(), button));
+                    screens.push_back(Screen {
+                        name: format!("{} › {button_name} {:?}", screen.name, target.label.trim()),
+                        path,
+                        known: (opened == modal_before).then(|| labels.clone()),
+                    });
+                }
             }
-            // Follow clicks that show new buttons: a dialog or menu, or
-            // what a selection brings up.
-            ui.settle();
-            let opened = modal(&ui.app);
-            let new_labels = ui.targets().iter().any(|t| !labels.contains(&t.label));
-            if !(new_labels || opened != modal_before) {
-                continue;
-            }
-            let id = format!("{opened:?} {}", key.0);
-            if seen_screens.insert(id) {
-                let mut path = screen.path.clone();
-                path.push((target.label.clone(), button));
-                screens.push_back(Screen {
-                    name: format!("{} › {button_name} {:?}", screen.name, target.label.trim()),
-                    path,
-                    known: (opened == modal_before).then(|| labels.clone()),
-                });
-            }
+            // The temp folders go with it.
+            profile::time("drop", || drop(ui));
         }
+    }
+    if profile::enabled() {
+        println!(
+            "{}",
+            profile::report(name, started.elapsed(), &profile::take())
+        );
     }
     silent
 }
@@ -1317,17 +1358,21 @@ where
     // Only the first build is measured (it checks what `build` asserts
     // about its clicks); later ones only get back to the same screen.
     REACHING.set(!first);
-    let ui = async {
-        let mut ui = build().await;
+    let ui = profile::time_async("reach", async {
+        let mut ui = profile::time_async("reach › build", build()).await;
         ui.settle();
-        for (label, button) in path {
-            let targets = ui.targets();
-            let target = targets.iter().find(|t| &t.label == label)?.clone();
-            let _ = ui.click_at(&target, *button).await;
-            ui.settle();
-        }
+        profile::time_async("reach › path", async {
+            for (label, button) in path {
+                let targets = ui.targets();
+                let target = targets.iter().find(|t| &t.label == label)?.clone();
+                let _ = ui.click_at(&target, *button).await;
+                ui.settle();
+            }
+            Some(())
+        })
+        .await?;
         Some(ui)
-    }
+    })
     .await;
     REACHING.set(false);
     let mut ui = ui?;
@@ -1915,7 +1960,7 @@ async fn reselecting_an_open_conflict_keeps_its_choices() {
 async fn sweep_merge_conflict() {
     let silent = sweep("merge conflict", || async {
         working_tree(
-            Ui::open_with(|r| {
+            Ui::open_prepared("merged", |r| {
                 diverged(r);
                 let _ = r.git_output(&["merge", "feature"]);
             })
@@ -1936,7 +1981,7 @@ async fn sweep_merge_conflict() {
 async fn sweep_rebase_stopped() {
     let silent = sweep("rebase stopped", || async {
         working_tree(
-            Ui::open_with(|r| {
+            Ui::open_prepared("rebase stopped", |r| {
                 diverged(r);
                 let _ = r.git_output(&["rebase", "feature"]);
             })
@@ -1956,7 +2001,7 @@ async fn sweep_rebase_stopped() {
 #[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
 async fn sweep_bisect() {
     let silent = sweep("bisect", || async {
-        Ui::open_with(|r| {
+        Ui::open_prepared("bisecting", |r| {
             r.git(&["reset", "-q", "--hard"]);
             r.git(&["clean", "-qfd"]);
             r.git(&["bisect", "start", "HEAD", "HEAD~2"]);
@@ -2539,7 +2584,7 @@ async fn sweep_selected_lines() {
 #[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
 async fn sweep_rebase_editor() {
     let silent = sweep("rebase editor", || async {
-        let mut ui = Ui::open_with(|r| {
+        let mut ui = Ui::open_prepared("clean", |r| {
             r.git(&["reset", "-q", "--hard"]);
             r.git(&["clean", "-qfd"]);
         })
@@ -2561,7 +2606,7 @@ async fn sweep_rebase_editor() {
 #[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
 async fn sweep_left_changes() {
     let silent = sweep("left changes", || async {
-        let ui = Ui::open_with(|r| {
+        let ui = Ui::open_prepared("left on main", |r| {
             r.git(&["reset", "-q", "--hard"]);
             r.git(&["clean", "-qfd"]);
             r.write("a.txt", "left behind\n");
@@ -3855,7 +3900,7 @@ async fn diff_exposes_copy_only_for_a_selection() {
 async fn sweep_conflict_resolver() {
     let silent = sweep("conflict resolver", || async {
         let mut ui = working_tree(
-            Ui::open_with(|r| {
+            Ui::open_prepared("merged", |r| {
                 diverged(r);
                 let _ = r.git_output(&["merge", "feature"]);
             })
@@ -3889,7 +3934,7 @@ async fn sweep_conflict_resolver() {
 async fn sweep_rebase_resolved() {
     let silent = sweep("rebase resolved", || async {
         working_tree(
-            Ui::open_with(|r| {
+            Ui::open_prepared("rebase resolved", |r| {
                 diverged(r);
                 let _ = r.git_output(&["rebase", "feature"]);
                 r.write("a.txt", "resolved\n");
@@ -3978,7 +4023,7 @@ async fn dragging_the_divider_resizes_the_file_list_and_remembers_it() {
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
         ];
-        let _ = sim.simulate(
+        sim.simulate(
             std::iter::once(iced::Event::Mouse(mouse::Event::CursorMoved {
                 position: at,
             }))
@@ -4027,7 +4072,7 @@ async fn dragging_the_refs_divider_resizes_the_refs_panel_and_remembers_it() {
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
         ];
-        let _ = sim.simulate(
+        sim.simulate(
             std::iter::once(iced::Event::Mouse(mouse::Event::CursorMoved {
                 position: at,
             }))
