@@ -133,7 +133,7 @@ trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }
 ### 7.2 계정
 - Personal Access Token(1차), OAuth Device Flow(2차)
 - self-hosted GitLab: base URL, 사내 CA 인증서 옵션
-- ✅ 설정 → ACCOUNTS: 서버·사용자·토큰으로 로그인/로그아웃. 토큰은 git credential helper에 저장하고(`gf_git::ops::credential`), 설정 파일에는 계정 메타데이터(`settings.accounts`)만 둡니다
+- ✅ 설정 → ACCOUNTS: 서버·사용자·토큰으로 로그인/로그아웃. 토큰은 git credential helper에 저장하고(`gf_git::ops::credential`), 설정 파일에는 계정 메타데이터(`settings.accounts`)만 둡니다. 서비스(GitHub·GitLab·Bitbucket·Gitea·Azure)는 호스트 이름으로 추측하고, 이름으로 알 수 없거나 틀리면 로그인 다이얼로그의 service 줄이나 계정 태그 클릭으로 고릅니다(`settings.services`에 호스트별로 저장). 토큰 페이지 버튼(`Get token ↗`)은 토큰을 입력하는 로그인 다이얼로그에만 둡니다
   - 계정마다 서비스(호스트로 추정: GitHub·GitLab·Bitbucket·Gitea·Azure), helper에 토큰이 남아 있는지(`git credential fill`, 만료·폐기로 git이 지웠으면 ⚠와 [ Log in again ]), 그 서버를 쓰는 열린 저장소를 보여 줍니다
   - 열린 저장소가 쓰지만 로그인하지 않은 HTTPS 서버는 NOT LOGGED IN에 [ Log in ]으로, SSH 서버는 따로 보여 줍니다. [ Get token ↗ ]은 서비스의 토큰 생성 페이지를 필요한 scope와 함께 엽니다
   - 설정에서 로그인하면 열린 저장소의 그 서버 remote에 `git ls-remote`로 토큰을 확인하고, 서버가 거절하면 저장하지 않고 다이얼로그에 이유를 보입니다

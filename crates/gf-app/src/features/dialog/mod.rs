@@ -216,6 +216,17 @@ pub struct Choice {
     pub inline: bool,
     /// Option under the pointer (inline only).
     hovered: Option<usize>,
+    /// Drawn on one (wrapping) line: `(•) a  ( ) b`, for short labels.
+    pub in_a_row: bool,
+}
+
+/// A line that says what to do outside gf, with a button that opens the
+/// page for it (`[ Get token ↗ ]`). Shown after the fields and options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub text: String,
+    /// The button's label and the page it opens; no button when `None`.
+    pub open: Option<(String, String)>,
 }
 
 /// How a line under an option reads.
@@ -283,6 +294,7 @@ pub struct Dialog<P> {
     pub area: Option<Area>,
     pub checks: Vec<Check>,
     pub choice: Option<Choice>,
+    pub link: Option<Link>,
     pub confirm_label: String,
     pub severity: Severity,
     pub purpose: P,
@@ -319,6 +331,8 @@ pub enum Message {
     Pick(usize),
     /// Pointer over an inline option (`None`: left it).
     Hover(Option<usize>),
+    /// The [`Link`]'s button: the app opens the page; the dialog stays.
+    OpenLink(String),
     DontAsk,
     Submit,
     Cancel,
@@ -358,6 +372,7 @@ impl<P: Clone> Dialog<P> {
             area: None,
             checks: Vec::new(),
             choice: None,
+            link: None,
             confirm_label: confirm_label.into(),
             severity: Severity::Normal,
             purpose,
@@ -531,7 +546,28 @@ impl<P: Clone> Dialog<P> {
             selected,
             inline: false,
             hovered: None,
+            in_a_row: false,
         });
+        self
+    }
+
+    /// Options with short labels on one line (see [`Choice::in_a_row`]).
+    pub fn options_in_a_row(
+        mut self,
+        label: impl Into<String>,
+        options: Vec<Opt>,
+        selected: usize,
+    ) -> Self {
+        self = self.options(label, options, selected);
+        if let Some(c) = self.choice.as_mut() {
+            c.in_a_row = true;
+        }
+        self
+    }
+
+    /// A line with a button that opens a page (see [`Link`]).
+    pub fn link(mut self, link: Link) -> Self {
+        self.link = Some(link);
         self
     }
 
@@ -701,6 +737,7 @@ impl<P: Clone> Dialog<P> {
                 self.dont_ask = !self.dont_ask;
                 None
             }
+            Message::OpenLink(_) => None,
             // ⏎ on a highlighted suggestion picks it; the next ⏎ submits.
             Message::Submit
                 if let Some((i, value)) = self.fields.iter().enumerate().find_map(|(i, f)| {
@@ -869,7 +906,19 @@ impl<P: Clone> Dialog<P> {
             col = col.push(column![dim(t, format!("│ {}", area.label)), editor].spacing(2));
         }
         let inline = self.choice.as_ref().filter(|c| c.inline);
-        if let Some(choice) = self.choice.as_ref().filter(|c| !c.inline) {
+        if let Some(choice) = self.choice.as_ref().filter(|c| c.in_a_row) {
+            let options = choice.options.iter().enumerate().map(|(i, o)| {
+                let picked = i == choice.selected;
+                let text = format!("{} {}", if picked { "(•)" } else { "( )" }, o.label);
+                let pick = (!o.disabled).then_some(Message::Choose(i));
+                widgets::text_button(t, &text, None, pick)
+            });
+            col = col.push(column![
+                dim(t, format!("│ {}", choice.label)),
+                iced::widget::Row::with_children(options).spacing(4).wrap()
+            ]);
+        }
+        if let Some(choice) = self.choice.as_ref().filter(|c| !c.inline && !c.in_a_row) {
             col = col.push(dim(t, format!("│ {}", choice.label)));
             for (i, o) in choice.options.iter().enumerate() {
                 let picked = i == choice.selected;
@@ -889,6 +938,19 @@ impl<P: Clone> Dialog<P> {
                     col = col.push(colored(t, format!("│       {line}"), color));
                 }
             }
+        }
+        if let Some(link) = &self.link {
+            let mut line = row![mono(t, format!("│ {}", link.text)).width(Length::Fill)]
+                .spacing(6)
+                .align_y(iced::Alignment::Center);
+            if let Some((label, url)) = &link.open {
+                line = line.push(widgets::tip(
+                    t,
+                    widgets::text_button(t, label, None, Some(Message::OpenLink(url.clone()))),
+                    format!("open {url}"),
+                ));
+            }
+            col = col.push(line);
         }
         for (i, c) in self.checks.iter().enumerate() {
             let label = format!("{} {}", if c.value { "■" } else { "□" }, c.label);
@@ -1444,6 +1506,31 @@ mod tests {
             d.enter(),
             Some(Outcome::Submitted { purpose: 1, .. })
         ));
+    }
+
+    #[test]
+    fn options_in_a_row_pick_like_radio_buttons_and_links_leave_it_open() {
+        let mut d = Dialog::confirm("Log in", vec![], "Log in", ())
+            .field("server", "", "")
+            .options_in_a_row(
+                "service",
+                vec![Opt::new("GitHub"), Opt::new("GitLab"), Opt::new("other")],
+                0,
+            )
+            .link(Link {
+                text: "Use a token".into(),
+                open: Some(("Get token ↗".into(), "https://example.com".into())),
+            });
+        assert!(d.update(Message::Choose(1)).is_none());
+        assert!(
+            d.update(Message::OpenLink("https://example.com".into()))
+                .is_none(),
+            "opening the page does not close the dialog"
+        );
+        match d.update(Message::Submit) {
+            Some(Outcome::Submitted { choice, .. }) => assert_eq!(choice, Some(1)),
+            other => panic!("not submitted: {other:?}"),
+        }
     }
 
     #[test]

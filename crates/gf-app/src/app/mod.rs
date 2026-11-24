@@ -985,26 +985,33 @@ impl App {
                     None => task,
                 }
             }
+            Message::Dialog(dialog::Message::OpenLink(url)) => self.open_url(&url),
             Message::Dialog(m) => {
                 let Some(dialog) = self.dialog.as_mut() else {
                     return Task::none();
                 };
                 let typed = matches!(m, dialog::Message::Field(..));
                 let before: Vec<String> = dialog.fields.iter().map(|f| f.value.clone()).collect();
-                match dialog.update(m) {
-                    Some(outcome) => self.on_dialog_outcome(outcome),
-                    // A suggestion filled a field in: keep typing at its end.
-                    None if !typed => dialog
-                        .fields
-                        .iter()
-                        .zip(&before)
-                        .position(|(f, old)| f.value != *old)
-                        .and_then(dialog::field_id)
-                        .map_or_else(Task::none, |id| {
-                            Task::batch([operation::focus(id), operation::move_cursor_to_end(id)])
-                        }),
-                    None => Task::none(),
+                if let Some(outcome) = dialog.update(m) {
+                    return self.on_dialog_outcome(outcome);
                 }
+                self.sync_login_dialog(before.first().map(String::as_str));
+                let Some(dialog) = self.dialog.as_ref() else {
+                    return Task::none();
+                };
+                if typed {
+                    return Task::none();
+                }
+                // A suggestion filled a field in: keep typing at its end.
+                dialog
+                    .fields
+                    .iter()
+                    .zip(&before)
+                    .position(|(f, old)| f.value != *old)
+                    .and_then(dialog::field_id)
+                    .map_or_else(Task::none, |id| {
+                        Task::batch([operation::focus(id), operation::move_cursor_to_end(id)])
+                    })
             }
 
             Message::Core(CoreEvent::Command(e)) => {

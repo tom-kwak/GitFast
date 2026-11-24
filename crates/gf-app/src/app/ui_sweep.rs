@@ -5049,7 +5049,10 @@ async fn settings_accounts_show_the_saved_token_and_notice_when_it_is_gone() {
 
     assert!(ui.shows("GitLab"), "the service is told by the host");
     assert!(ui.shows("✓ token saved"));
-    assert!(ui.shows("[ Get token ↗ ]"));
+    assert!(
+        !ui.shows("[ Get token ↗ ]"),
+        "a saved login needs no token page; the log-in dialog offers it"
+    );
     assert!(ui.shows("credential helper `store`"));
 
     // The token disappears outside gf (expired and erased by git, or
@@ -5062,13 +5065,13 @@ async fn settings_accounts_show_the_saved_token_and_notice_when_it_is_gone() {
     let dialog = ui.app.dialog.as_ref().expect("log-in dialog");
     assert_eq!(dialog.fields[0].value, "gitlab.example.com");
     assert_eq!(dialog.fields[1].value, "me");
+    let link = dialog.link.as_ref().expect("token line");
     assert!(
-        dialog.body.iter().any(
-            |l| l.contains("https://gitlab.example.com/-/user_settings/personal_access_tokens")
-        ),
-        "{:?}",
-        dialog.body
+        link.open.as_ref().is_some_and(|(_, url)| url
+            .starts_with("https://gitlab.example.com/-/user_settings/personal_access_tokens")),
+        "{link:?}"
     );
+    assert!(ui.shows("[ Get token ↗ ]"), "next to where the token goes");
 }
 
 #[tokio::test]
@@ -5092,6 +5095,19 @@ async fn settings_list_servers_the_open_tabs_use_and_log_in_to_one_in_a_click() 
     let dialog = ui.app.dialog.as_ref().expect("log-in dialog");
     assert_eq!(dialog.fields[0].value, "git.example.com");
 
+    // The name tells nothing: no token page until the service is picked.
+    assert!(ui.shows("(•) other"));
+    assert!(!ui.shows("[ Get token ↗ ]"));
+    let _ = ui.click("( ) GitLab").await;
+    assert!(ui.shows("(•) GitLab"));
+    let link = ui.app.dialog.as_ref().and_then(|d| d.link.clone());
+    assert!(
+        link.as_ref()
+            .and_then(|l| l.open.as_ref())
+            .is_some_and(|(_, url)| url.starts_with("https://git.example.com/-/user_settings/")),
+        "{link:?}"
+    );
+
     // The login is tried on the tab's remote there before it is kept.
     fill_login(&mut ui, "git.example.com", "me", "tok").await;
     assert!(ui.app.dialog.is_none());
@@ -5102,6 +5118,68 @@ async fn settings_list_servers_the_open_tabs_use_and_log_in_to_one_in_a_click() 
     );
     assert!(!ui.shows("─ NOT LOGGED IN"), "now an account");
     assert!(ui.shows("used by"));
+    assert_eq!(
+        ui.app
+            .settings
+            .services
+            .get("git.example.com")
+            .map(String::as_str),
+        Some("gitlab"),
+        "the picked service is kept for the host"
+    );
+    assert!(ui.shows("GitLab"));
+
+    // The tag asks again.
+    let _ = ui.click("GitLab").await;
+    let dialog = ui.app.dialog.as_ref().expect("service dialog");
+    assert_eq!(dialog.title, "Which service is git.example.com?");
+    let _ = ui.click("( ) Gitea").await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert!(ui.app.dialog.is_none());
+    assert!(ui.shows("Gitea"));
+    assert_eq!(
+        ui.app
+            .settings
+            .services
+            .get("git.example.com")
+            .map(String::as_str),
+        Some("gitea")
+    );
+}
+
+#[tokio::test]
+async fn the_log_in_dialog_guesses_the_service_again_as_the_server_is_typed() {
+    let mut ui = Ui::welcome().await;
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    let _ = ui.click("[ + Add account ]").await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(
+            0,
+            "gitlab.example.com".into(),
+        )))
+        .await;
+    assert!(ui.shows("(•) GitLab"));
+    // A pick holds while other fields are typed in.
+    let _ = ui.click("( ) Gitea").await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(1, "me".into())))
+        .await;
+    assert!(ui.shows("(•) Gitea"));
+    // A new server guesses again.
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(
+            0,
+            "github.com".into(),
+        )))
+        .await;
+    assert!(ui.shows("(•) GitHub"));
+    let link = ui.app.dialog.as_ref().and_then(|d| d.link.clone());
+    assert!(
+        link.as_ref()
+            .and_then(|l| l.open.as_ref())
+            .is_some_and(|(_, url)| url.starts_with("https://github.com/settings/tokens/new")),
+        "{link:?}"
+    );
 }
 
 #[tokio::test]

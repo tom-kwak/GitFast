@@ -154,6 +154,11 @@ pub enum Purpose {
     RunGit(Vec<String>),
     /// Fields: URL, folder. Clone it there, then open it.
     Clone,
+    /// Save the hosting service picked for `host` (the option chosen).
+    SetService {
+        host: String,
+        service: Option<crate::features::settings_view::Provider>,
+    },
     /// Forget the login (`settings.accounts`) in git's credential helper.
     LogOut(gf_config::Account),
     /// Set git's global `credential.helper` so logins can be kept.
@@ -607,6 +612,26 @@ impl App {
                         leave_from: leave_from.filter(|_| choice != Some(1)),
                         blocked,
                     },
+                    Purpose::SetService { host, .. } => Purpose::SetService {
+                        host,
+                        service: choice.and_then(|i| {
+                            crate::features::settings_view::Provider::ALL
+                                .get(i)
+                                .copied()
+                        }),
+                    },
+                    // The service picked beside the server is kept for it.
+                    Purpose::LogIn(retry) => {
+                        let picked = choice.and_then(|i| {
+                            crate::features::settings_view::Provider::ALL
+                                .get(i)
+                                .copied()
+                        });
+                        if let Some(server) = values.first() {
+                            self.remember_service(server, picked);
+                        }
+                        Purpose::LogIn(retry)
+                    }
                     other => other,
                 };
                 (purpose, values, checks, dont_ask_again)
@@ -947,6 +972,7 @@ impl App {
             Purpose::RunGit(args) => self.run_git(args),
             Purpose::Clone => self.run_clone(&value(0), &value(1)),
             Purpose::LogOut(account) => self.log_out(account),
+            Purpose::SetService { host, service } => self.set_service(&host, service),
             Purpose::UseCredentialHelper(helper) => self.use_credential_helper(helper),
             Purpose::SetTool(tool) => self.set_tool(tool, &value(0)),
             Purpose::Squash { repo, ids } => {

@@ -11,7 +11,7 @@ use gf_core::model::RepoId;
 use super::dialogs::{Confirm, Purpose};
 use super::{App, Message, OpKind, RemoteOp};
 use crate::features::command_log::NoteKind;
-use crate::features::dialog::{Dialog, Suggestion};
+use crate::features::dialog::{Dialog, Link, Opt, Suggestion};
 use crate::features::settings_view::{self, Probe, Provider, Section, ServerUse};
 use crate::theme::{self, Tokens};
 
@@ -187,12 +187,7 @@ impl App {
                 )),
                 None => Task::none(),
             },
-            M::OpenUrl(url) => {
-                if let Err(e) = crate::platform::open_url(&url) {
-                    self.flash(NoteKind::Error, format!("could not open {url}: {e}"));
-                }
-                Task::none()
-            }
+            M::PickService(host) => self.service_dialog(host),
             M::UseHelper(helper) => self.confirm(
                 Confirm::change(
                     "credential-helper",
@@ -373,17 +368,7 @@ impl App {
                 .unwrap_or_default()
         });
         let mut body = ask.reason.clone().map_or_else(Vec::new, |r| vec![r]);
-        let provider = known.as_ref().map(|(_, host)| Provider::of(host));
-        let page = known
-            .as_ref()
-            .zip(provider)
-            .and_then(|((protocol, host), p)| p.token_page(protocol, host));
-        body.push(match (provider, page) {
-            (Some(p), Some(page)) => format!("Use {} as the password: {page}", p.token_hint()),
-            _ => "Use a personal access token as the password \
-                  (GitHub: Settings → Developer settings; GitLab: Preferences → Access tokens)."
-                .to_owned(),
-        });
+        let provider = self.service_of(known.as_ref());
         body.push(
             "gf hands it to git's credential helper (Keychain, Credential Manager …) and \
              does not keep it; git in the terminal uses it too."
@@ -409,16 +394,120 @@ impl App {
         )
         .field("server", server, "github.com")
         .suggest(servers, "not a server of the open tabs");
+        let options = Provider::ALL
+            .iter()
+            .map(|p| Opt::new(p.pick_label()))
+            .collect();
+        let selected = service_index(provider);
         let mut dialog = dialog
             .field("user name", user, "your user name on the server")
             .field("token", "", "personal access token or password")
-            .secret();
+            .secret()
+            .options_in_a_row("service", options, selected)
+            .link(token_link(known.as_ref(), provider));
         dialog.error = ask.error;
         let task = self.open_dialog(dialog);
         match first_empty {
             0 => task,
             i => crate::features::dialog::field_id(i).map_or(task, iced::widget::operation::focus),
         }
+    }
+
+    /// The hosting service of a server: picked for its host in the
+    /// settings, else guessed from the name. `Other` for no server.
+    fn service_of(&self, server: Option<&(String, String)>) -> Provider {
+        server.map_or(Provider::Other, |(_, host)| {
+            Provider::for_host(&self.settings.services, host)
+        })
+    }
+
+    /// Keeps the log-in dialog in step after one of its messages: a
+    /// server typed in picks its service again, and the token line
+    /// follows the server and the service. `server_before` is the server
+    /// field's value before the message.
+    pub(super) fn sync_login_dialog(&mut self, server_before: Option<&str>) {
+        let Some(server) = self
+            .dialog
+            .as_ref()
+            .filter(|d| matches!(d.purpose, Purpose::LogIn(_)))
+            .and_then(|d| d.fields.first())
+            .map(|f| f.value.clone())
+        else {
+            return;
+        };
+        let known = credential::server_of(&server);
+        let guess = (server_before != Some(server.as_str()))
+            .then(|| service_index(self.service_of(known.as_ref())));
+        let Some(dialog) = self.dialog.as_mut() else {
+            return;
+        };
+        let Some(choice) = dialog.choice.as_mut() else {
+            return;
+        };
+        if let Some(i) = guess {
+            choice.selected = i;
+        }
+        let provider = Provider::ALL
+            .get(choice.selected)
+            .copied()
+            .unwrap_or(Provider::Other);
+        dialog.link = Some(token_link(known.as_ref(), provider));
+    }
+
+    /// Saves the service picked for `server`'s host; one the name already
+    /// tells is not kept, so the guess applies again.
+    pub(super) fn remember_service(&mut self, server: &str, picked: Option<Provider>) {
+        let (Some((_, host)), Some(picked)) = (credential::server_of(server), picked) else {
+            return;
+        };
+        let keep = (picked != Provider::of(&host)).then(|| picked.key());
+        if self.settings.services.get(&host).map(String::as_str) != keep {
+            self.settings.set_service(&host, keep);
+            self.save_settings();
+        }
+    }
+
+    /// Asks which hosting service `host` is (its tag on the settings
+    /// screen was clicked).
+    pub(super) fn service_dialog(&mut self, host: String) -> Task<Message> {
+        let current = Provider::for_host(&self.settings.services, &host);
+        let options = Provider::ALL
+            .iter()
+            .map(|p| Opt::new(p.pick_label()))
+            .collect();
+        let dialog = Dialog::confirm(
+            format!("Which service is {host}?"),
+            vec![
+                "gf guesses it from the name. It decides which page makes tokens \
+                 and what the log-in asks for."
+                    .into(),
+            ],
+            "Save",
+            Purpose::SetService {
+                host,
+                service: None,
+            },
+        )
+        .options_in_a_row("service", options, service_index(current));
+        self.open_dialog(dialog)
+    }
+
+    pub(super) fn set_service(&mut self, host: &str, service: Option<Provider>) -> Task<Message> {
+        if let Some(service) = service {
+            self.remember_service(host, Some(service));
+            self.flash(
+                NoteKind::Info,
+                format!("{host} is {}", service.pick_label()),
+            );
+        }
+        Task::none()
+    }
+
+    pub(super) fn open_url(&mut self, url: &str) -> Task<Message> {
+        if let Err(e) = crate::platform::open_url(url) {
+            self.flash(NoteKind::Error, format!("could not open {url}: {e}"));
+        }
+        Task::none()
     }
 
     /// An operation failed because `error`'s server wants a login: ask
@@ -882,6 +971,24 @@ fn server_label(protocol: &str, host: &str) -> String {
         host.to_owned()
     } else {
         format!("{protocol}://{host}")
+    }
+}
+
+/// Where `provider` sits among the log-in dialog's options.
+fn service_index(provider: Provider) -> usize {
+    Provider::ALL
+        .iter()
+        .position(|p| *p == provider)
+        .unwrap_or(Provider::ALL.len() - 1)
+}
+
+/// The log-in dialog's token line: what to make and, for a known service,
+/// a button to the page that makes it.
+fn token_link(server: Option<&(String, String)>, provider: Provider) -> Link {
+    let page = server.and_then(|(protocol, host)| provider.token_page(protocol, host));
+    Link {
+        text: format!("Use {} as the password.", provider.token_hint()),
+        open: page.map(|page| ("Get token ↗".to_owned(), page)),
     }
 }
 
