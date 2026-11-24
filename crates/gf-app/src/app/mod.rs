@@ -90,6 +90,10 @@ pub enum Shortcut {
     /// ⌘⇧[ / ⌘⇧]: the tab to the left / right.
     PrevTab,
     NextTab,
+    /// ⌘⌥⇧[ / ⌘⌥⇧]: move the active tab one place left / right.
+    MoveTab {
+        right: bool,
+    },
     CloseTab,
     Refresh,
     SelectTab(usize),
@@ -694,6 +698,7 @@ impl App {
                 tabs::Message::Open => self.update(Message::OpenPicker),
                 tabs::Message::Settings => self.toggle_settings(),
                 tabs::Message::List => self.toggle_tab_list(),
+                tabs::Message::Moved(from, to) => self.move_tab(from, to),
             },
             Message::Toolbar(m) => self.on_toolbar(m),
             Message::Welcome(m) => match m {
@@ -1691,6 +1696,32 @@ impl App {
         self.restore_focus()
     }
 
+    /// Moves the tab at `from` to position `to`, keeping the same tab
+    /// active; false when there is nothing to move.
+    fn shift_tab(&mut self, from: usize, to: usize) -> bool {
+        let n = self.tabs.len();
+        if from >= n || to >= n || from == to {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = tabs::index_after_move(self.active, from, to);
+        // Overlays that list tabs by position would point at other tabs.
+        self.switcher = None;
+        self.tab_list = None;
+        true
+    }
+
+    /// A tab dragged in the tab bar or moved with ⌘⌥⇧[ / ⌘⌥⇧]: moves it
+    /// and remembers the order.
+    fn move_tab(&mut self, from: usize, to: usize) -> Task<Message> {
+        if !self.shift_tab(from, to) {
+            return Task::none();
+        }
+        self.save_settings();
+        self.reveal_active_tab()
+    }
+
     fn close_tab(&mut self, i: usize) -> Task<Message> {
         if i >= self.tabs.len() {
             return Task::none();
@@ -1808,6 +1839,14 @@ impl App {
                 }
                 let by = if k == Shortcut::PrevTab { n - 1 } else { 1 };
                 self.select_tab((self.active + by) % n)
+            }
+            Shortcut::MoveTab { right } => {
+                let to = if right {
+                    self.active + 1
+                } else {
+                    self.active.wrapping_sub(1)
+                };
+                self.move_tab(self.active, to)
             }
             Shortcut::CloseTab => self.close_tab(self.active),
             Shortcut::Refresh => self.refresh_active(),
@@ -2026,7 +2065,7 @@ impl App {
         };
 
         let mut layout = column![
-            tabs::view(t, &self.tabs, self.active, self.tab_list.is_some()).map(Message::Tabs)
+            tabs::view(t, &self.tabs, self.active, self.tab_list.is_some(),).map(Message::Tabs)
         ]
         .height(Length::Fill);
         if let Some(tab) = tab {
@@ -2539,6 +2578,18 @@ fn shortcut(
         if physical == Physical::Code(Code::Comma) && !modifiers.shift() && !modifiers.alt() {
             return Some(Shortcut::Settings);
         }
+        // ⌘⌥⇧[ / ⌘⌥⇧]: move the tab (⌥ makes macOS type “ / ’, so by key).
+        if modifiers.shift() && modifiers.alt() {
+            match physical {
+                Physical::Code(Code::BracketLeft) => {
+                    return Some(Shortcut::MoveTab { right: false });
+                }
+                Physical::Code(Code::BracketRight) => {
+                    return Some(Shortcut::MoveTab { right: true });
+                }
+                _ => {}
+            }
+        }
         match key.as_ref() {
             Key::Named(Named::Enter) => return Some(Shortcut::Commit),
             Key::Named(Named::Backspace) => return Some(Shortcut::Forget),
@@ -2768,6 +2819,24 @@ mod tests {
             ),
             Some(Shortcut::NextTab)
         );
+        // With ⌥ too they move the tab (macOS types “ / ‘ with ⌥⇧[ / ⌥⇧]).
+        let cmd_alt_shift = cmd_shift | keyboard::Modifiers::ALT;
+        for (key, code, right) in [
+            ("{", Code::BracketLeft, false),
+            ("”", Code::BracketLeft, false),
+            ("}", Code::BracketRight, true),
+            ("’", Code::BracketRight, true),
+        ] {
+            assert_eq!(
+                press(
+                    Key::Character(key.into()),
+                    code,
+                    cmd_alt_shift,
+                    event::Status::Ignored
+                ),
+                Some(Shortcut::MoveTab { right })
+            );
+        }
         // Without ⇧ the brackets still switch the main area's mode.
         assert_eq!(
             press(

@@ -9,6 +9,7 @@ pub mod fuzzy;
 pub mod graph_canvas;
 pub mod memo;
 pub mod pointer;
+pub mod reorder;
 pub mod selectable_line;
 pub mod splitter;
 pub mod virtual_list;
