@@ -169,6 +169,8 @@ pub enum RemoteOp {
 
 #[derive(Debug, PartialEq, Eq)]
 enum CheckoutPhase {
+    /// A linked tree reads its base before switching (see `guard_base`).
+    Guarding(RepoId),
     Measuring(RepoId),
     Running,
     RefreshQueued,
@@ -364,6 +366,13 @@ pub enum Message {
         from: String,
         changed: usize,
         blocked: Result<Vec<PathBuf>, String>,
+    },
+    /// The base of a linked tree, read before switching it to `name`.
+    WorkBaseRead {
+        repo: RepoId,
+        name: String,
+        remote: bool,
+        base: Option<String>,
     },
     /// Where a commit to find is in the main history (see `reveal`).
     CommitLocated {
@@ -1259,6 +1268,12 @@ impl App {
                 changed,
                 blocked,
             } => self.show_switch(repo, name, remote, from, changed, blocked),
+            Message::WorkBaseRead {
+                repo,
+                name,
+                remote,
+                base,
+            } => self.on_work_base(repo, name, remote, base),
             Message::Banner(m) => self.on_banner(m),
             Message::Conflict(m) => self.on_conflict_message(m),
             Message::Blame(m) => self.on_blame_message(m),

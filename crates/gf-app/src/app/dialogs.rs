@@ -74,6 +74,12 @@ pub enum Purpose {
     CheckoutDetached(String),
     /// Go to the tab of the worktree that has a branch checked out.
     OpenWorktreeTab(PathBuf),
+    /// A linked tree asked for its base: look at it detached (`rev`), or
+    /// with the check ticked, go to the main tree's tab.
+    LinkedBase {
+        rev: String,
+        main: Option<PathBuf>,
+    },
     Checkout {
         target: String,
         name: String,
@@ -790,6 +796,12 @@ impl App {
                 },
             ),
             Purpose::OpenWorktreeTab(path) => self.update(Message::Open(path)),
+            Purpose::LinkedBase {
+                main: Some(main), ..
+            } if check(0) => self.update(Message::Open(main)),
+            Purpose::LinkedBase { rev, .. } => {
+                self.run_purpose(Purpose::CheckoutDetached(rev), Vec::new(), Vec::new())
+            }
             Purpose::CheckoutDetached(rev) => {
                 let short: String = rev.chars().take(7).collect();
                 self.checkout_op(

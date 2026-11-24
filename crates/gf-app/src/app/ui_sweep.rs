@@ -2762,6 +2762,118 @@ async fn remote_checkout_switches_to_an_existing_tracking_branch() {
     );
 }
 
+/// A linked worktree on `work`, made from `feature`, open in the
+/// active tab (the fixture's main tree stays on `main`).
+async fn linked_from_feature(folder: &std::path::Path) -> Ui {
+    let path = folder.join("linked");
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["branch", "other"]);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work",
+            path.to_str().expect("path"),
+            "feature",
+        ]);
+    })
+    .await;
+    let _ = ui.send(Message::Open(path)).await;
+    assert!(ui.app.active_tab().expect("tab").repo.is_linked_worktree());
+    ui
+}
+
+#[tokio::test]
+async fn a_linked_worktree_looks_at_its_base_detached_instead_of_taking_it() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/feature".into()),
+        )))
+        .await;
+    let _ = ui.send(selected_checkout()).await;
+    let dialog = ui.app.dialog.as_ref().expect("asks about the base");
+    assert_eq!(dialog.title, "Base branch");
+    assert!(matches!(
+        &dialog.purpose,
+        Purpose::LinkedBase { main: Some(_), .. }
+    ));
+
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let linked = folder.path().join("linked");
+    let head = |args: &[&str]| {
+        let mut all = vec!["-C", linked.to_str().expect("path")];
+        all.extend_from_slice(args);
+        ui.fixture.repo.git(&all).trim().to_owned()
+    };
+    assert_eq!(head(&["branch", "--show-current"]), "", "detached");
+    assert_eq!(
+        head(&["rev-parse", "HEAD"]),
+        head(&["rev-parse", "feature"])
+    );
+    // `feature` stays free for the main tree.
+    let _ = ui.fixture.repo.git(&["switch", "-q", "feature"]);
+}
+
+#[tokio::test]
+async fn a_linked_worktree_can_open_the_main_tree_instead_of_its_base() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/feature".into()),
+        )))
+        .await;
+    let _ = ui.send(selected_checkout()).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Check(0))).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let tab = ui.app.active_tab().expect("tab");
+    assert!(!tab.repo.is_linked_worktree(), "the main tree's tab");
+    assert_eq!(
+        ui.fixture
+            .repo
+            .git(&[
+                "-C",
+                folder.path().join("linked").to_str().expect("path"),
+                "branch",
+                "--show-current"
+            ])
+            .trim(),
+        "work"
+    );
+}
+
+#[tokio::test]
+async fn a_linked_worktree_switches_to_other_branches_as_usual() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/other".into()),
+        )))
+        .await;
+    let _ = ui.send(selected_checkout()).await;
+    if let Some(d) = ui.app.dialog.as_ref() {
+        assert_ne!(d.title, "Base branch");
+        let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    }
+    let linked = folder.path().join("linked");
+    assert_eq!(
+        ui.fixture
+            .repo
+            .git(&[
+                "-C",
+                linked.to_str().expect("path"),
+                "branch",
+                "--show-current"
+            ])
+            .trim(),
+        "other"
+    );
+}
+
 async fn checkout_fixture() -> Ui {
     Ui::open_with(|repo| {
         repo.git(&["reset", "--hard"]);

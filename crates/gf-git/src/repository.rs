@@ -19,6 +19,8 @@ pub struct Repository {
     /// Fetch through gix (setting `git.gix_fetch`; needs feature
     /// `gix-fetch`). Off by default.
     pub(crate) gix_fetch: bool,
+    /// A linked working tree (`git worktree add`), not the main one.
+    pub(crate) linked: bool,
 }
 
 impl Repository {
@@ -72,6 +74,11 @@ impl Repository {
             Some(PathBuf::from(top.stdout_str().trim_end()))
         };
 
+        // A linked tree's git dir (`.git/worktrees/<name>`) points at the
+        // shared one through `commondir`; the main tree's has none.
+        let linked = tokio::fs::try_exists(git_dir.join("commondir"))
+            .await
+            .unwrap_or(false);
         let handle = RepoHandle {
             id: RepoId::new(),
             workdir,
@@ -86,6 +93,7 @@ impl Repository {
             },
             cli: CliBackend::new(handle, runner),
             gix_fetch: false,
+            linked,
         })
     }
 
@@ -95,6 +103,11 @@ impl Repository {
     pub fn with_gix_fetch(mut self, on: bool) -> Self {
         self.gix_fetch = on;
         self
+    }
+
+    /// Whether this is a linked working tree rather than the main one.
+    pub fn is_linked_worktree(&self) -> bool {
+        self.linked
     }
 
     pub fn handle(&self) -> &RepoHandle {

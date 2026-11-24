@@ -995,6 +995,105 @@ impl App {
     }
 
     fn checkout_branch(&mut self, target: String, name: String, remote: bool) -> Task<Message> {
+        match self.active_tab() {
+            Some(tab) if tab.repo.is_linked_worktree() => self.guard_base(target, name, remote),
+            _ => self.switch_branch_asked(target, name, remote),
+        }
+    }
+
+    /// A linked tree reads its base first: switching to it would hold the
+    /// branch the work goes back into, and the tree that merges it could
+    /// no longer check it out ([`Self::on_work_base`]).
+    fn guard_base(&mut self, target: String, name: String, remote: bool) -> Task<Message> {
+        let Some(tab) = self.active_tab() else {
+            return Task::none();
+        };
+        let (repo, r) = (tab.repo.id(), tab.repo.clone());
+        if self
+            .begin_checkout(target, CheckoutPhase::Guarding(repo))
+            .is_none()
+        {
+            return Task::none();
+        }
+        Task::perform(
+            async move { r.work_base().await.ok().flatten() },
+            move |base| Message::WorkBaseRead {
+                repo,
+                name: name.clone(),
+                remote,
+                base,
+            },
+        )
+    }
+
+    /// The base is read: switching to it is offered as a detached look (or
+    /// the main tree's tab); any other branch switches as usual. A base
+    /// that cannot be read for sure guards nothing (git still refuses a
+    /// branch another tree has).
+    pub(super) fn on_work_base(
+        &mut self,
+        repo: gf_core::model::RepoId,
+        name: String,
+        remote: bool,
+        base: Option<String>,
+    ) -> Task<Message> {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.repo.id() == repo) else {
+            return Task::none();
+        };
+        let git_dir = tab.repo.handle().git_dir.clone();
+        let Some(target) = self
+            .checkouts
+            .get(&git_dir)
+            .filter(|c| c.phase == CheckoutPhase::Guarding(repo))
+            .map(|c| c.target.clone())
+        else {
+            return Task::none();
+        };
+        self.checkouts.remove(&git_dir);
+        if self.active_tab().map(|t| t.repo.id()) != Some(repo) || self.dialog.is_some() {
+            return Task::none();
+        }
+        let local = if remote {
+            name.split_once('/').map_or(name.as_str(), |(_, b)| b)
+        } else {
+            name.as_str()
+        };
+        if base.as_deref() != Some(local) {
+            return self.switch_branch_asked(target, name, remote);
+        }
+        let snap = self.active_tab().and_then(|t| t.snapshot.clone());
+        let rev = snap
+            .as_deref()
+            .and_then(|s| s.branches.iter().find(|b| b.name.as_str() == target))
+            .map_or_else(|| target.clone(), |b| b.target.to_string());
+        // `git worktree list` puts the main tree first.
+        let main = snap
+            .as_deref()
+            .and_then(|s| s.worktrees.first())
+            .filter(|w| !w.bare && !w.prunable)
+            .map(|w| w.path.clone());
+        let mut confirm = Confirm::change(
+            "linked-base",
+            "Base branch",
+            vec![
+                format!("{local} is this worktree's base."),
+                "Taking it here locks it out of the main tree.".into(),
+            ],
+            "View detached",
+            Purpose::LinkedBase {
+                rev,
+                main: main.clone(),
+            },
+        )
+        .always()
+        .undoable();
+        if main.is_some() {
+            confirm = confirm.check("go to the main tree instead", false);
+        }
+        self.confirm(confirm)
+    }
+
+    fn switch_branch_asked(&mut self, target: String, name: String, remote: bool) -> Task<Message> {
         // Changes, a branch to leave them on and nothing in progress: ask
         // whether to leave them there (stash) or carry them over, after
         // checking which files would keep them from coming along.

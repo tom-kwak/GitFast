@@ -56,6 +56,7 @@ gf-git/src/
 | | push/apply/pop/drop | CLI | |
 | WorktreeOps | 목록 | **gix** ✅ | unborn 브랜치의 worktree는 CLI. 연결된 트리에서 읽어도 main 트리가 맨 앞(git과 같음) |
 | | worktree_status, default_base | **gix** ✅ | 그 트리를 gix로 따로 엽니다. CLI는 트리 하나에 git을 6~12번 실행했습니다(status·log·reflog·config·rev-list·merge-base). status는 `--untracked-files=normal`처럼 폴더를 한 항목으로 셉니다. `diff.ignoreSubmodules` 설정, unborn 브랜치, intent-to-add 항목은 CLI |
+| | work_base (`Repository` 조합) | **gix** ✅ | default_base + 현재 트리의 worktree_status를 그대로 씁니다. 추측한 base(`base_guessed`)는 돌려주지 않습니다. linked 트리에서 base로 switch할 때만 읽습니다 |
 | | add, remove, prune, lock/unlock | CLI | |
 | SubmoduleOps | 목록(상태 포함), update/sync | CLI | 목록의 `(describe)`가 git의 describe 단계(태그 → `--tags` → `--contains` → `--all`)와 같아야 해서 CLI 유지 |
 | RebaseOps | rebase_plan, squash_preview | **gix** ✅ | 두 백엔드가 같은 로직(`rebase_interactive::plan/preview`)을 공유하고 log·unpushed만 각자 구현 |
