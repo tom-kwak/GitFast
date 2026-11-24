@@ -4522,7 +4522,9 @@ async fn a_url_typed_in_the_open_window_is_cloned_and_opened() {
     assert_eq!(ui.app.tabs.len(), 1, "and opened");
     assert_eq!(
         ui.app.tabs[0].repo.cwd(),
-        dest.canonicalize().expect("dest")
+        dest.canonicalize()
+            .map(gf_test_support::without_verbatim_prefix)
+            .expect("dest")
     );
 }
 
