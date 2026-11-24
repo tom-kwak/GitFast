@@ -3,21 +3,38 @@
 //! steering several trees at once (e.g. one per AI agent):
 //!
 //! ```text
-//! ● main                              ✓
-//!   base branch
-//! ◉ feature/payment                ⚡ ●3
-//!   from main · 4 ahead · 2 behind    ↑2
+//!  ● main                               CLEAN
+//!      clean
+//!      Bump version 2h
+//!
+//! main ← 4 to merge · 2 new
+//! └◉ feature/payment              EDITING 1m
+//!      3 uncommitted · ⚠ 1 shared
+//!      ↑2 · Add refund flow 15m
 //! ```
 //!
-//! - Line 1: branch, files touched lately (`⚡`), lock, and what is
-//!   uncommitted there (`●N`, `✕N` conflicts). In front, `●` marks the tree
-//!   this tab shows and `◉` one open in another tab. That tree is also
-//!   the selected card until another is picked, and again whenever the tab
-//!   is opened from another tree.
-//! - Line 2: in words, the branch it came from and how it stands against
-//!   it: commits it has that the base lacks (`ahead`), commits the base got
-//!   since (`behind`), or `merged` once the base has its work; then the
-//!   upstream distance (`↑↓`). Hovering it shows the last commit.
+//! Each card hangs (`└─`) from a title naming the branch it merges into,
+//! whether or not a worktree has that branch checked out (it may be only
+//! a ref, or a remote branch). Most text is dim: color is kept for the
+//! names and for what needs attention (the state word, conflicts, `⚠`).
+//!
+//! - Title: the base and how the tree stands against it: commits not in
+//!   it yet (`to merge`), commits it got since (`new`), or `all merged`.
+//!   Its tooltip says when nothing recorded where the branch came from (a
+//!   guess `b` corrects). The tree on the base itself has no title and no
+//!   `└─`: the others hang below it.
+//! - Name line: branch, lock, and one word for what the tree is up to
+//!   ([`Phase`]: `CONFLICT`, `EDITING` when files changed in the last 2
+//!   minutes, `UNCOMMITTED`, `READY` to merge, `MERGED`, `BEHIND`, `CLEAN`,
+//!   or `MISSING` / `ERROR`). After the `└`, `●` marks the tree this tab
+//!   shows and `◉` one open in another tab. That tree is also the selected
+//!   card until another is picked, and again whenever the tab is opened
+//!   from another tree.
+//! - Changes: conflicts and uncommitted entries, and `⚠ N shared` when
+//!   other trees change the same files (merging both may conflict).
+//! - Upstream: commits to push / pull as `↑2 ↓1` (nothing when in sync,
+//!   `⊘` with no upstream; the tooltip says it in words), then the last
+//!   commit and its age. Narrow panels cut the subject first.
 //!
 //! The folder is not shown: the branch tells trees apart. Hovering the name
 //! shows it; `y` copies it and `r` reveals it. Every action is in the
@@ -50,7 +67,7 @@ use crate::features::context_menu::{Entry, Menu};
 use crate::nav::{self, Key, Moved, Nav};
 use crate::theme::{Tokens, style};
 use crate::widgets::virtual_list::{SCROLLBAR, ScrollPos, columns, virtual_list};
-use crate::widgets::{self, colored, dim, format};
+use crate::widgets::{self, colored, format};
 
 /// Scrollable id of the card list.
 const LIST_ID: &str = "gf-worktrees";
@@ -68,21 +85,22 @@ const GAP: f32 = 4.0;
 /// Space between a card's columns (mark, text, badges).
 const SPACING: f32 = 4.0;
 
-/// Heights of a card's lines: the name at the base size, the two detail
+/// Heights of a card's lines: the name at the base size, the three detail
 /// lines at the small size. Fixed, so badges never move the text.
 fn line_heights(t: &Tokens) -> (f32, f32) {
     ((t.font_size * 1.35).ceil(), (t.small() * 1.35).ceil())
 }
 
-/// A card: two lines, its padding and the gap to the next one.
+/// A card: four lines, its padding and the gap to the next one.
 pub fn row_height(t: &Tokens) -> f32 {
     let (big, small) = line_heights(t);
-    big + small + 2.0 * PAD_Y + 2.0 + GAP
+    big + 3.0 * small + 2.0 * PAD_Y + 2.0 + GAP
 }
 
-/// Width of the mark column in front of the name (`●`).
+/// Width of the column in front of the name: the `└─` tying the card to
+/// its title, with `●` / `◉` for a tree open in a tab.
 fn gutter(t: &Tokens) -> f32 {
-    t.char_width() * 1.5
+    t.char_width() * 2.5
 }
 
 /// Small-size columns a card line has for text and badges when the list
@@ -759,93 +777,71 @@ impl State {
         let selected = self.selected.as_ref() == Some(&c.tree.path);
         let (big, small) = line_heights(t);
         let badge = |s: String, color| colored(t, s, color).size(t.small());
-
-        // Line 1: name and what is uncommitted.
-        let status: Element<'a, Message> = if c.tree.prunable {
-            widgets::tip(
-                t,
-                badge("missing".into(), t.error()),
-                "folder deleted · prune cleans it up".into(),
-            )
-        } else if let Some(e) = &c.error {
-            widgets::tip(t, badge("?".into(), t.error()), format::truncate(e, 200))
-        } else if let Some(s) = &c.status {
-            let changed = s.changed() - s.conflicts;
-            let mut parts = Vec::new();
-            if s.conflicts > 0 {
-                parts.push((format!("✕{}", s.conflicts), t.error()));
-            }
-            if changed > 0 {
-                parts.push((format!("●{changed}"), t.warning()));
-            }
-            if parts.is_empty() {
-                widgets::tip(
-                    t,
-                    badge("✓".into(), t.success()),
-                    "nothing to commit".into(),
-                )
-            } else {
-                widgets::tip(
-                    t,
-                    Row::with_children(parts.into_iter().map(|(s, color)| badge(s, color).into()))
-                        .spacing(4),
-                    format!(
-                        "{} staged · {} unstaged · {} untracked · {} conflicted",
-                        s.staged, s.unstaged, s.untracked, s.conflicts
-                    ),
-                )
-            }
-        } else {
-            dim(t, "…").into()
-        };
-        // Line 1: files touched lately, lock, then the status.
-        let mut tags: Vec<(Element<'a, Message>, usize)> = Vec::new();
-        if let Some(ago) = c
+        let base = c
             .status
             .as_ref()
-            .and_then(|s| s.last_activity)
-            .and_then(|at| now.duration_since(at).ok())
-            .filter(|ago| *ago < ACTIVE_FOR)
-        {
-            tags.push((
-                widgets::tip(
-                    t,
-                    badge("⚡".into(), t.warning()),
-                    format!("files changed {} ago", format::age(ago)),
-                ),
-                2,
-            ));
-        }
-        if let Some(o) = &c.overlap {
-            let text = format!("⚠{}", o.files);
-            let cols = crate::widgets::virtual_list::columns(&text);
-            tags.push((
-                widgets::tip(t, badge(text, t.warning()), o.tip.clone()),
-                cols,
-            ));
-        }
+            .and_then(|s| s.base.as_deref())
+            .or(self.base.as_deref());
+
+        // Line 1: mark, name, lock, tab, and what the tree is up to.
+        let mut tags: Vec<(Element<'a, Message>, usize)> = Vec::new();
         if c.tree.locked {
             tags.push((
                 widgets::tip(
                     t,
                     badge("locked".into(), t.warning()),
-                    "can't be removed until unlocked".into(),
+                    "can't be removed until unlocked · l unlocks".into(),
                 ),
                 6,
             ));
         }
-        let used: usize = tags.iter().map(|(_, n)| n + 1).sum::<usize>() + status_columns(c);
+        if let Some(p) = phase(c, now) {
+            let (word, color) = match p {
+                Phase::Missing | Phase::Error | Phase::Conflict => (p.word(), t.error()),
+                Phase::Editing | Phase::Uncommitted => (p.word(), t.warning()),
+                Phase::Merged => (p.word(), t.success()),
+                Phase::Ready | Phase::Behind | Phase::Clean => (p.word(), t.dim),
+            };
+            let mut text = word.to_owned();
+            if p == Phase::Editing
+                && let Some(ago) = c
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.last_activity)
+                    .and_then(|at| now.duration_since(at).ok())
+            {
+                text = format!("{word} {}", format::age(ago));
+            }
+            let n_cols = columns(&text);
+            tags.push((
+                widgets::tip(t, badge(text, color), p.tip(base.unwrap_or("the base"))),
+                n_cols,
+            ));
+        }
+        let used: usize = tags.iter().map(|(_, n)| n + 1).sum();
         let name_cols = scale_columns(cols.saturating_sub(used + 1), t.small() / t.font_size);
-        let name_color = if c.current { t.head() } else { t.branch() };
+        let name_color = t.branch();
+        // The tree on the base heads the others: no title, nothing to hang
+        // from.
+        let on_base = self.base.is_some() && c.tree.branch == self.base;
+        let elbow = || colored(t, if on_base { " " } else { "└" }, t.dim).wrapping(Wrapping::None);
         let mark: Element<'a, Message> = if c.current {
-            widgets::tip(t, colored(t, "●", t.head()), "open in this tab".into())
+            widgets::tip(
+                t,
+                row![elbow(), colored(t, "●", t.head())],
+                "open in this tab".into(),
+            )
         } else if c.in_tab {
-            widgets::tip(t, colored(t, "◉", t.accent()), "open in another tab".into())
-        } else {
+            widgets::tip(
+                t,
+                row![elbow(), colored(t, "◉", t.accent())],
+                "open in another tab".into(),
+            )
+        } else if on_base {
             space::horizontal().into()
+        } else {
+            colored(t, "└─", t.dim).wrapping(Wrapping::None).into()
         };
-        let mut badges: Vec<Element<'a, Message>> = tags.into_iter().map(|(e, _)| e).collect();
-        badges.push(status);
         let name = c.name();
         let shown = format::truncate_columns(&name, name_cols);
         let where_tip = format!("{} · right-click for actions", format::tilde(&c.tree.path));
@@ -864,108 +860,95 @@ impl State {
                 colored(t, shown, name_color).wrapping(Wrapping::None),
                 name_tip,
             ),
-            badges,
+            tags.into_iter().map(|(e, _)| e).collect(),
         );
 
-        // Line 2: where it comes from and how it stands against that branch
-        // (`from main · 4 ahead · 2 behind`), then the upstream distance.
-        let mut marks: Vec<(Element<'a, Message>, usize)> = Vec::new();
+        let detail = |parts: Vec<(String, Part)>, tip: String| {
+            let text: Element<'a, Message> =
+                Row::with_children(fit_parts(parts, cols).into_iter().map(|(s, part)| {
+                    colored(t, s, part_color(t, part))
+                        .size(t.small())
+                        .wrapping(Wrapping::None)
+                        .into()
+                }))
+                .into();
+            let body = if tip.is_empty() {
+                text
+            } else {
+                widgets::tip(t, text, tip)
+            };
+            line(t, small, space::horizontal().into(), body, Vec::new())
+        };
+
+        // Line 2: what is uncommitted there, and files other trees change.
+        let mut tip = Vec::new();
+        if let Some(s) = &c.status {
+            tip.push(format!(
+                "{} staged · {} unstaged · {} untracked · {} conflicted",
+                s.staged, s.unstaged, s.untracked, s.conflicts
+            ));
+        }
+        if let Some(e) = &c.error {
+            tip.push(format::truncate(e, 200));
+        }
+        if let Some(o) = &c.overlap {
+            tip.push(o.tip.clone());
+        }
+        let second = detail(changes_parts(c), tip.join("\n"));
+
+        // Line 4: the upstream and the last commit.
         let (parts, tip) = match &c.status {
             Some(s) => {
-                let sync = match (s.ahead, s.behind) {
-                    (0, 0) => None,
-                    (a, 0) => Some(format!("↑{a}")),
-                    (0, b) => Some(format!("↓{b}")),
-                    (a, b) => Some(format!("↑{a}↓{b}")),
-                };
-                if let Some(sync) = sync {
-                    let n = columns(&sync);
-                    marks.push((
-                        widgets::tip(
-                            t,
-                            badge(sync, t.remote()),
-                            format!("vs {}", s.upstream.as_deref().unwrap_or("upstream")),
-                        ),
-                        n,
-                    ));
-                }
-                let room = cols.saturating_sub(marks.iter().map(|(_, n)| n + 1).sum::<usize>());
-                let on_base = self.base.is_some() && c.tree.branch == self.base;
-                let all = base_parts(s, on_base);
-                let full: String = all.iter().map(|(p, _)| p.as_str()).collect();
-                let parts = fit_parts(all, room);
-                let mut tip = Vec::new();
-                // A line cut to fit shows whole in the tooltip.
-                if parts.iter().map(|(p, _)| p.as_str()).collect::<String>() != full {
-                    tip.push(full);
-                }
-                if let Some(base) = &s.base {
-                    if s.merged() {
-                        tip.push(format!("all merged into {base} · safe to remove"));
-                    } else if s.ahead_of_base > 0 {
-                        tip.push(format!(
-                            "{} not in {base} yet · c compares",
-                            format::count(s.ahead_of_base, "commit")
-                        ));
-                    }
-                    if s.behind_base > 0 && !s.merged() {
-                        tip.push(format!(
-                            "{base} has {} it lacks · u brings them in",
-                            format::count(s.behind_base, "commit")
-                        ));
-                    }
-                    if s.ahead_of_base > 0 && self.tree_of(base).is_some() {
-                        tip.push(format!("m merges it into {base}"));
-                    }
-                    tip.push(if s.base_guessed {
-                        format!("{base} is a guess · b sets the real one")
-                    } else {
-                        "b changes the base".to_owned()
-                    });
-                }
+                let parts = remote_parts(s, now);
+                let mut tip = sync_tip(s);
                 if let Some(lc) = &s.last_commit {
-                    let age = u64::try_from(lc.time)
-                        .ok()
-                        .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
-                        .and_then(|at| now.duration_since(at).ok())
-                        .map_or_else(String::new, |d| format!(" · {}", format::age(d)));
                     tip.push(format!(
-                        "last commit {} {}{age}",
+                        "last commit {} {}",
                         lc.id.short(),
-                        format::truncate(&lc.subject, 60)
+                        format::truncate(&lc.subject, 120)
                     ));
                 }
                 (parts, tip.join("\n"))
             }
             None => (Vec::new(), String::new()),
         };
-        let text: Element<'a, Message> = Row::with_children(parts.into_iter().map(|(s, part)| {
-            let color = match part {
-                Part::Plain => t.dim,
-                Part::Base => t.branch(),
-                Part::Ahead => t.added(),
-                Part::Behind => t.warning(),
-                Part::Merged => t.success(),
-            };
-            colored(t, s, color)
-                .size(t.small())
-                .wrapping(Wrapping::None)
-                .into()
-        }))
-        .into();
-        let second = line(
-            t,
-            small,
-            space::horizontal().into(),
-            if tip.is_empty() {
-                text
-            } else {
-                widgets::tip(t, text, tip)
-            },
-            marks.into_iter().map(|(e, _)| e).collect(),
-        );
+        let fourth = detail(parts, tip);
 
-        let body = button(column![first, second])
+        // Title: the branch it goes into and how it stands against it.
+        let parts = title_parts(c);
+        let shown: Element<'a, Message> =
+            Row::with_children(fit_parts(parts, title_columns(t, cols)).into_iter().map(
+                |(s, part)| {
+                    colored(t, s, part_color(t, part))
+                        .size(t.small())
+                        .wrapping(Wrapping::None)
+                        .into()
+                },
+            ))
+            .into();
+        let tip = match &c.status {
+            Some(s) if s.base.is_some() => self.base_tip(s),
+            Some(_) => "b sets the branch this one merges into".to_owned(),
+            None => String::new(),
+        };
+        let title = container(if tip.is_empty() {
+            shown
+        } else {
+            widgets::tip(t, shown, tip)
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(small))
+        .align_y(Alignment::Center)
+        .clip(true);
+
+        // Every card is as tall, for the list: the tree on the base keeps
+        // the title's line as space below.
+        let lines = if on_base {
+            column![first, second, fourth, space::vertical().height(small)]
+        } else {
+            column![title, first, second, fourth]
+        };
+        let body = button(lines)
             .width(Length::Fill)
             .padding(Padding::from([PAD_Y, PAD_X]))
             .style(style::card_button(t, selected))
@@ -977,64 +960,310 @@ impl State {
             })
             .into()
     }
+
+    /// Tooltip of the base line: what the numbers mean and the keys that
+    /// act on them.
+    fn base_tip(&self, s: &WorktreeStatus) -> String {
+        let Some(base) = &s.base else {
+            return String::new();
+        };
+        let mut tip = Vec::new();
+        if s.merged() {
+            tip.push(format!("all merged into {base} · safe to remove"));
+        } else if s.ahead_of_base > 0 {
+            tip.push(format!(
+                "{} not in {base} yet · c compares",
+                format::count(s.ahead_of_base, "commit")
+            ));
+        }
+        if s.behind_base > 0 && !s.merged() {
+            tip.push(format!(
+                "{base} has {} it lacks · u brings them in",
+                format::count(s.behind_base, "commit")
+            ));
+        }
+        if s.ahead_of_base > 0 && self.tree_of(base).is_some() {
+            tip.push(format!("m merges it into {base}"));
+        }
+        tip.push(if s.base_guessed {
+            format!("{base} is a guess · b sets the real one")
+        } else {
+            "b changes the base".to_owned()
+        });
+        tip.join("\n")
+    }
 }
 
-/// What a piece of a card's second line says, for its color.
+/// What a tree is up to, in one word at the end of its first line. The
+/// first that applies wins: problems, then work in progress, then where
+/// the work stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Missing,
+    Error,
+    Conflict,
+    Editing,
+    Uncommitted,
+    Merged,
+    Ready,
+    Behind,
+    Clean,
+}
+
+impl Phase {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Missing => "MISSING",
+            Self::Error => "ERROR",
+            Self::Conflict => "CONFLICT",
+            Self::Editing => "EDITING",
+            Self::Uncommitted => "UNCOMMITTED",
+            Self::Merged => "MERGED",
+            Self::Ready => "READY",
+            Self::Behind => "BEHIND",
+            Self::Clean => "CLEAN",
+        }
+    }
+
+    fn tip(self, base: &str) -> String {
+        match self {
+            Self::Missing => "the folder was deleted · prune cleans it up".into(),
+            Self::Error => "its status could not be read".into(),
+            Self::Conflict => "files have conflicts to resolve".into(),
+            Self::Editing => "files changed in the last 2 minutes: someone is working here".into(),
+            Self::Uncommitted => "changes not committed yet".into(),
+            Self::Merged => format!("all its work is in {base} · d removes it"),
+            Self::Ready => format!("committed work not in {base} yet · m merges it"),
+            Self::Behind => format!("{base} moved on · u brings its commits in"),
+            Self::Clean => "nothing to commit or merge".into(),
+        }
+    }
+}
+
+/// The card's [`Phase`], `None` while its status is being read.
+fn phase(c: &Card, now: SystemTime) -> Option<Phase> {
+    if c.tree.prunable {
+        return Some(Phase::Missing);
+    }
+    if c.error.is_some() {
+        return Some(Phase::Error);
+    }
+    let s = c.status.as_ref()?;
+    Some(if s.conflicts > 0 {
+        Phase::Conflict
+    } else if !s.is_clean()
+        && s.last_activity
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|ago| ago < ACTIVE_FOR)
+    {
+        Phase::Editing
+    } else if !s.is_clean() {
+        Phase::Uncommitted
+    } else if s.merged() {
+        Phase::Merged
+    } else if s.base.is_some() && s.ahead_of_base > 0 {
+        Phase::Ready
+    } else if s.base.is_some() && s.behind_base > 0 {
+        Phase::Behind
+    } else {
+        Phase::Clean
+    })
+}
+
+/// What a piece of a card's title or detail lines says, for its color.
+/// Most is dim: color is kept for what needs attention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Part {
-    Plain,
-    Base,
-    Ahead,
-    Behind,
-    Merged,
+    Dim,
+    /// The base's name in the title.
+    Strong,
+    /// Files other trees change too.
+    Warn,
+    Bad,
+    /// The last commit's subject: cut with `…` rather than dropped.
+    Subject,
 }
 
-/// A tree against its base, in words: `from main · 4 ahead · 2 behind`,
-/// `from main · merged`, `base branch` for the tree on the base itself.
-fn base_parts(s: &WorktreeStatus, on_base: bool) -> Vec<(String, Part)> {
-    if s.last_commit.is_none() {
-        return vec![("no commits yet".into(), Part::Plain)];
+fn part_color(t: &Tokens, part: Part) -> iced::Color {
+    match part {
+        Part::Dim | Part::Subject => t.dim,
+        Part::Strong => t.fg,
+        Part::Warn => t.warning(),
+        Part::Bad => t.error(),
     }
-    let Some(base) = &s.base else {
-        return if on_base {
-            vec![("base branch".into(), Part::Plain)]
-        } else {
-            Vec::new()
-        };
+}
+
+const SEP: &str = " · ";
+/// Between the base and how the tree stands against it in the title.
+const ARROW: &str = " ← ";
+
+/// Line 2: `3 uncommitted · ⚠ 2 shared`, `1 conflict`, `clean`.
+fn changes_parts(c: &Card) -> Vec<(String, Part)> {
+    if c.tree.prunable {
+        return vec![("folder deleted".into(), Part::Bad)];
+    }
+    if let Some(e) = &c.error {
+        let first = e.lines().next().unwrap_or_default();
+        return vec![(first.to_owned(), Part::Bad)];
+    }
+    let Some(s) = &c.status else {
+        return vec![("…".into(), Part::Dim)];
     };
-    let mut parts = vec![("from ".into(), Part::Plain), (base.clone(), Part::Base)];
-    if s.merged() {
-        parts.push((" · ".into(), Part::Plain));
-        parts.push(("merged".into(), Part::Merged));
-        return parts;
+    let mut parts = Vec::new();
+    let mut push = |text: String, part| {
+        if !parts.is_empty() {
+            parts.push((SEP.into(), Part::Dim));
+        }
+        parts.push((text, part));
+    };
+    if s.conflicts > 0 {
+        push(
+            format::count(u64::try_from(s.conflicts).unwrap_or(u64::MAX), "conflict"),
+            Part::Bad,
+        );
     }
-    if s.ahead_of_base > 0 {
-        parts.push((" · ".into(), Part::Plain));
-        parts.push((format!("{} ahead", s.ahead_of_base), Part::Ahead));
+    let changed = s.changed() - s.conflicts;
+    if changed > 0 {
+        push(format!("{changed} uncommitted"), Part::Dim);
     }
-    if s.behind_base > 0 {
-        parts.push((" · ".into(), Part::Plain));
-        parts.push((format!("{} behind", s.behind_base), Part::Behind));
+    if s.conflicts == 0 && changed == 0 {
+        push("clean".into(), Part::Dim);
+    }
+    if let Some(o) = &c.overlap {
+        push(format!("⚠ {} shared", o.files), Part::Warn);
     }
     parts
 }
 
-/// `parts` cut to `room` columns: whole `· …` pieces drop from the end, and
-/// only the base name itself is shortened with `…`.
-fn fit_parts(mut parts: Vec<(String, Part)>, room: usize) -> Vec<(String, Part)> {
-    let width = |parts: &[(String, Part)]| parts.iter().map(|(s, _)| columns(s)).sum::<usize>();
-    // Drop the trailing `· x` pairs first, keeping `from <base>`.
-    while parts.len() > 2 && width(&parts) > room {
-        parts.truncate(parts.len() - 2);
+/// The title above a card, about the branch the tree merges into:
+/// `main ← 3 to merge · 3 new`. Whether the base is a guess is in its
+/// tooltip. The tree on the base itself has no title.
+fn title_parts(c: &Card) -> Vec<(String, Part)> {
+    let dim = |s: &str| vec![(s.to_owned(), Part::Dim)];
+    if c.tree.prunable {
+        return dim("folder deleted · prune cleans it up");
     }
-    let used = width(&parts);
-    if used > room
-        && let Some((last, _)) = parts.last_mut()
-    {
-        let keep = columns(last).saturating_sub(used - room);
-        *last = format::truncate_columns(last, keep);
+    if c.error.is_some() {
+        return dim("status unknown");
+    }
+    let Some(s) = &c.status else {
+        return dim("…");
+    };
+    let Some(base) = &s.base else {
+        return dim("no base · b sets one");
+    };
+    let mut parts = vec![(base.clone(), Part::Strong), (ARROW.into(), Part::Dim)];
+    if s.last_commit.is_none() {
+        parts.push(("no commits yet".into(), Part::Dim));
+    } else if s.merged() {
+        parts.push(("all merged".into(), Part::Dim));
+    } else {
+        let start = parts.len();
+        if s.ahead_of_base > 0 {
+            parts.push((format!("{} to merge", s.ahead_of_base), Part::Dim));
+        }
+        if s.behind_base > 0 {
+            if parts.len() > start {
+                parts.push((SEP.into(), Part::Dim));
+            }
+            parts.push((format!("{} new", s.behind_base), Part::Dim));
+        }
+        if parts.len() == start {
+            parts.push(("up to date".into(), Part::Dim));
+        }
     }
     parts
+}
+
+/// The arrows of the last line in words, for its tooltip.
+fn sync_tip(s: &WorktreeStatus) -> Vec<String> {
+    let Some(up) = &s.upstream else {
+        return vec!["⊘ never pushed: no upstream branch".into()];
+    };
+    let mut tip = Vec::new();
+    if s.ahead > 0 {
+        tip.push(format!(
+            "↑{} to push to {up}",
+            format::count(s.ahead, "commit")
+        ));
+    }
+    if s.behind > 0 {
+        tip.push(format!(
+            "↓{} to pull from {up}",
+            format::count(s.behind, "commit")
+        ));
+    }
+    if tip.is_empty() {
+        tip.push(format!("in sync with {up}"));
+    }
+    tip
+}
+
+/// The last line: the upstream distance in arrows and the last commit,
+/// `↑2 ↓1 · Add refund flow 15m`; `⊘` for no upstream, nothing when in
+/// sync. The tooltip says it in words.
+fn remote_parts(s: &WorktreeStatus, now: SystemTime) -> Vec<(String, Part)> {
+    let mut parts = Vec::new();
+    let sync = match (&s.upstream, s.ahead, s.behind) {
+        (None, ..) => Some("⊘".to_owned()),
+        (Some(_), 0, 0) => None,
+        (Some(_), a, 0) => Some(format!("↑{a}")),
+        (Some(_), 0, b) => Some(format!("↓{b}")),
+        (Some(_), a, b) => Some(format!("↑{a} ↓{b}")),
+    };
+    if let Some(sync) = sync {
+        parts.push((sync, Part::Dim));
+    }
+    if let Some(lc) = &s.last_commit {
+        let age = u64::try_from(lc.time)
+            .ok()
+            .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+            .and_then(|at| now.duration_since(at).ok())
+            .map_or_else(String::new, |d| format!(" {}", format::age(d)));
+        if !parts.is_empty() {
+            parts.push((SEP.into(), Part::Dim));
+        }
+        parts.push((format!("{}{age}", lc.subject), Part::Subject));
+    }
+    parts
+}
+
+/// Columns of the title, which is not indented: those of the other lines
+/// (`cols`) and the indent's.
+fn title_columns(t: &Tokens, cols: usize) -> usize {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let indent = ((gutter(t) + SPACING) / (t.small() * 0.61)).floor() as usize;
+    cols + indent
+}
+
+/// `parts` cut to `room` columns: a commit subject is shortened with `…`
+/// while a few columns of it fit; other trailing `· x` pieces drop whole,
+/// and the first piece is shortened last.
+fn fit_parts(mut parts: Vec<(String, Part)>, room: usize) -> Vec<(String, Part)> {
+    /// Least of a subject worth showing.
+    const MIN_SUBJECT: usize = 6;
+    let width = |parts: &[(String, Part)]| parts.iter().map(|(s, _)| columns(s)).sum::<usize>();
+    loop {
+        let used = width(&parts);
+        if used <= room {
+            return parts;
+        }
+        let over = used - room;
+        let only = parts.len() == 1;
+        let Some((last, part)) = parts.last_mut() else {
+            return parts;
+        };
+        let keep = columns(last).saturating_sub(over);
+        if only || (*part == Part::Subject && keep >= MIN_SUBJECT) {
+            *last = format::truncate_columns(last, keep);
+            return parts;
+        }
+        // Drop the piece and the separator before it.
+        parts.pop();
+        if parts.last().is_some_and(|(s, _)| s == SEP || s == ARROW) {
+            parts.pop();
+        }
+    }
 }
 
 /// `n` columns of one font size in columns of another (`ratio` = their
@@ -1047,27 +1276,6 @@ fn scale_columns(n: usize, ratio: f32) -> usize {
     )]
     let scaled = (n as f32 * ratio).floor().max(0.0) as usize;
     scaled
-}
-
-/// Columns of a card's status badge (line 1), for cutting the name.
-fn status_columns(c: &Card) -> usize {
-    if c.tree.prunable {
-        return 7;
-    }
-    match (&c.error, &c.status) {
-        (Some(_), _) | (None, None) => 1,
-        (None, Some(s)) => {
-            let changed = s.changed() - s.conflicts;
-            let mut n = 0;
-            if s.conflicts > 0 {
-                n += 1 + s.conflicts.to_string().len();
-            }
-            if changed > 0 {
-                n += 1 + changed.to_string().len() + usize::from(n > 0);
-            }
-            n.max(1)
-        }
-    }
 }
 
 /// A card line of fixed `height`: the mark column, `body` (cut, never
@@ -1507,29 +1715,134 @@ mod tests {
         ));
     }
 
+    fn text(parts: Vec<(String, Part)>) -> String {
+        parts.into_iter().map(|(s, _)| s).collect()
+    }
+
     #[test]
-    fn the_second_line_says_where_a_tree_comes_from_in_words() {
-        let text =
-            |parts: Vec<(String, Part)>| parts.into_iter().map(|(s, _)| s).collect::<String>();
-        let mut s = status(1);
-        assert_eq!(text(base_parts(&s, true)), "base branch");
-        assert_eq!(text(base_parts(&s, false)), "");
-        s.base = Some("main".into());
-        assert_eq!(text(base_parts(&s, false)), "from main");
-        s.ahead_of_base = 4;
-        s.behind_base = 2;
-        let parts = base_parts(&s, false);
-        assert_eq!(text(parts.clone()), "from main · 4 ahead · 2 behind");
-        assert_eq!(parts[1].1, Part::Base);
-        assert_eq!(parts[3].1, Part::Ahead);
-        // Narrow: whole pieces go from the end, then the name is cut.
-        assert_eq!(text(fit_parts(parts.clone(), 20)), "from main · 4 ahead");
-        assert_eq!(text(fit_parts(parts, 7)), "from m…");
-        s.ahead_of_base = 0;
-        s.had_work = true;
-        assert_eq!(text(base_parts(&s, false)), "from main · merged");
-        s.last_commit = None;
-        assert_eq!(text(base_parts(&s, false)), "no commits yet");
+    fn the_title_names_the_base_and_what_is_left_to_merge() {
+        let mut s = state();
+        let title = |s: &State, i: usize| text(title_parts(&s.cards()[i]));
+        assert_eq!(title(&s, 1), "…", "still loading");
+        let mut st = status(1);
+        loaded(&mut s, vec![("/r", st.clone()), ("/a", st.clone())]);
+        assert_eq!(title(&s, 1), "no base · b sets one");
+        st.base = Some("main".into());
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(title(&s, 1), "main ← up to date");
+        st.ahead_of_base = 4;
+        st.behind_base = 2;
+        loaded(&mut s, vec![("/a", st.clone())]);
+        let parts = title_parts(&s.cards()[1]);
+        assert_eq!(text(parts.clone()), "main ← 4 to merge · 2 new");
+        assert_eq!(parts[0].1, Part::Strong);
+        // Narrow: whole pieces go from the end, the arrow with the last.
+        assert_eq!(text(fit_parts(parts.clone(), 18)), "main ← 4 to merge");
+        assert_eq!(text(fit_parts(parts, 6)), "main");
+        st.base_guessed = true;
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(
+            title(&s, 1),
+            "main ← 4 to merge · 2 new",
+            "the guess shows only in the tooltip"
+        );
+        st.base_guessed = false;
+        st.ahead_of_base = 0;
+        st.had_work = true;
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(title(&s, 1), "main ← all merged");
+        st.last_commit = None;
+        loaded(&mut s, vec![("/a", st)]);
+        assert_eq!(title(&s, 1), "main ← no commits yet");
+    }
+
+    #[test]
+    fn the_last_line_shows_the_upstream_in_arrows_and_cuts_the_subject_last() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let mut s = status(1000 - 15 * 60);
+        s.last_commit.as_mut().expect("commit").subject = "Add refund flow".into();
+        assert_eq!(text(remote_parts(&s, now)), "⊘ · Add refund flow 15m");
+        s.upstream = Some("origin/feature/pay".into());
+        s.ahead = 2;
+        s.behind = 1;
+        let parts = remote_parts(&s, now);
+        assert_eq!(text(parts.clone()), "↑2 ↓1 · Add refund flow 15m");
+        assert_eq!(
+            sync_tip(&s),
+            [
+                "↑2 commits to push to origin/feature/pay",
+                "↓1 commit to pull from origin/feature/pay"
+            ]
+        );
+        assert_eq!(text(fit_parts(parts.clone(), 14)), "↑2 ↓1 · Add r…");
+        // Too little room for a useful subject: it goes whole.
+        assert_eq!(text(fit_parts(parts, 13)), "↑2 ↓1");
+        s.ahead = 0;
+        s.behind = 0;
+        assert_eq!(
+            text(remote_parts(&s, now)),
+            "Add refund flow 15m",
+            "in sync"
+        );
+    }
+
+    #[test]
+    fn the_changes_line_counts_in_words_and_flags_shared_files() {
+        let mut s = state();
+        let card = |s: &State| s.cards()[1].clone();
+        assert_eq!(text(changes_parts(&card(&s))), "…");
+        let mut st = status(1);
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(text(changes_parts(&card(&s))), "clean");
+        st.unstaged = 2;
+        st.untracked = 1;
+        st.conflicts = 1;
+        loaded(&mut s, vec![("/a", st)]);
+        let mut c = card(&s);
+        assert_eq!(text(changes_parts(&c)), "1 conflict · 3 uncommitted");
+        c.overlap = Some(Overlap {
+            files: 2,
+            tip: String::new(),
+        });
+        assert_eq!(
+            text(changes_parts(&c)),
+            "1 conflict · 3 uncommitted · ⚠ 2 shared"
+        );
+        c.tree.prunable = true;
+        assert_eq!(text(changes_parts(&c)), "folder deleted");
+    }
+
+    #[test]
+    fn one_word_says_what_a_tree_is_up_to_problems_first() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let mut s = state();
+        let at = |s: &State| phase(&s.cards()[1], now);
+        assert_eq!(at(&s), None, "still loading");
+        let mut st = status(1);
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(at(&s), Some(Phase::Clean));
+        st.base = Some("main".into());
+        st.behind_base = 3;
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(at(&s), Some(Phase::Behind));
+        st.ahead_of_base = 1;
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(at(&s), Some(Phase::Ready));
+        st.unstaged = 1;
+        st.last_activity = Some(now - Duration::from_secs(600));
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(at(&s), Some(Phase::Uncommitted));
+        st.last_activity = Some(now - Duration::from_secs(30));
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(at(&s), Some(Phase::Editing));
+        st.conflicts = 1;
+        loaded(&mut s, vec![("/a", st.clone())]);
+        assert_eq!(at(&s), Some(Phase::Conflict));
+        let mut merged = status(1);
+        merged.base = Some("main".into());
+        merged.had_work = true;
+        loaded(&mut s, vec![("/a", merged)]);
+        assert_eq!(at(&s), Some(Phase::Merged));
     }
 
     #[test]

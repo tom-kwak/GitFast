@@ -3560,12 +3560,12 @@ async fn worktrees_changing_the_same_file_are_flagged() {
     assert_eq!(o.files, 1);
     assert!(o.tip.contains("fix: shared.txt"), "{}", o.tip);
     assert!(overlap(&ui, &b).is_some_and(|o| o.tip.contains("feat: shared.txt")));
-    assert!(ui.shows("⚠1"), "a badge on the card");
+    assert!(ui.shows("⚠ 1 shared"), "a badge on the card");
     // Once fix drops its change, nothing is shared.
     std::fs::remove_file(b.join("shared.txt")).expect("rm");
     let _ = ui.send(Message::WorktreePoll).await;
     assert!(overlap(&ui, &a).is_none());
-    assert!(!ui.shows("⚠1"));
+    assert!(!ui.shows("⚠ 1 shared"));
     let _ = std::fs::remove_dir_all(a.parent().expect("root"));
 }
 

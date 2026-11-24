@@ -88,8 +88,11 @@ Other choices that keep gf responsive:
 
 Several working trees of one repository, for example one per AI agent, in one panel (`⌘⇧B`).
 
-- One card per worktree: branch, uncommitted files, and its relation to the
-  branch it came from (`from develop · 3 ahead · 1 behind`, or `merged`).
+- One card per worktree, hanging from a title that names the branch it
+  merges into and how it stands (`develop ← 3 to merge · 1 new`). The card
+  gives its state in one word (`EDITING`, `UNCOMMITTED`, `READY`,
+  `MERGED`…), its uncommitted files, and its upstream distance (`↑2 ↓1`)
+  with the last commit.
 - `+` adds a worktree; the branch field lists existing branches. The branch
   menu's "new worktree…" (`w`) starts one for that branch.
 - "update from <base>…" (`u`) on a card merges or rebases the base's new
@@ -97,7 +100,7 @@ Several working trees of one repository, for example one per AI agent, in one pa
 - Right-click a card to open it in a tab, IDE or terminal, compare it with
   its base, or merge it into its base (and then remove the worktree and its
   branch).
-- A card shows `⚠n` when other worktrees change the same files.
+- A card shows `⚠ n shared` when other worktrees change the same files.
 - `clean N` removes the worktrees already merged.
 
 ## Undo
