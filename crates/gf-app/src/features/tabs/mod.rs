@@ -1,13 +1,16 @@
 //! Tab bar: one tab per open repository, tmux-style. Tabs are switched by
 //! click, ⌘1–9, ⌘⇧[ / ⌘⇧], ⌃⇥ (most recently used, see `tab_switcher`)
 //! or the `▾ N tabs` dropdown (⌘P, see `tab_list`), and closed by `×` or
-//! ⌘W. Many tabs scroll sideways and draw compact.
+//! ⌘W. Many tabs scroll sideways and draw compact. A tab is moved by
+//! dragging it like a browser tab (it follows the cursor, the others make
+//! room; see `widgets::reorder`) or with ⌘⌥⇧[ / ⌘⌥⇧].
 
-use iced::widget::{Row, button, container, row, scrollable};
+use iced::widget::{button, container, row, scrollable};
 use iced::{Element, Length, Padding};
 
 use crate::repo_tab::RepoTab;
 use crate::theme::{Tokens, style};
+use crate::widgets::reorder::Reorder;
 use crate::widgets::{self, format};
 
 #[derive(Debug, Clone)]
@@ -18,6 +21,33 @@ pub enum Message {
     Settings,
     /// `▾ N tabs`: open (or close) the tab dropdown.
     List,
+    /// Tab `from` was dragged to position `to`.
+    Moved(usize, usize),
+}
+
+/// Where the tab at `i` is after the tab at `from` moved to `to`.
+pub fn index_after_move(i: usize, from: usize, to: usize) -> usize {
+    if i == from {
+        to
+    } else if from < i && i <= to {
+        i - 1
+    } else if to <= i && i < from {
+        i + 1
+    } else {
+        i
+    }
+}
+
+/// The tooltip of tab `i`: where it is, its branch and its keys.
+fn hint(tab: &RepoTab, i: usize) -> String {
+    let mut hint = format::tilde(tab.repo.cwd());
+    if let Some(b) = tab.head_label() {
+        hint = format!("{hint} ⎇ {b}");
+    }
+    if i < 9 {
+        hint = format!("{hint} · ⌘{} to switch · ⌘W to close", i + 1);
+    }
+    format!("{hint} · drag (or ⌘⌥⇧[ ⌘⌥⇧]) to move")
 }
 
 /// Id of the scrollable tab strip (scrolled to keep the active tab in view).
@@ -36,7 +66,7 @@ pub fn view<'a>(
     // the status line and the tooltip); with many tabs the inactive names
     // are shortened so a dozen services still fit on one line.
     let compact = tabs.len() >= COMPACT_FROM;
-    let mut bar = Row::new().spacing(1).align_y(iced::Alignment::Center);
+    let mut items = Vec::with_capacity(tabs.len());
     for (i, tab) in tabs.iter().enumerate() {
         let is_active = i == active;
         let shortcut = if i < 9 {
@@ -57,17 +87,13 @@ pub fn view<'a>(
             .padding(Padding::from([2, 6]))
             .style(style::tab(t, is_active))
             .on_press(Message::Close(i));
-
-        let path = tab.repo.cwd();
-        let mut hint = format::tilde(path);
-        if let Some(b) = tab.head_label() {
-            hint = format!("{hint} ⎇ {b}");
-        }
-        if i < 9 {
-            hint = format!("{hint} · ⌘{} to switch · ⌘W to close", i + 1);
-        }
-        bar = bar.push(widgets::tip(t, row![label, close], hint));
+        items.push(widgets::tip(t, row![label, close], hint(tab, i)));
     }
+    // A picked-up tab is shown at once, like a browser tab.
+    let bar = Reorder::new(items)
+        .spacing(1.0)
+        .on_pick(Message::Select)
+        .on_drop(Message::Moved);
     let strip = scrollable(bar)
         .id(BAR_ID)
         .direction(scrollable::Direction::Horizontal(
@@ -107,4 +133,20 @@ pub fn view<'a>(
         .width(Length::Fill)
         .style(style::bar(t))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn other_tabs_shift_to_make_room_for_the_moved_one() {
+        // a b c d, b → after d: a c d b
+        let after: Vec<_> = (0..4).map(|i| index_after_move(i, 1, 3)).collect();
+        assert_eq!(after, [0, 3, 1, 2]);
+        // a b c d, d → before a: d a b c
+        let after: Vec<_> = (0..4).map(|i| index_after_move(i, 3, 0)).collect();
+        assert_eq!(after, [1, 2, 3, 0]);
+        assert_eq!(index_after_move(2, 1, 1), 2);
+    }
 }

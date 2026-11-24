@@ -82,7 +82,7 @@ src/
 │  ├─ ui_sweep.rs    헤드리스 앱 드라이버(`Ui`)와 UI 스윕(§1, §8)
 │  └─ regression_tests.rs, keyboard_tests.rs   실제 App으로 돌리는 회귀 테스트
 ├─ features/<name>/mod.rs   피처 하나 = 폴더 하나
-├─ widgets/          재사용 위젯(virtual_list, pointer, graph_canvas, format …)
+├─ widgets/          재사용 위젯(virtual_list, pointer, reorder(끌어서 순서 바꾸기), graph_canvas, format …)
 ├─ theme/            색·폰트 토큰(Tokens), 스타일 함수(style.rs), 프리셋
 └─ highlight/        syntect 구문 강조
 ```
