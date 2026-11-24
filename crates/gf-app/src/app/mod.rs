@@ -1039,14 +1039,17 @@ impl App {
                 }
             }
             // A checkout or fetch can also move submodules' recorded commits.
-            Message::Core(CoreEvent::RefsChanged(repo)) => self.request_parts(
-                repo,
-                crate::repo_tab::Parts {
-                    refs: true,
-                    modules: true,
-                    ..crate::repo_tab::Parts::STATUS
-                },
-            ),
+            Message::Core(CoreEvent::RefsChanged(repo)) => {
+                let here = self.request_parts(
+                    repo,
+                    crate::repo_tab::Parts {
+                        refs: true,
+                        modules: true,
+                        ..crate::repo_tab::Parts::STATUS
+                    },
+                );
+                Task::batch([here, self.request_shared_refs(repo)])
+            }
             Message::Core(CoreEvent::ConfigChanged(repo)) => self.request_parts(
                 repo,
                 crate::repo_tab::Parts {

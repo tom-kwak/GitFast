@@ -3504,6 +3504,35 @@ async fn feat_tree_with_a_commit(file: &str, text: &str) -> (Ui, PathBuf) {
     (ui, tree)
 }
 
+#[tokio::test]
+async fn a_worktree_added_in_one_tab_shows_in_the_tabs_of_the_other_trees() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui.send(Message::Key(Shortcut::SelectTab(0))).await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(0, "extra".into())))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let has_extra = |ui: &Ui, i: usize| {
+        ui.app.tabs[i]
+            .worktrees
+            .cards()
+            .iter()
+            .any(|c| c.tree.branch.as_deref() == Some("extra"))
+    };
+    assert!(has_extra(&ui, 0), "the tab that added it");
+    // The linked tree's tab, in the background meanwhile, is only marked
+    // and reads it when it comes to the front: no ⌘R needed.
+    assert!(ui.app.tabs[1].shared_refs_stale && !has_extra(&ui, 1));
+    let _ = ui.send(Message::Key(Shortcut::SelectTab(1))).await;
+    assert!(ui.app.tabs[1].repo.is_linked_worktree());
+    assert!(has_extra(&ui, 1), "the other tree's tab");
+}
+
 /// Two trees made from main (not opened in tabs), from main's tab.
 async fn two_trees(a: &str, b: &str) -> (Ui, PathBuf, PathBuf) {
     let mut ui = Ui::open_with(|r| {

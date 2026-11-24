@@ -311,7 +311,32 @@ impl App {
     /// Refresh after an operation: everything (the history only if its
     /// refs moved).
     pub(super) fn request_refresh(&mut self, id: RepoId) -> Task<Message> {
-        self.request_parts(id, Parts::ALL)
+        let here = self.request_parts(id, Parts::ALL);
+        Task::batch([here, self.request_shared_refs(id)])
+    }
+
+    /// Refs and the list of worktrees belong to the whole repository, but
+    /// each tab watches only its own tree's git dir: after they change in
+    /// tab `id`, the tabs on its other trees read theirs again too. One in
+    /// the background is only marked ([`RepoTab::shared_refs_stale`]) and
+    /// reads them once it comes to the front (see [`Self::load_due`]), so
+    /// an operation costs the other tabs nothing until then.
+    pub(super) fn request_shared_refs(&mut self, id: RepoId) -> Task<Message> {
+        let Some(common) = self.tab_mut(id).map(|t| t.repo.common_dir().to_path_buf()) else {
+            return Task::none();
+        };
+        let mut queued = false;
+        for tab in &mut self.tabs {
+            if tab.repo.id() != id && tab.repo.common_dir() == common {
+                tab.shared_refs_stale = true;
+                queued = true;
+            }
+        }
+        if queued {
+            self.load_due()
+        } else {
+            Task::none()
+        }
     }
 
     /// Reads `parts` again (any file may have changed); see
@@ -348,6 +373,15 @@ impl App {
         let active = self.active;
         let mut busy = false;
         let mut tasks = Vec::new();
+        // What other trees changed in the refs they share, now it shows.
+        if let Some(tab) = self.tabs.get_mut(active)
+            && std::mem::take(&mut tab.shared_refs_stale)
+        {
+            tab.queued |= Parts {
+                refs: true,
+                ..Parts::default()
+            };
+        }
         if let Some(tab) = self.tabs.get_mut(active)
             && tab.load_due(true)
         {
