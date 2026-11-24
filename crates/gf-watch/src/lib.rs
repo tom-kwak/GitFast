@@ -45,6 +45,20 @@ pub fn classify(path: &Path, workdir: Option<&Path>, git_dir: &Path) -> Option<C
             | "REVERT_HEAD" | "BISECT_LOG" | "rebase-merge" | "rebase-apply" | "packed-refs"
             | "refs" | "reftable" | "shallow" => Some(Change::Refs),
             "config" => Some(Change::Config),
+            // Another tree added or removed (its `gitdir`), locked, or
+            // switched: the list of worktrees. Only these files count: its
+            // index and logs change at every status read there.
+            "worktrees" => {
+                let mut rest = rel.components().skip(2);
+                match (rest.next(), rest.next()) {
+                    (Some(Component::Normal(f)), None)
+                        if f == "gitdir" || f == "locked" || f == "HEAD" =>
+                    {
+                        Some(Change::Refs)
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         };
     }
@@ -378,6 +392,24 @@ mod tests {
             classify(Path::new("/r/.git/CHERRY_PICK_HEAD"), Some(w), g),
             Some(Change::Refs)
         );
+        for path in [
+            "/r/.git/worktrees/feat/gitdir",
+            "/r/.git/worktrees/feat/locked",
+            "/r/.git/worktrees/feat/HEAD",
+        ] {
+            assert_eq!(
+                classify(Path::new(path), Some(w), g),
+                Some(Change::Refs),
+                "{path}"
+            );
+        }
+        for path in [
+            "/r/.git/worktrees/feat",
+            "/r/.git/worktrees/feat/index",
+            "/r/.git/worktrees/feat/logs/HEAD",
+        ] {
+            assert_eq!(classify(Path::new(path), Some(w), g), None, "{path}");
+        }
         assert_eq!(classify(Path::new("/elsewhere/x"), Some(w), g), None);
         assert_eq!(classify(Path::new("/r"), Some(w), g), None);
     }

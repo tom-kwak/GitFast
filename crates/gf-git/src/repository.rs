@@ -21,6 +21,9 @@ pub struct Repository {
     pub(crate) gix_fetch: bool,
     /// A linked working tree (`git worktree add`), not the main one.
     pub(crate) linked: bool,
+    /// The git dir every tree of the repository shares (refs, the list of
+    /// worktrees), with symlinks resolved so trees can be matched.
+    pub(crate) common_dir: PathBuf,
 }
 
 impl Repository {
@@ -76,9 +79,15 @@ impl Repository {
 
         // A linked tree's git dir (`.git/worktrees/<name>`) points at the
         // shared one through `commondir`; the main tree's has none.
-        let linked = tokio::fs::try_exists(git_dir.join("commondir"))
+        let common = tokio::fs::read_to_string(git_dir.join("commondir"))
             .await
-            .unwrap_or(false);
+            .ok()
+            .map(|c| git_dir.join(c.trim_end()));
+        let linked = common.is_some();
+        let common_dir = common.unwrap_or_else(|| git_dir.clone());
+        let common_dir = tokio::fs::canonicalize(&common_dir)
+            .await
+            .unwrap_or(common_dir);
         let handle = RepoHandle {
             id: RepoId::new(),
             workdir,
@@ -94,6 +103,7 @@ impl Repository {
             cli: CliBackend::new(handle, runner),
             gix_fetch: false,
             linked,
+            common_dir,
         })
     }
 
@@ -108,6 +118,12 @@ impl Repository {
     /// Whether this is a linked working tree rather than the main one.
     pub fn is_linked_worktree(&self) -> bool {
         self.linked
+    }
+
+    /// The git dir all trees of this repository share: equal for the tabs
+    /// of its main tree and of its linked trees.
+    pub fn common_dir(&self) -> &Path {
+        &self.common_dir
     }
 
     pub fn handle(&self) -> &RepoHandle {

@@ -40,6 +40,30 @@ async fn opens_from_root_and_subdirectory() {
 }
 
 #[tokio::test]
+async fn a_linked_tree_shares_the_main_trees_common_dir() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "x\n");
+    repo.commit_all("init");
+    let parent = tempfile::tempdir().unwrap();
+    let linked = parent.path().join("linked");
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "side",
+        linked.to_str().unwrap(),
+    ]);
+
+    let main = open(&repo).await;
+    let other = Repository::open(&linked, runner(&repo)).await.unwrap();
+    assert!(other.is_linked_worktree() && !main.is_linked_worktree());
+    assert_ne!(main.handle().git_dir, other.handle().git_dir);
+    assert_eq!(main.common_dir(), other.common_dir());
+    assert_eq!(main.common_dir(), canonical(&repo.path().join(".git")));
+}
+
+#[tokio::test]
 async fn commit_file_paths_use_the_requested_tree_and_ignore_worktree_files() {
     let repo = TestRepo::new();
     repo.write("shared.txt", "base\n");
