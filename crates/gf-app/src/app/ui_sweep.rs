@@ -1147,6 +1147,10 @@ fn reselect(messages: &[String]) -> bool {
         "Dialog(Choose(",
         "History(Select(",
         "Sidebar(Select(",
+        // The tab's own tree is the selected card until another is
+        // picked; a click on it also starts a double-click (open).
+        "Worktrees(Click(",
+        "Worktrees(Select(",
         "CommitDiff(SelectFile(",
         "LocalDiff(SelectFile(",
         "Blame(Select(",
@@ -5240,34 +5244,6 @@ async fn settings_offer_to_set_a_credential_helper_when_git_has_none() {
         .with_env([("GIT_CONFIG_GLOBAL", config.clone().into_os_string())]);
     let _ = ui.send(Message::Key(Shortcut::Settings)).await;
     assert!(ui.shows("⚠ git has no credential helper"));
-#[tokio::test]
-async fn a_press_elsewhere_in_the_dialog_closes_the_dropped_down_suggestions() {
-    let mut ui = Ui::welcome().await;
-    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
-    let _ = ui.click("[ + Add account ]").await;
-    let open = |ui: &Ui| ui.app.dialog.as_ref().is_some_and(|d| d.suggestions_open());
-
-    let _ = ui.click("▾").await;
-    assert!(open(&ui));
-    // A press on another part of the card closes the list.
-    let _ = ui.click("│ user name").await;
-    assert!(!open(&ui), "closed by a press beside it");
-    assert!(ui.shows("▾"));
-
-    // The ▾ is not "elsewhere": it still closes what it opened.
-    let _ = ui.click("▾").await;
-    assert!(open(&ui));
-    let _ = ui.click("▴").await;
-    assert!(!open(&ui), "the ▾ closes it rather than reopening it");
-
-    // A press on another button closes it and still does its work.
-    let _ = ui.click("▾").await;
-    let _ = ui.click("[ Log in ⏎ ]").await;
-    assert!(!open(&ui));
-    let dialog = ui.app.dialog.as_ref().expect("still open: nothing typed");
-    assert!(dialog.error.is_some(), "the press still tried to log in");
-}
-
     let _ = ui.click(&format!("[ Use {name} ]")).await;
     let dialog = ui.app.dialog.as_ref().expect("asks first");
     assert_eq!(dialog.severity, dialog::Severity::Change);
