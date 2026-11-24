@@ -3,6 +3,7 @@
 //! Every field has a default and unknown keys are ignored, so files written
 //! by older or newer versions of gf always load.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gf_core::{GfError, Result};
@@ -22,6 +23,10 @@ pub struct Settings {
     /// Git servers logged in from the settings screen (newest last). Only
     /// who and where: the token lives in git's credential helper.
     pub accounts: Vec<Account>,
+    /// Hosting service picked by hand for a host (`git.example.com` →
+    /// `gitlab`), where its name does not tell. Guessed from the name
+    /// otherwise.
+    pub services: BTreeMap<String, String>,
 }
 
 /// A login to a git server over HTTPS. The token is not here: git's
@@ -189,6 +194,19 @@ impl Settings {
         self.accounts.push(account);
     }
 
+    /// Remembers the hosting service picked for `host`; `None` forgets it
+    /// (back to guessing from the name).
+    pub fn set_service(&mut self, host: &str, service: Option<&str>) {
+        match service {
+            Some(service) => {
+                self.services.insert(host.to_owned(), service.to_owned());
+            }
+            None => {
+                self.services.remove(host);
+            }
+        }
+    }
+
     /// Moves `path` to the front of the recent list.
     pub fn remember_repo(&mut self, path: &Path) {
         let recent = &mut self.repos.recent;
@@ -290,6 +308,25 @@ mod tests {
             s.accounts,
             vec![account("gitlab.com", "a"), account("github.com", "b")]
         );
+    }
+
+    #[test]
+    fn picked_services_survive_a_save_and_can_be_forgotten() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.toml");
+        let mut s = Settings::default();
+        s.set_service("git.example.com:8443", Some("gitlab"));
+        s.save(&path).expect("save");
+        let mut loaded = Settings::load(&path).expect("load");
+        assert_eq!(
+            loaded
+                .services
+                .get("git.example.com:8443")
+                .map(String::as_str),
+            Some("gitlab")
+        );
+        loaded.set_service("git.example.com:8443", None);
+        assert!(loaded.services.is_empty());
     }
 
     #[test]

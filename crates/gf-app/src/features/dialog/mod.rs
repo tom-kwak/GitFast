@@ -155,6 +155,14 @@ impl Field {
         found.into_iter().map(|(_, s)| s).collect()
     }
 
+    /// Something is typed that no suggestion contains.
+    pub fn unmatched(&self) -> bool {
+        !self.suggestions.is_empty()
+            && !self.no_match.is_empty()
+            && !self.value.trim().is_empty()
+            && self.matches().is_empty()
+    }
+
     /// The highlighted match, when it can be picked.
     fn highlighted(&self) -> Option<&Suggestion> {
         let h = self.highlight?;
@@ -208,6 +216,17 @@ pub struct Choice {
     pub inline: bool,
     /// Option under the pointer (inline only).
     hovered: Option<usize>,
+    /// Drawn on one (wrapping) line: `(•) a  ( ) b`, for short labels.
+    pub in_a_row: bool,
+}
+
+/// A line that says what to do outside gf, with a button that opens the
+/// page for it (`[ Get token ↗ ]`). Shown after the fields and options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub text: String,
+    /// The button's label and the page it opens; no button when `None`.
+    pub open: Option<(String, String)>,
 }
 
 /// How a line under an option reads.
@@ -275,6 +294,7 @@ pub struct Dialog<P> {
     pub area: Option<Area>,
     pub checks: Vec<Check>,
     pub choice: Option<Choice>,
+    pub link: Option<Link>,
     pub confirm_label: String,
     pub severity: Severity,
     pub purpose: P,
@@ -311,6 +331,8 @@ pub enum Message {
     Pick(usize),
     /// Pointer over an inline option (`None`: left it).
     Hover(Option<usize>),
+    /// The [`Link`]'s button: the app opens the page; the dialog stays.
+    OpenLink(String),
     DontAsk,
     Submit,
     Cancel,
@@ -350,6 +372,7 @@ impl<P: Clone> Dialog<P> {
             area: None,
             checks: Vec::new(),
             choice: None,
+            link: None,
             confirm_label: confirm_label.into(),
             severity: Severity::Normal,
             purpose,
@@ -453,8 +476,11 @@ impl<P: Clone> Dialog<P> {
     }
 
     /// A field's suggestions are dropped down (Esc closes them first).
+    /// (A list with no match is not shown, so it is not open either.)
     pub fn suggestions_open(&self) -> bool {
-        self.fields.iter().any(|f| f.open)
+        self.fields
+            .iter()
+            .any(|f| f.open && !f.matches().is_empty())
     }
 
     fn close_suggestions(&mut self) {
@@ -520,7 +546,41 @@ impl<P: Clone> Dialog<P> {
             selected,
             inline: false,
             hovered: None,
+            in_a_row: false,
         });
+        self
+    }
+
+    /// Options with short labels on one line (see [`Choice::in_a_row`]).
+    pub fn options_in_a_row(
+        mut self,
+        label: impl Into<String>,
+        options: Vec<Opt>,
+        selected: usize,
+    ) -> Self {
+        self = self.options(label, options, selected);
+        if let Some(c) = self.choice.as_mut() {
+            c.in_a_row = true;
+        }
+        self
+    }
+
+    /// Puts a row of options (see [`Self::options_in_a_row`]) into a
+    /// dialog already open, or takes it out with `None`.
+    pub fn set_options_in_a_row(&mut self, row: Option<(String, Vec<Opt>, usize)>) {
+        self.choice = row.map(|(label, options, selected)| Choice {
+            label,
+            options,
+            selected,
+            inline: false,
+            hovered: None,
+            in_a_row: true,
+        });
+    }
+
+    /// A line with a button that opens a page (see [`Link`]).
+    pub fn link(mut self, link: Link) -> Self {
+        self.link = Some(link);
         self
     }
 
@@ -690,6 +750,7 @@ impl<P: Clone> Dialog<P> {
                 self.dont_ask = !self.dont_ask;
                 None
             }
+            Message::OpenLink(_) => None,
             // ⏎ on a highlighted suggestion picks it; the next ⏎ submits.
             Message::Submit
                 if let Some((i, value)) = self.fields.iter().enumerate().find_map(|(i, f)| {
@@ -784,8 +845,16 @@ impl<P: Clone> Dialog<P> {
             col = col
                 .push(container(list).height(Length::Fixed(row_height * (f32::from(rows) + 1.0))));
         }
+        // With a ▾ beside some field, every field leaves its room, so the
+        // inputs (and a list dropped over them) share one right edge.
+        let toggle_width = (t.char_width() + 16.0).ceil();
+        let any_toggle = self.has_suggestions();
         for (i, f) in self.fields.iter().enumerate() {
-            let mut input = text_input(&f.placeholder, &f.value)
+            // A long placeholder (a folder path) loses its start, not the
+            // end that tells it apart.
+            let placeholder =
+                widgets::format::truncate_front(&f.placeholder, inner_cols(t).saturating_sub(4));
+            let mut input = text_input(&placeholder, &f.value)
                 .secure(f.secret)
                 .on_input(move |v| Message::Field(i, v))
                 .size(t.font_size)
@@ -798,20 +867,50 @@ impl<P: Clone> Dialog<P> {
                 input = input.on_submit(Message::Submit);
             }
             let input: Element<'a, Message> = if f.suggestions.is_empty() {
-                input.into()
+                if any_toggle {
+                    row![input, space().width(Length::Fixed(toggle_width))]
+                        .spacing(2)
+                        .into()
+                } else {
+                    input.into()
+                }
             } else {
                 let toggle = iced::widget::button(
                     colored(t, if f.open { "▴" } else { "▾" }, t.accent()).size(t.small()),
                 )
                 .padding(Padding::from([4, 8]))
+                .width(Length::Fixed(toggle_width))
                 .style(style::text_button(t, t.accent()))
                 .on_press(Message::ToggleSuggestions(i));
+                // The list drops down under the input alone (▾ stays
+                // beside it), and only when there is something to pick.
+                let list = (f.open && !f.matches().is_empty()).then(|| suggestion_list(t, i, f));
+                // The ▾ is part of the base: pressing it toggles the list
+                // rather than dismissing it first.
                 let base = row![input, widgets::tip(t, toggle, "existing ones  ↓".into())]
                     .spacing(2)
                     .align_y(iced::Alignment::Center);
-                widgets::dropdown::dropdown(base, f.open.then(|| suggestion_list(t, i, f)))
+                widgets::dropdown::dropdown(
+                    base,
+                    list,
+                    toggle_width + 2.0,
+                    Message::CloseSuggestions,
+                )
             };
-            col = col.push(column![dim(t, format!("│ {}", f.label)), input].spacing(2));
+            // What is typed matches nothing: said beside the label, so
+            // nothing below is covered.
+            let label: Element<'a, Message> = if f.unmatched() {
+                row![
+                    dim(t, format!("│ {}", f.label)),
+                    colored(t, format!("· {}", f.no_match), t.accent()).size(t.small())
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center)
+                .into()
+            } else {
+                dim(t, format!("│ {}", f.label)).into()
+            };
+            col = col.push(column![label, input].spacing(2));
         }
         if let Some(area) = &self.area {
             let editor = text_editor(&area.content)
@@ -824,7 +923,19 @@ impl<P: Clone> Dialog<P> {
             col = col.push(column![dim(t, format!("│ {}", area.label)), editor].spacing(2));
         }
         let inline = self.choice.as_ref().filter(|c| c.inline);
-        if let Some(choice) = self.choice.as_ref().filter(|c| !c.inline) {
+        if let Some(choice) = self.choice.as_ref().filter(|c| c.in_a_row) {
+            let options = choice.options.iter().enumerate().map(|(i, o)| {
+                let picked = i == choice.selected;
+                let text = format!("{} {}", if picked { "(•)" } else { "( )" }, o.label);
+                let pick = (!o.disabled).then_some(Message::Choose(i));
+                widgets::text_button(t, &text, None, pick)
+            });
+            col = col.push(column![
+                dim(t, format!("│ {}", choice.label)),
+                iced::widget::Row::with_children(options).spacing(4).wrap()
+            ]);
+        }
+        if let Some(choice) = self.choice.as_ref().filter(|c| !c.inline && !c.in_a_row) {
             col = col.push(dim(t, format!("│ {}", choice.label)));
             for (i, o) in choice.options.iter().enumerate() {
                 let picked = i == choice.selected;
@@ -844,6 +955,19 @@ impl<P: Clone> Dialog<P> {
                     col = col.push(colored(t, format!("│       {line}"), color));
                 }
             }
+        }
+        if let Some(link) = &self.link {
+            let mut line = row![mono(t, format!("│ {}", link.text)).width(Length::Fill)]
+                .spacing(6)
+                .align_y(iced::Alignment::Center);
+            if let Some((label, url)) = &link.open {
+                line = line.push(widgets::tip(
+                    t,
+                    widgets::text_button(t, label, None, Some(Message::OpenLink(url.clone()))),
+                    format!("open {url}"),
+                ));
+            }
+            col = col.push(line);
         }
         for (i, c) in self.checks.iter().enumerate() {
             let label = format!("{} {}", if c.value { "■" } else { "□" }, c.label);
@@ -960,11 +1084,22 @@ fn suggestion_list<'a>(t: &'a Tokens, i: usize, f: &'a Field) -> Element<'a, Mes
         } else {
             t.branch()
         };
+        let mut name = row![].spacing(0);
+        for (piece, lit_up) in match_pieces(&s.value, f.value.trim()) {
+            let color = if lit_up && !s.disabled {
+                t.fg
+            } else {
+                name_color
+            };
+            name = name.push(
+                colored(t, piece, color)
+                    .size(t.small())
+                    .wrapping(iced::widget::text::Wrapping::None),
+            );
+        }
         let line = row![
             colored(t, if lit || exact { "›" } else { " " }, t.accent()).size(t.small()),
-            colored(t, s.value.as_str(), name_color)
-                .size(t.small())
-                .wrapping(iced::widget::text::Wrapping::None),
+            name,
             space().width(Length::Fill),
             dim(t, s.hint.as_str()).wrapping(iced::widget::text::Wrapping::None),
         ]
@@ -982,8 +1117,6 @@ fn suggestion_list<'a>(t: &'a Tokens, i: usize, f: &'a Field) -> Element<'a, Mes
     }
     if more > 0 {
         col = col.push(note(format!("… {more} more — type to narrow")));
-    } else if matches.is_empty() {
-        col = col.push(note(f.no_match.clone()));
     }
     container(col)
         .width(Length::Fill)
@@ -999,6 +1132,31 @@ fn suggestion_list<'a>(t: &'a Tokens, i: usize, f: &'a Field) -> Element<'a, Mes
             ..container::Style::default()
         })
         .into()
+}
+
+/// `value` cut around the first place `typed` is in it (any case):
+/// `(piece, is the typed part)`. Whole when it is not in it.
+fn match_pieces<'v>(value: &'v str, typed: &str) -> Vec<(&'v str, bool)> {
+    let lower = value.to_lowercase();
+    let typed = typed.to_lowercase();
+    // Lowercasing kept the byte offsets (ASCII and most names), so the
+    // place found in `lower` is the same place in `value`.
+    let at = (!typed.is_empty() && lower.len() == value.len())
+        .then(|| lower.find(&typed))
+        .flatten()
+        .filter(|at| value.is_char_boundary(*at) && value.is_char_boundary(at + typed.len()));
+    let Some(at) = at else {
+        return vec![(value, false)];
+    };
+    let end = at + typed.len();
+    [
+        (&value[..at], false),
+        (&value[at..end], true),
+        (&value[end..], false),
+    ]
+    .into_iter()
+    .filter(|(p, _)| !p.is_empty())
+    .collect()
 }
 
 /// Inline options: the lines of the option under the pointer (else the
@@ -1151,6 +1309,30 @@ mod tests {
         assert_eq!(names, ["fix/login", "feature/login"]);
         let _ = d.update(Message::Field(0, "fe".into()));
         assert_eq!(d.fields[0].matches()[0].value, "feature/login");
+    }
+
+    #[test]
+    fn nothing_matching_drops_no_list_and_says_so_beside_the_label() {
+        let mut d = branch_dialog();
+        let _ = d.update(Message::Field(0, "zzz".into()));
+        assert!(d.fields[0].unmatched());
+        assert!(!d.suggestions_open(), "no empty list over the fields below");
+        // Esc then cancels the dialog instead of closing an unseen list.
+        let _ = d.update(Message::Field(0, "fix".into()));
+        assert!(!d.fields[0].unmatched() && d.suggestions_open());
+        let _ = d.update(Message::Field(0, String::new()));
+        assert!(!d.fields[0].unmatched(), "nothing typed is not a miss");
+    }
+
+    #[test]
+    fn the_typed_part_of_a_suggestion_is_cut_out_to_light_up() {
+        assert_eq!(
+            match_pieces("feat/Login", "log"),
+            [("feat/", false), ("Log", true), ("in", false)]
+        );
+        assert_eq!(match_pieces("fix", "fix"), [("fix", true)]);
+        assert_eq!(match_pieces("fix", ""), [("fix", false)]);
+        assert_eq!(match_pieces("fix", "zz"), [("fix", false)]);
     }
 
     #[test]
@@ -1341,6 +1523,31 @@ mod tests {
             d.enter(),
             Some(Outcome::Submitted { purpose: 1, .. })
         ));
+    }
+
+    #[test]
+    fn options_in_a_row_pick_like_radio_buttons_and_links_leave_it_open() {
+        let mut d = Dialog::confirm("Log in", vec![], "Log in", ())
+            .field("server", "", "")
+            .options_in_a_row(
+                "service",
+                vec![Opt::new("GitHub"), Opt::new("GitLab"), Opt::new("other")],
+                0,
+            )
+            .link(Link {
+                text: "Use a token".into(),
+                open: Some(("Get token ↗".into(), "https://example.com".into())),
+            });
+        assert!(d.update(Message::Choose(1)).is_none());
+        assert!(
+            d.update(Message::OpenLink("https://example.com".into()))
+                .is_none(),
+            "opening the page does not close the dialog"
+        );
+        match d.update(Message::Submit) {
+            Some(Outcome::Submitted { choice, .. }) => assert_eq!(choice, Some(1)),
+            other => panic!("not submitted: {other:?}"),
+        }
     }
 
     #[test]

@@ -39,6 +39,12 @@ async fn chord(ui: &mut Ui, shortcut: Shortcut) {
 }
 
 /// The fixture plus a second repository in another tab; the first is shown.
+/// The second tab's folder as the app names it (resolved, e.g. `/private`
+/// on macOS).
+fn second_tab(ui: &Ui) -> PathBuf {
+    ui.app.tabs[1].repo.cwd().to_path_buf()
+}
+
 async fn two_tabs() -> (Ui, PathBuf) {
     let mut ui = Ui::open().await;
     let other = Fixture::new();
@@ -277,6 +283,38 @@ async fn previous_and_next_tab_shortcuts_wrap_around() {
     assert_eq!(ui.app.active, 0, "wraps to the first");
     chord(&mut ui, Shortcut::PrevTab).await;
     assert_eq!(ui.app.active, 1, "wraps to the last");
+}
+
+#[tokio::test]
+async fn a_dragged_tab_moves_and_the_shown_tab_stays_shown() {
+    let (mut ui, _) = two_tabs().await;
+    let other = second_tab(&ui);
+    // Picked up: shown at once (the tab bar sends `Select`), then dropped
+    // in front of the first tab.
+    let _ = ui.send(Message::Tabs(tabs::Message::Select(1))).await;
+    let _ = ui.send(Message::Tabs(tabs::Message::Moved(1, 0))).await;
+    assert_eq!(ui.app.tabs[0].repo.cwd(), other);
+    assert_eq!(ui.app.active, 0, "the dragged tab stays shown");
+    assert_eq!(ui.app.settings.repos.open[0], other, "order is remembered");
+    // A stale drop (tabs closed meanwhile) is ignored.
+    let _ = ui.send(Message::Tabs(tabs::Message::Moved(5, 0))).await;
+    assert_eq!(ui.app.tabs[0].repo.cwd(), other);
+}
+
+#[tokio::test]
+async fn move_tab_shortcuts_carry_the_active_tab_and_stop_at_the_ends() {
+    let (mut ui, _) = two_tabs().await;
+    let other = second_tab(&ui);
+    chord(&mut ui, Shortcut::MoveTab { right: false }).await;
+    assert_eq!(
+        (ui.app.active, ui.app.tabs[1].repo.cwd()),
+        (0, other.as_path())
+    );
+    chord(&mut ui, Shortcut::MoveTab { right: true }).await;
+    assert_eq!(ui.app.active, 1);
+    assert_eq!(ui.app.tabs[0].repo.cwd(), other);
+    chord(&mut ui, Shortcut::MoveTab { right: true }).await;
+    assert_eq!(ui.app.active, 1, "already last");
 }
 
 // ---------------------------------------------------------- undo list

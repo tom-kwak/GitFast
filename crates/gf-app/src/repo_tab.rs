@@ -22,6 +22,10 @@ use crate::features::{changes, commit_box, diff_view, history, sidebar, worktree
 pub const HISTORY_PAGE: usize = 1000;
 /// Number of lane colors the graph cycles through (see `history`).
 pub const LANE_COLORS: usize = 6;
+/// Lines to parents more than this many rows below are cut into arrows
+/// (see `gf_git::graph`): a history of topic branches forked off old
+/// commits (git.git) stays a few lanes wide instead of hundreds.
+pub const GRAPH_CUT: usize = 50;
 
 /// Commits plus their graph rows, computed off the UI thread.
 #[derive(Debug, Clone, Default)]
@@ -49,7 +53,8 @@ impl History {
 
     /// The history of `commits` with branch and tag badges `badges`.
     fn with_badges(commits: Vec<Commit>, badges: &Badges) -> Self {
-        let mut layout = graph::Layout::new(LANE_COLORS, crate::widgets::graph_canvas::MAX_LANES);
+        let mut layout = graph::Layout::new(LANE_COLORS, crate::widgets::graph_canvas::MAX_LANES)
+            .with_cut(GRAPH_CUT);
         let graph = layout.rows(&commits);
         Self {
             lanes: lanes(&graph),

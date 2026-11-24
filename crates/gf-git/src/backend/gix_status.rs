@@ -32,7 +32,7 @@ use crate::cli::parse::bytes_to_path;
 use crate::cli::parse::numstat::LineCounts;
 use crate::ops::diff::{DiffOptions, DiffTarget, FileVersion};
 
-fn path(p: &BStr) -> PathBuf {
+pub(super) fn path(p: &BStr) -> PathBuf {
     bytes_to_path(p.as_bytes())
 }
 

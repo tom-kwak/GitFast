@@ -20,7 +20,7 @@ gf-git/src/
 │  ├─ gix_backend.rs  GixBackend: gix 조회 구현(log·ref·reflog·stash·worktree·rebase). 지원하지 않는 메서드는 Err(Unsupported)
 │  ├─ gix_status.rs   GixBackend: status, numstat
 │  ├─ gix_refs.rs     GixBackend: 브랜치·경량 태그 ref 편집
-│  ├─ gix_worktree.rs GixBackend: worktree_status, default_base
+│  ├─ gix_worktree.rs GixBackend: worktree_status, default_base, pull_rebases
 │  ├─ gix_undo.rs     GixBackend: undo capture
 │  └─ gix_fetch.rs    GixBackend: fetch --prune (기능 `gix-fetch`, 설정으로 켤 때만)
 ├─ ops/*.rs      영역별 타입·파서와 `impl XxxOps for CliBackend` (CLI 구현)
@@ -55,9 +55,12 @@ gf-git/src/
 | StashOps | stashes(목록) | **gix** ✅ | `refs/stash` reflog |
 | | push/apply/pop/drop | CLI | |
 | WorktreeOps | 목록 | **gix** ✅ | unborn 브랜치의 worktree는 CLI. 연결된 트리에서 읽어도 main 트리가 맨 앞(git과 같음) |
-| | worktree_status, default_base | **gix** ✅ | 그 트리를 gix로 따로 엽니다. CLI는 트리 하나에 git을 6~12번 실행했습니다(status·log·reflog·config·rev-list·merge-base). status는 `--untracked-files=normal`처럼 폴더를 한 항목으로 셉니다. `diff.ignoreSubmodules` 설정, unborn 브랜치, intent-to-add 항목은 CLI |
+| | worktree_status, default_base | **gix** ✅ | 그 트리를 gix로 따로 엽니다. CLI는 트리 하나에 git을 6~12번 실행했습니다(status·log·reflog·config·rev-list·merge-base). status는 `--untracked-files=normal`처럼 폴더를 한 항목으로 셉니다. `diff.ignoreSubmodules` 설정, unborn 브랜치, intent-to-add 항목은 CLI. `touched`(겹침 경고)는 merge_base 트리 ↔ HEAD 트리 diff(이름 바꾸기 추적 없음) + status 항목이고, CLI는 `diff --name-only --no-renames`를 하나 더 실행합니다(base보다 앞선 커밋이 있을 때만). 2000개를 넘으면 `None` |
+| | pull_rebases | **gix** ✅ | 그 트리를 열어 `branch.<b>.rebase`, 없으면 `pull.rebase`를 읽습니다. git의 false 값(`false`·`no`·`off`·`0`)만 merge이고 `merges`·`interactive`는 rebase입니다. worktree의 "update from base" 기본값에만 씁니다 |
+| | work_base (`Repository` 조합) | **gix** ✅ | default_base + 현재 트리의 worktree_status를 그대로 씁니다. 추측한 base(`base_guessed`)는 돌려주지 않습니다. linked 트리에서 base로 switch할 때만 읽습니다 |
 | | add, remove, prune, lock/unlock | CLI | |
-| SubmoduleOps | 목록(상태 포함), update/sync | CLI | 목록의 `(describe)`가 git의 describe 단계(태그 → `--tags` → `--contains` → `--all`)와 같아야 해서 CLI 유지 |
+| SubmoduleOps | 목록: submodule이 없을 때 | **gix** ✅ | `git submodule status`는 index의 gitlink를 나열하므로, gitlink가 없으면 프로세스 없이 빈 목록입니다(`.gitmodules`만 남은 경우·커밋 없는 저장소 포함). 셸 스크립트라 git을 8번 띄워 약 50ms가 걸렸고, 저장소를 열 때와 refs를 새로 읽을 때마다 실행됐습니다. bare 저장소는 CLI(git의 오류를 그대로) |
+| | 목록: submodule이 있을 때(상태 포함), update/sync | CLI | 목록의 `(describe)`가 git의 describe 단계(태그 → `--tags` → `--contains` → `--all`)와 같아야 해서 CLI 유지 |
 | RebaseOps | rebase_plan, squash_preview | **gix** ✅ | 두 백엔드가 같은 로직(`rebase_interactive::plan/preview`)을 공유하고 log·unpushed만 각자 구현 |
 | | rebase_interactive, squash | CLI | gix-sequencer 없음 |
 | StateOps | state | 파일 검사(백엔드 무관) | |

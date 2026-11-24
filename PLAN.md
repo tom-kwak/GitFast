@@ -65,6 +65,7 @@
 - **색상**: 기본 다크, ANSI 16색 기반(추가=green, 삭제=red, 브랜치=cyan, 태그=yellow, HEAD=magenta). 프리셋(`gf-dark`, `gf-light`, `dracula`, `cd-dark`, `cd-light`)을 `:theme`으로 교체
 - **레이아웃**: 둥근 모서리·그림자·그라디언트 없음. 패널 구분은 1px 선이나 박스 문자(`│ ─ ┌ ┐`) 느낌. 여백은 적게, 정보는 촘촘하게
 - **커밋 그래프**: `● │ ├─ ╮ ╯` 같은 문자 기반
+  - 50행보다 먼 부모로 가는 선은 긋지 않고 화살표로 끊습니다. 행에는 `↓부모해시`, 부모 쪽에는 `↑N`을 표시합니다. 오래된 커밋에서 갈라진 topic이 많은 저장소(git.git)에서도 레인이 몇 개로 유지됩니다(끊지 않으면 수백 개).
 - **예외 — 파일 트리 폴더 아이콘**: 글자 한 칸 크기의 선 폴더(열림/닫힘)를 canvas로 그립니다. 글자처럼 테마 토큰(`t.folder()`) 색과 글꼴 크기를 따릅니다(`widgets/file_tree.rs`)
 - **입력**: 하단 프롬프트(`gf ❯ `)가 기본 명령줄. 키보드 우선이지만 마우스도 1급(§4-2)
 - **상태 표시**: 상태줄에 브랜치, ahead/behind, 진행 중 작업
@@ -133,7 +134,7 @@ trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }
 ### 7.2 계정
 - Personal Access Token(1차), OAuth Device Flow(2차)
 - self-hosted GitLab: base URL, 사내 CA 인증서 옵션
-- ✅ 설정 → ACCOUNTS: 서버·사용자·토큰으로 로그인/로그아웃. 토큰은 git credential helper에 저장하고(`gf_git::ops::credential`), 설정 파일에는 계정 메타데이터(`settings.accounts`)만 둡니다
+- ✅ 설정 → ACCOUNTS: 서버·사용자·토큰으로 로그인/로그아웃. 토큰은 git credential helper에 저장하고(`gf_git::ops::credential`), 설정 파일에는 계정 메타데이터(`settings.accounts`)만 둡니다. 서비스(GitHub·GitLab·Bitbucket·Gitea·Azure)는 호스트 이름으로 추측하고, 로그인 다이얼로그의 service 줄은 이름으로 알 수 없는 서버에만 보이고(토큰 안내 줄이 추측한 서비스를 밝힘), 이름이 틀리게 말하면 계정 태그 클릭으로 고릅니다(`settings.services`에 호스트별로 저장). 토큰 페이지 버튼(`Get token ↗`)은 토큰을 입력하는 로그인 다이얼로그에만 둡니다
   - 계정마다 서비스(호스트로 추정: GitHub·GitLab·Bitbucket·Gitea·Azure), helper에 토큰이 남아 있는지(`git credential fill`, 만료·폐기로 git이 지웠으면 ⚠와 [ Log in again ]), 그 서버를 쓰는 열린 저장소를 보여 줍니다
   - 열린 저장소가 쓰지만 로그인하지 않은 HTTPS 서버는 NOT LOGGED IN에 [ Log in ]으로, SSH 서버는 따로 보여 줍니다. [ Get token ↗ ]은 서비스의 토큰 생성 페이지를 필요한 scope와 함께 엽니다
   - 설정에서 로그인하면 열린 저장소의 그 서버 remote에 `git ls-remote`로 토큰을 확인하고, 서버가 거절하면 저장하지 않고 다이얼로그에 이유를 보입니다

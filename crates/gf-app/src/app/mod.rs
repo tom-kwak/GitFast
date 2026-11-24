@@ -90,6 +90,10 @@ pub enum Shortcut {
     /// ⌘⇧[ / ⌘⇧]: the tab to the left / right.
     PrevTab,
     NextTab,
+    /// ⌘⌥⇧[ / ⌘⌥⇧]: move the active tab one place left / right.
+    MoveTab {
+        right: bool,
+    },
     CloseTab,
     Refresh,
     SelectTab(usize),
@@ -169,6 +173,8 @@ pub enum RemoteOp {
 
 #[derive(Debug, PartialEq, Eq)]
 enum CheckoutPhase {
+    /// A linked tree reads its base before switching (see `guard_base`).
+    Guarding(RepoId),
     Measuring(RepoId),
     Running,
     RefreshQueued,
@@ -365,6 +371,16 @@ pub enum Message {
         changed: usize,
         blocked: Result<Vec<PathBuf>, String>,
     },
+    /// The base of a linked tree, read before switching it to `name`.
+    /// Whether `git pull` rebases in the tree an update from its base
+    /// runs in: the dialog's default.
+    UpdateModeRead(worktree_ops::UpdateFromBase, bool),
+    WorkBaseRead {
+        repo: RepoId,
+        name: String,
+        remote: bool,
+        base: Option<String>,
+    },
     /// Where a commit to find is in the main history (see `reveal`).
     CommitLocated {
         repo: RepoId,
@@ -455,7 +471,9 @@ pub struct App {
     window_focused: bool,
     /// A merge to run once the tree it runs in is open in a tab (merging a
     /// worktree's branch into its base, from the worktrees view).
-    merge_after_open: Option<worktree_ops::MergeAfterOpen>,
+    integrate_after_open: Option<worktree_ops::IntegrateAfterOpen>,
+    /// A tree to remove once the merge running in that tab goes through.
+    clean_after_merge: Option<(RepoId, worktree_ops::CleanAfterMerge)>,
     /// Repositories being opened (for the busy indicator).
     opening: usize,
     /// Panel the arrow keys drive while no text field has focus.
@@ -551,7 +569,8 @@ impl App {
             git_missing: false,
             modifiers: keyboard::Modifiers::empty(),
             window_focused: true,
-            merge_after_open: None,
+            integrate_after_open: None,
+            clean_after_merge: None,
             opening: 0,
             focus: Pane::default(),
             typing: no_tabs,
@@ -679,6 +698,7 @@ impl App {
                 tabs::Message::Open => self.update(Message::OpenPicker),
                 tabs::Message::Settings => self.toggle_settings(),
                 tabs::Message::List => self.toggle_tab_list(),
+                tabs::Message::Moved(from, to) => self.move_tab(from, to),
             },
             Message::Toolbar(m) => self.on_toolbar(m),
             Message::Welcome(m) => match m {
@@ -970,26 +990,33 @@ impl App {
                     None => task,
                 }
             }
+            Message::Dialog(dialog::Message::OpenLink(url)) => self.open_url(&url),
             Message::Dialog(m) => {
                 let Some(dialog) = self.dialog.as_mut() else {
                     return Task::none();
                 };
                 let typed = matches!(m, dialog::Message::Field(..));
                 let before: Vec<String> = dialog.fields.iter().map(|f| f.value.clone()).collect();
-                match dialog.update(m) {
-                    Some(outcome) => self.on_dialog_outcome(outcome),
-                    // A suggestion filled a field in: keep typing at its end.
-                    None if !typed => dialog
-                        .fields
-                        .iter()
-                        .zip(&before)
-                        .position(|(f, old)| f.value != *old)
-                        .and_then(dialog::field_id)
-                        .map_or_else(Task::none, |id| {
-                            Task::batch([operation::focus(id), operation::move_cursor_to_end(id)])
-                        }),
-                    None => Task::none(),
+                if let Some(outcome) = dialog.update(m) {
+                    return self.on_dialog_outcome(outcome);
                 }
+                self.sync_login_dialog(before.first().map(String::as_str));
+                let Some(dialog) = self.dialog.as_ref() else {
+                    return Task::none();
+                };
+                if typed {
+                    return Task::none();
+                }
+                // A suggestion filled a field in: keep typing at its end.
+                dialog
+                    .fields
+                    .iter()
+                    .zip(&before)
+                    .position(|(f, old)| f.value != *old)
+                    .and_then(dialog::field_id)
+                    .map_or_else(Task::none, |id| {
+                        Task::batch([operation::focus(id), operation::move_cursor_to_end(id)])
+                    })
             }
 
             Message::Core(CoreEvent::Command(e)) => {
@@ -1083,12 +1110,12 @@ impl App {
             }
             Message::Opened(path, result) => {
                 self.opening = self.opening.saturating_sub(1);
-                let merge = self.merge_after_open.take_if(|m| m.path == path);
+                let after = self.integrate_after_open.take_if(|m| m.path == path);
                 match result {
                     Ok(repo) => {
                         let tab = self.add_tab(*repo);
-                        match merge {
-                            Some(m) => Task::batch([tab, self.run_merge(m.branch, m.no_ff)]),
+                        match after {
+                            Some(a) => Task::batch([tab, self.integrate_here(a.what)]),
                             None => tab,
                         }
                     }
@@ -1259,6 +1286,13 @@ impl App {
                 changed,
                 blocked,
             } => self.show_switch(repo, name, remote, from, changed, blocked),
+            Message::WorkBaseRead {
+                repo,
+                name,
+                remote,
+                base,
+            } => self.on_work_base(repo, name, remote, base),
+            Message::UpdateModeRead(update, rebase) => self.on_update_mode(update, rebase),
             Message::Banner(m) => self.on_banner(m),
             Message::Conflict(m) => self.on_conflict_message(m),
             Message::Blame(m) => self.on_blame_message(m),
@@ -1411,6 +1445,7 @@ impl App {
     fn add_tab(&mut self, repo: Repository) -> Task<Message> {
         // Already open (possibly via another path inside it): just switch.
         if let Some(i) = self.tabs.iter().position(|t| t.repo.cwd() == repo.cwd()) {
+            self.tabs[i].worktrees.select_here();
             return self.select_tab(i);
         }
         let cwd = repo.cwd().to_path_buf();
@@ -1668,6 +1703,32 @@ impl App {
         self.restore_focus()
     }
 
+    /// Moves the tab at `from` to position `to`, keeping the same tab
+    /// active; false when there is nothing to move.
+    fn shift_tab(&mut self, from: usize, to: usize) -> bool {
+        let n = self.tabs.len();
+        if from >= n || to >= n || from == to {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = tabs::index_after_move(self.active, from, to);
+        // Overlays that list tabs by position would point at other tabs.
+        self.switcher = None;
+        self.tab_list = None;
+        true
+    }
+
+    /// A tab dragged in the tab bar or moved with ⌘⌥⇧[ / ⌘⌥⇧]: moves it
+    /// and remembers the order.
+    fn move_tab(&mut self, from: usize, to: usize) -> Task<Message> {
+        if !self.shift_tab(from, to) {
+            return Task::none();
+        }
+        self.save_settings();
+        self.reveal_active_tab()
+    }
+
     fn close_tab(&mut self, i: usize) -> Task<Message> {
         if i >= self.tabs.len() {
             return Task::none();
@@ -1785,6 +1846,14 @@ impl App {
                 }
                 let by = if k == Shortcut::PrevTab { n - 1 } else { 1 };
                 self.select_tab((self.active + by) % n)
+            }
+            Shortcut::MoveTab { right } => {
+                let to = if right {
+                    self.active + 1
+                } else {
+                    self.active.wrapping_sub(1)
+                };
+                self.move_tab(self.active, to)
             }
             Shortcut::CloseTab => self.close_tab(self.active),
             Shortcut::Refresh => self.refresh_active(),
@@ -2003,7 +2072,7 @@ impl App {
         };
 
         let mut layout = column![
-            tabs::view(t, &self.tabs, self.active, self.tab_list.is_some()).map(Message::Tabs)
+            tabs::view(t, &self.tabs, self.active, self.tab_list.is_some(),).map(Message::Tabs)
         ]
         .height(Length::Fill);
         if let Some(tab) = tab {
@@ -2516,6 +2585,18 @@ fn shortcut(
         if physical == Physical::Code(Code::Comma) && !modifiers.shift() && !modifiers.alt() {
             return Some(Shortcut::Settings);
         }
+        // ⌘⌥⇧[ / ⌘⌥⇧]: move the tab (⌥ makes macOS type “ / ’, so by key).
+        if modifiers.shift() && modifiers.alt() {
+            match physical {
+                Physical::Code(Code::BracketLeft) => {
+                    return Some(Shortcut::MoveTab { right: false });
+                }
+                Physical::Code(Code::BracketRight) => {
+                    return Some(Shortcut::MoveTab { right: true });
+                }
+                _ => {}
+            }
+        }
         match key.as_ref() {
             Key::Named(Named::Enter) => return Some(Shortcut::Commit),
             Key::Named(Named::Backspace) => return Some(Shortcut::Forget),
@@ -2745,6 +2826,24 @@ mod tests {
             ),
             Some(Shortcut::NextTab)
         );
+        // With ⌥ too they move the tab (macOS types “ / ‘ with ⌥⇧[ / ⌥⇧]).
+        let cmd_alt_shift = cmd_shift | keyboard::Modifiers::ALT;
+        for (key, code, right) in [
+            ("{", Code::BracketLeft, false),
+            ("”", Code::BracketLeft, false),
+            ("}", Code::BracketRight, true),
+            ("’", Code::BracketRight, true),
+        ] {
+            assert_eq!(
+                press(
+                    Key::Character(key.into()),
+                    code,
+                    cmd_alt_shift,
+                    event::Status::Ignored
+                ),
+                Some(Shortcut::MoveTab { right })
+            );
+        }
         // Without ⇧ the brackets still switch the main area's mode.
         assert_eq!(
             press(

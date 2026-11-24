@@ -1,5 +1,8 @@
 //! Which hosting service a git server is, guessed from its host name, and
 //! where that service makes the personal access tokens git logs in with.
+//! The guess can be overridden per host (settings `services`).
+
+use std::collections::BTreeMap;
 
 /// A hosting service, as far as logging in goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +17,49 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// In the order the log-in dialog offers them.
+    pub const ALL: [Self; 6] = [
+        Self::GitHub,
+        Self::GitLab,
+        Self::Bitbucket,
+        Self::Gitea,
+        Self::Azure,
+        Self::Other,
+    ];
+
+    /// The service of `host`: the one picked for it in the settings
+    /// (`services`), else guessed from its name.
+    pub fn for_host(services: &BTreeMap<String, String>, host: &str) -> Self {
+        services
+            .get(host)
+            .and_then(|key| Self::from_key(key))
+            .unwrap_or_else(|| Self::of(host))
+    }
+
+    /// How it is saved in the settings.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::GitHub => "github",
+            Self::GitLab => "gitlab",
+            Self::Bitbucket => "bitbucket",
+            Self::Gitea => "gitea",
+            Self::Azure => "azure",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.key() == key)
+    }
+
+    /// Offered to pick: `other` for [`Provider::Other`].
+    pub fn pick_label(self) -> &'static str {
+        match self {
+            Self::Other => "other",
+            p => p.name(),
+        }
+    }
+
     /// Guessed from the host (`github.com`, `gitlab.example.com` …);
     /// self-hosted servers whose name says nothing are [`Provider::Other`].
     pub fn of(host: &str) -> Self {
@@ -74,7 +120,7 @@ impl Provider {
             Self::Bitbucket => "an API token; the user name is your Atlassian e-mail",
             Self::Gitea => "an access token with repository read and write",
             Self::Azure => "a token with Code (Read & write)",
-            Self::Other => "a personal access token, or your password",
+            Self::Other => "a personal access token (some servers take your password)",
         }
     }
 }
@@ -95,6 +141,35 @@ mod tests {
         assert_eq!(Provider::of("git.example.com"), Provider::Other);
         // The port is not part of the name.
         assert_eq!(Provider::of("git.example.com:8443"), Provider::Other);
+    }
+
+    #[test]
+    fn a_picked_service_wins_over_the_name() {
+        let mut services = BTreeMap::new();
+        services.insert("git.example.com".to_owned(), "gitlab".to_owned());
+        services.insert("github.example.com".to_owned(), "gitea".to_owned());
+        services.insert("odd.example.com".to_owned(), "nonsense".to_owned());
+        assert_eq!(
+            Provider::for_host(&services, "git.example.com"),
+            Provider::GitLab
+        );
+        assert_eq!(
+            Provider::for_host(&services, "github.example.com"),
+            Provider::Gitea,
+            "even against a name that says otherwise"
+        );
+        assert_eq!(
+            Provider::for_host(&services, "odd.example.com"),
+            Provider::Other,
+            "an unknown key falls back to the guess"
+        );
+        assert_eq!(
+            Provider::for_host(&services, "gitlab.com"),
+            Provider::GitLab
+        );
+        for p in Provider::ALL {
+            assert_eq!(Provider::from_key(p.key()), Some(p));
+        }
     }
 
     #[test]

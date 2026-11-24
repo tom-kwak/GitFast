@@ -10,6 +10,8 @@
 
 pub mod provider;
 
+use std::collections::BTreeMap;
+
 use gf_config::{Account, Settings};
 use iced::widget::{Column, Row, button, column, container, row, space};
 use iced::{Alignment, Element, Length, Padding};
@@ -155,8 +157,8 @@ pub enum Message {
     UpdateToken(usize),
     /// Log out of `accounts[i]` (asks first).
     LogOut(usize),
-    /// Open a service's token page in the browser.
-    OpenUrl(String),
+    /// Ask which hosting service this host is (its tag was clicked).
+    PickService(String),
     /// Make git keep logins with this credential helper (asks first).
     UseHelper(&'static str),
     EditEditor,
@@ -317,8 +319,9 @@ fn accounts<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
             "No accounts yet. Add one here, or push/fetch: gf asks when a server wants a login.",
         ));
     }
+    let services = &p.settings.services;
     for (i, account) in accounts.iter().enumerate() {
-        col = col.push(account_card(t, page, i, account));
+        col = col.push(account_card(t, page, services, i, account));
     }
 
     let others: Vec<&ServerUse> = page
@@ -338,7 +341,7 @@ fn accounts<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
             None,
         ));
         for server in others {
-            col = col.push(server_card(t, server));
+            col = col.push(server_card(t, services, server));
         }
     }
     if !page.ssh.is_empty() {
@@ -359,55 +362,54 @@ fn accounts<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
     col.push(helper_line(t, p)).into()
 }
 
-fn provider_tag<'a>(t: &'a Tokens, host: &str) -> Element<'a, Message> {
-    let provider = Provider::of(host);
-    container(colored(t, provider.name(), t.accent()))
+/// The host's service; a click asks which one it is (the name can
+/// mislead, or tell nothing).
+fn provider_tag<'a>(
+    t: &'a Tokens,
+    services: &BTreeMap<String, String>,
+    host: &str,
+) -> Element<'a, Message> {
+    let provider = Provider::for_host(services, host);
+    let tag = button(colored(t, provider.name(), t.accent()))
+        .padding(0)
+        .style(style::text_button(t, t.accent()))
+        .on_press(Message::PickService(host.to_owned()));
+    container(widgets::tip(t, tag, "which service is it?".into()))
         .width(t.cols(10))
         .into()
-}
-
-fn token_button<'a>(t: &'a Tokens, protocol: &str, host: &str) -> Option<Element<'a, Message>> {
-    Provider::of(host).token_page(protocol, host).map(|url| {
-        widgets::tip(
-            t,
-            widgets::text_button(t, "Get token ↗", None, Some(Message::OpenUrl(url.clone()))),
-            format!("open {url}"),
-        )
-    })
 }
 
 fn account_card<'a>(
     t: &'a Tokens,
     page: &Page,
+    services: &BTreeMap<String, String>,
     i: usize,
     account: &'a Account,
 ) -> Element<'a, Message> {
     let token = page.token(account);
     let missing = matches!(token, Probe::Known(false));
-    let mut top = row![
-        provider_tag(t, &account.host),
+    // The token page is offered in the log-in dialog, where the token
+    // is typed: a saved login has no use for it.
+    let top = row![
+        provider_tag(t, services, &account.host),
         mono(t, server_label(account)),
         dim(t, "as"),
         mono(t, account.username.as_str()),
         space().width(Length::Fill),
     ]
     .spacing(6)
-    .align_y(Alignment::Center);
-    if let Some(get) = token_button(t, &account.protocol, &account.host) {
-        top = top.push(get);
-    }
-    top = top
-        .push(widgets::text_button(
-            t,
-            if missing { "Log in again" } else { "New token" },
-            None,
-            Some(Message::UpdateToken(i)),
-        ))
-        .push(widgets::danger_button(
-            t,
-            "Log out",
-            Some(Message::LogOut(i)),
-        ));
+    .align_y(Alignment::Center)
+    .push(widgets::text_button(
+        t,
+        if missing { "Log in again" } else { "New token" },
+        None,
+        Some(Message::UpdateToken(i)),
+    ))
+    .push(widgets::danger_button(
+        t,
+        "Log out",
+        Some(Message::LogOut(i)),
+    ));
 
     let status: Element<'a, Message> = match token {
         Probe::Checking => dim(t, "… checking the saved token").into(),
@@ -436,18 +438,19 @@ fn account_card<'a>(
     .into()
 }
 
-fn server_card<'a>(t: &'a Tokens, server: &ServerUse) -> Element<'a, Message> {
-    let mut top = row![
-        provider_tag(t, &server.host),
+fn server_card<'a>(
+    t: &'a Tokens,
+    services: &BTreeMap<String, String>,
+    server: &ServerUse,
+) -> Element<'a, Message> {
+    let top = row![
+        provider_tag(t, services, &server.host),
         mono(t, server.label()),
         space().width(Length::Fill),
     ]
     .spacing(6)
-    .align_y(Alignment::Center);
-    if let Some(get) = token_button(t, &server.protocol, &server.host) {
-        top = top.push(get);
-    }
-    top = top.push(widgets::text_button(
+    .align_y(Alignment::Center)
+    .push(widgets::text_button(
         t,
         "Log in",
         None,

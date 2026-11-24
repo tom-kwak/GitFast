@@ -634,9 +634,20 @@ fn commit_row<'a>(
     });
 
     let line_text = summary_line(c, badges, summary_cols);
-    let hint = row_hint(c, badges, line_text.cut);
+    let marks = g.and_then(|g| cut_marks(c, g));
+    let mut hint = row_hint(c, badges, line_text.cut);
+    if let Some(m) = &marks {
+        let about = cut_hint(m);
+        hint = Some(match hint {
+            Some(h) => format!("{about}\n\n{h}"),
+            None => about,
+        });
+    }
     let mut summary = Row::new();
     for (text, kind) in line_text.parts {
+        if let (None, Some(m)) = (kind, &marks) {
+            summary = summary.push(dim(t, format!("{} ", m.text)).wrapping(Wrapping::None));
+        }
         summary = summary.push(match kind {
             Some(kind) => colored(t, text, badge_color(t, kind)).wrapping(Wrapping::None),
             None => mono(t, text).wrapping(Wrapping::None),
@@ -665,6 +676,55 @@ fn commit_row<'a>(
     ))
     .on_right_press(Message::RightClick(c.id.clone()))
     .into()
+}
+
+/// The graph's cut lines at a row (see `gf_git::graph`), written before
+/// the summary: `↑2` for children far above, `↓a018953` for each parent far
+/// below.
+struct CutMarks {
+    text: String,
+    up: usize,
+    down: Vec<String>,
+}
+
+fn cut_marks(c: &Commit, g: &GraphRow) -> Option<CutMarks> {
+    if g.cut_children == 0 && g.cut_parents.is_empty() {
+        return None;
+    }
+    let down: Vec<String> = g
+        .cut_parents
+        .iter()
+        .filter_map(|&n| c.parents.get(n))
+        .map(|p| p.short().to_owned())
+        .collect();
+    let mut parts = Vec::new();
+    if g.cut_children > 0 {
+        parts.push(format!("↑{}", g.cut_children));
+    }
+    parts.extend(down.iter().map(|p| format!("↓{p}")));
+    Some(CutMarks {
+        text: parts.join(" "),
+        up: g.cut_children,
+        down,
+    })
+}
+
+/// What the cut marks of a row mean, for its hover hint.
+fn cut_hint(m: &CutMarks) -> String {
+    let mut lines = Vec::new();
+    if m.up > 0 {
+        lines.push(format!(
+            "↑{}: {} far above branch off here; their lines are cut.",
+            m.up,
+            if m.up == 1 { "a commit" } else { "commits" }
+        ));
+    }
+    for p in &m.down {
+        lines.push(format!(
+            "↓{p}: parent {p} is far below; the line to it is cut."
+        ));
+    }
+    lines.join("\n")
 }
 
 /// What hovering a row's summary shows, top to bottom:

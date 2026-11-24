@@ -106,6 +106,7 @@ mod tests {
         assert_eq!(pc("⌘⌫"), "Ctrl+Backspace");
         assert_eq!(pc("settings (⌘,)"), "settings (Ctrl+,)");
         assert_eq!(pc("⌘⇧[ / ⌘⇧]"), "Ctrl+Shift+[ / Ctrl+Shift+]");
+        assert_eq!(pc("⌘⌥⇧[ ⌘⌥⇧]"), "Ctrl+Alt+Shift+[ Ctrl+Alt+Shift+]");
     }
 
     #[test]

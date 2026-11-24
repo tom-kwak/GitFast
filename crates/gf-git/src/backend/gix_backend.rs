@@ -23,7 +23,7 @@ use gix::traverse::commit::Parents;
 use gix::traverse::commit::simple::CommitTimeOrder;
 use gix::traverse::commit::topo;
 
-use super::{LogOps, RebaseOps, RefOps, ReflogOps, RemoteOps, StashOps, WorktreeOps};
+use super::{LogOps, RebaseOps, RefOps, ReflogOps, RemoteOps, StashOps, SubmoduleOps, WorktreeOps};
 use crate::cli::GitRunner;
 use crate::cli::parse::log::split_message;
 use crate::ops::integrate::Integration;
@@ -618,6 +618,41 @@ impl StashOps for GixBackend {
     }
 }
 
+impl SubmoduleOps for GixBackend {
+    /// `git submodule status` lists the index's gitlinks: with none there
+    /// is nothing to list, answered without starting the script (about
+    /// 50 ms and eight processes, on every load of the refs). With any,
+    /// the CLI describes each checkout.
+    async fn submodules(&self) -> Result<Vec<crate::Submodule>> {
+        let any = self
+            .blocking(|repo| {
+                if repo.is_bare() {
+                    // git refuses outside a work tree; the CLI says so.
+                    return unsupported("submodules of a bare repository");
+                }
+                let index = repo.index_or_empty().map_err(err)?;
+                Ok(index
+                    .entries()
+                    .iter()
+                    .any(|e| e.mode == gix::index::entry::Mode::COMMIT))
+            })
+            .await?;
+        if any {
+            unsupported("submodule status")
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn update_submodules(&self) -> Result<()> {
+        unsupported("submodule update")
+    }
+
+    async fn sync_submodules(&self) -> Result<()> {
+        unsupported("submodule sync")
+    }
+}
+
 impl WorktreeOps for GixBackend {
     async fn worktrees(&self) -> Result<Vec<Worktree>> {
         self.blocking(|repo| {
@@ -700,6 +735,14 @@ impl WorktreeOps for GixBackend {
 
     async fn set_branch_base(&self, _: &str, _: Option<&str>) -> Result<()> {
         unsupported("branch base")
+    }
+
+    async fn pull_rebases(&self, path: &std::path::Path, branch: &str) -> Result<bool> {
+        // Read in that tree: per-worktree config can differ.
+        let (path, branch) = (path.to_path_buf(), branch.to_owned());
+        tokio::task::spawn_blocking(move || super::gix_worktree::pull_rebases(&path, &branch))
+            .await
+            .map_err(|e| err(format!("task: {e}")))?
     }
 
     async fn default_base(&self) -> Result<Option<String>> {

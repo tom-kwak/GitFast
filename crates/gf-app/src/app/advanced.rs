@@ -118,7 +118,8 @@ impl App {
         result: Result<Integration, String>,
         record: Option<Box<Recorded>>,
     ) -> Task<Message> {
-        let refresh = self.request_refresh(id);
+        let clean = self.clean_after_merge(id, &result);
+        let refresh = Task::batch([self.request_refresh(id), clean]);
         let recorded = matches!(record.as_deref(), Some(Recorded::Step(_)));
         let mut pin = Task::none();
         match record.map(|r| *r) {
@@ -330,12 +331,22 @@ impl App {
     }
 
     pub(super) fn run_merge(&mut self, branch: String, no_ff: bool) -> Task<Message> {
+        self.run_merge_recorded(branch, no_ff, true)
+    }
+
+    /// [`Self::run_merge`]; `undoable`: recorded for ⌘Z.
+    pub(super) fn run_merge_recorded(
+        &mut self,
+        branch: String,
+        no_ff: bool,
+        undoable: bool,
+    ) -> Task<Message> {
         let style = if no_ff {
             MergeStyle::NoFastForward
         } else {
             MergeStyle::Default
         };
-        self.integrate_op(format!("merge {branch}"), true, move |r| async move {
+        self.integrate_op(format!("merge {branch}"), undoable, move |r| async move {
             r.merge(&branch, style).await
         })
     }

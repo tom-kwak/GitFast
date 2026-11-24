@@ -11,7 +11,9 @@
 //!
 //! - Line 1: branch, files touched lately (`⚡`), lock, and what is
 //!   uncommitted there (`●N`, `✕N` conflicts). In front, `●` marks the tree
-//!   this tab shows and `◉` one open in another tab.
+//!   this tab shows and `◉` one open in another tab. That tree is also
+//!   the selected card until another is picked, and again whenever the tab
+//!   is opened from another tree.
 //! - Line 2: in words, the branch it came from and how it stands against
 //!   it: commits it has that the base lacks (`ahead`), commits the base got
 //!   since (`behind`), or `merged` once the base has its work; then the
@@ -126,6 +128,19 @@ pub struct Card {
     pub in_tab: bool,
     /// The tab this view belongs to shows this tree.
     pub current: bool,
+    /// Files this tree's work shares with other trees' (worked out once
+    /// the statuses are read, see [`overlaps`]).
+    pub overlap: Option<Overlap>,
+}
+
+/// Files a tree changes that other trees change too: merging both may
+/// conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlap {
+    /// Different files shared with any other tree.
+    pub files: usize,
+    /// One line per other tree: its name and the shared files.
+    pub tip: String,
 }
 
 impl Card {
@@ -230,6 +245,8 @@ pub enum Action {
     Merge,
     /// Choose the branch it goes back into.
     SetBase,
+    /// Bring in the commits its base has and it lacks.
+    Update,
 }
 
 /// Requests to the app. Removing and locking are confirmed there.
@@ -251,13 +268,24 @@ pub enum Output {
     Lock(PathBuf, bool),
     Remove(Removal),
     /// Merge `branch` into `base`, checked out in the tree at `into`
-    /// (`real`: that folder resolved, to find its tab).
+    /// (`real`: that folder resolved, to find its tab). `from`: the tree
+    /// `branch` is checked out in, when it can be removed afterwards.
     Merge {
         branch: String,
         base: String,
         into: PathBuf,
         real: Option<PathBuf>,
         count: u32,
+        from: Option<PathBuf>,
+    },
+    /// Bring the `behind` commits of `base` into `branch`, checked out in
+    /// the tree at `tree` (`real`: resolved, to find its tab).
+    Update {
+        branch: String,
+        base: String,
+        tree: PathBuf,
+        real: Option<PathBuf>,
+        behind: u32,
     },
     /// Ask which branch `branch` goes back into; `base` is the current one.
     SetBase {
@@ -315,6 +343,7 @@ impl State {
                     main: i == 0,
                     status: prev.as_ref().and_then(|c| c.status.clone()),
                     error: prev.as_ref().and_then(|c| c.error.clone()),
+                    overlap: prev.as_ref().and_then(|c| c.overlap.clone()),
                     real: prev.and_then(|c| c.real),
                     in_tab: false,
                     current: false,
@@ -352,6 +381,21 @@ impl State {
             c.in_tab = self.tabs.iter().any(is);
             c.current = is(&self.here);
         }
+        // With nothing picked, the tree this tab shows is the one marked.
+        if self.selected.is_none() {
+            self.selected = self
+                .cards
+                .iter()
+                .find(|c| c.current)
+                .map(|c| c.tree.path.clone());
+        }
+    }
+
+    /// Drops the selection so the tree this tab shows is marked again
+    /// (when the tab is opened or switched to from another tree).
+    pub fn select_here(&mut self) {
+        self.selected = None;
+        self.mark_tabs();
     }
 
     /// Reads every tree's status in the background. A read already running
@@ -431,6 +475,16 @@ impl State {
                 }
             }
         }
+        let touched: Vec<Option<&[PathBuf]>> = self
+            .cards
+            .iter()
+            .map(|c| c.status.as_ref().and_then(|s| s.touched.as_deref()))
+            .collect();
+        let names: Vec<String> = self.cards.iter().map(Card::name).collect();
+        let found = overlaps(&touched, &names);
+        for (c, o) in self.cards.iter_mut().zip(found) {
+            c.overlap = o;
+        }
         self.mark_tabs();
     }
 
@@ -494,6 +548,22 @@ impl State {
                     into: into.tree.path.clone(),
                     real: into.real.clone(),
                     count: s.ahead_of_base,
+                    from: (!card.main && !card.tree.locked).then(|| path.clone()),
+                }
+            }
+            Action::Update if readable => {
+                let branch = card.tree.branch.clone()?;
+                let s = card.status.as_ref()?;
+                let base = s
+                    .base
+                    .clone()
+                    .filter(|b| s.behind_base > 0 && *b != branch)?;
+                Output::Update {
+                    branch,
+                    base,
+                    tree: path,
+                    real: card.real.clone(),
+                    behind: s.behind_base,
                 }
             }
             // The default base itself goes nowhere.
@@ -536,29 +606,36 @@ impl State {
         add(
             'o',
             "open in tab",
-            "work in this tree in its own tab",
+            "work on it in its own tab",
             Action::Open,
         );
         add(
             'c',
             "compare with base",
-            "the changes of its commits since it left the base",
+            "what it changed since it branched off",
             Action::Compare,
         );
         let base = card.status.as_ref().and_then(|s| s.base.clone());
         if let Some(base) = &base {
+            let update = format!("update from {base}…");
+            add(
+                'u',
+                &update,
+                "bring in the commits it lacks",
+                Action::Update,
+            );
             let merge = format!("merge into {base}…");
             add(
                 'm',
                 &merge,
-                "in the tree that has it checked out",
+                "runs where the base is checked out",
                 Action::Merge,
             );
         }
         add(
             'b',
             "base branch…",
-            "the branch it came from and goes back into",
+            "the branch it merges into",
             Action::SetBase,
         );
         add(
@@ -580,15 +657,15 @@ impl State {
         add(
             'l',
             "lock",
-            "keep git from removing or pruning it",
+            "protect it from remove and prune",
             Action::Lock,
         );
         add('l', "unlock", "allow removing it again", Action::Unlock);
         if self.output_for(Action::Remove).is_some() {
             let (label, hint) = if card.tree.prunable {
-                ("prune…", "forget trees whose folder is gone")
+                ("prune…", "clean up worktrees whose folder was deleted")
             } else {
-                ("remove…", "delete the folder")
+                ("remove…", "delete its folder; the branch stays")
             };
             entries.push(Entry::Separator);
             entries.push(Entry::caution(
@@ -628,6 +705,7 @@ impl State {
             Key::Char('d') => return act(Action::Remove),
             Key::Char('y') => return act(Action::CopyPath),
             Key::Char('m') => return act(Action::Merge),
+            Key::Char('u') => return act(Action::Update),
             Key::Char('b') => return act(Action::SetBase),
             Key::Char('l') => {
                 let Some(card) = self.selected() else {
@@ -687,7 +765,7 @@ impl State {
             widgets::tip(
                 t,
                 badge("missing".into(), t.error()),
-                "its folder is gone — prune forgets it".into(),
+                "folder deleted · prune cleans it up".into(),
             )
         } else if let Some(e) = &c.error {
             widgets::tip(t, badge("?".into(), t.error()), format::truncate(e, 200))
@@ -738,12 +816,20 @@ impl State {
                 2,
             ));
         }
+        if let Some(o) = &c.overlap {
+            let text = format!("⚠{}", o.files);
+            let cols = crate::widgets::virtual_list::columns(&text);
+            tags.push((
+                widgets::tip(t, badge(text, t.warning()), o.tip.clone()),
+                cols,
+            ));
+        }
         if c.tree.locked {
             tags.push((
                 widgets::tip(
                     t,
                     badge("locked".into(), t.warning()),
-                    "git will not remove or prune it".into(),
+                    "can't be removed until unlocked".into(),
                 ),
                 6,
             ));
@@ -752,7 +838,7 @@ impl State {
         let name_cols = scale_columns(cols.saturating_sub(used + 1), t.small() / t.font_size);
         let name_color = if c.current { t.head() } else { t.branch() };
         let mark: Element<'a, Message> = if c.current {
-            widgets::tip(t, colored(t, "●", t.head()), "this tab's tree".into())
+            widgets::tip(t, colored(t, "●", t.head()), "open in this tab".into())
         } else if c.in_tab {
             widgets::tip(t, colored(t, "◉", t.accent()), "open in another tab".into())
         } else {
@@ -815,23 +901,24 @@ impl State {
                 }
                 if let Some(base) = &s.base {
                     if s.merged() {
-                        tip.push(format!("its commits are in {base}: it can go"));
+                        tip.push(format!("all merged into {base} · safe to remove"));
                     } else if s.ahead_of_base > 0 {
                         tip.push(format!(
-                            "{} commit(s) not in {base} yet · c compares",
-                            s.ahead_of_base
+                            "{} not in {base} yet · c compares",
+                            format::count(s.ahead_of_base, "commit")
                         ));
                     }
                     if s.behind_base > 0 && !s.merged() {
-                        tip.push(format!("{base} has {} commit(s) it lacks", s.behind_base));
+                        tip.push(format!(
+                            "{base} has {} it lacks · u brings them in",
+                            format::count(s.behind_base, "commit")
+                        ));
                     }
                     if s.ahead_of_base > 0 && self.tree_of(base).is_some() {
                         tip.push(format!("m merges it into {base}"));
                     }
                     tip.push(if s.base_guessed {
-                        format!(
-                            "{base} is a guess: nothing recorded where it came from · b sets it"
-                        )
+                        format!("{base} is a guess · b sets the real one")
                     } else {
                         "b changes the base".to_owned()
                     });
@@ -1077,7 +1164,7 @@ impl Feature for State {
             actions = actions.push(widgets::tip(
                 t,
                 widgets::text_button(t, "prune", None, Some(Message::Prune)),
-                "forget trees whose folder is gone".to_owned(),
+                "clean up worktrees whose folder was deleted".to_owned(),
             ));
         }
         if finished > 0 {
@@ -1090,7 +1177,7 @@ impl Feature for State {
                     Some(Message::Cleanup),
                 ),
                 format!(
-                    "remove the trees already merged into {}",
+                    "remove worktrees merged into {}",
                     self.base.as_deref().unwrap_or("the base")
                 ),
             ));
@@ -1146,6 +1233,89 @@ impl Feature for State {
     }
 }
 
+/// Shared files shown per other tree before `(+n)`.
+const OVERLAP_SHOWN: usize = 3;
+
+/// For each tree (`touched`: its sorted files, `None` when unknown), the
+/// files other trees touch too, by tree. An untracked folder (`dir/`)
+/// covers what is under it.
+fn overlaps(touched: &[Option<&[PathBuf]>], names: &[String]) -> Vec<Option<Overlap>> {
+    touched
+        .iter()
+        .enumerate()
+        .map(|(i, mine)| {
+            let mine = (*mine)?;
+            let mut all: Vec<&Path> = Vec::new();
+            let mut lines = Vec::new();
+            for (j, theirs) in touched.iter().enumerate() {
+                let Some(theirs) = theirs.filter(|_| j != i) else {
+                    continue;
+                };
+                let shared = shared_files(mine, theirs);
+                if shared.is_empty() {
+                    continue;
+                }
+                let shown: Vec<String> = shared
+                    .iter()
+                    .take(OVERLAP_SHOWN)
+                    .map(|p| p.display().to_string())
+                    .collect();
+                let more = match shared.len().saturating_sub(OVERLAP_SHOWN) {
+                    0 => String::new(),
+                    n => format!(" (+{n})"),
+                };
+                lines.push(format!("{}: {}{more}", names[j], shown.join(", ")));
+                all.extend(shared);
+            }
+            all.sort_unstable();
+            all.dedup();
+            (!all.is_empty()).then(|| {
+                lines.insert(0, "other worktrees change these files too".into());
+                lines.push("merging both may conflict".into());
+                Overlap {
+                    files: all.len(),
+                    tip: lines.join("\n"),
+                }
+            })
+        })
+        .collect()
+}
+
+/// Files of `mine` that `theirs` has too (both sorted); a folder entry
+/// (`dir/`) on either side matches the files under it.
+fn shared_files<'a>(mine: &'a [PathBuf], theirs: &'a [PathBuf]) -> Vec<&'a Path> {
+    let is_dir = |p: &Path| p.as_os_str().to_string_lossy().ends_with('/');
+    // The entries of `list` that are `dir` or under it.
+    let under = |list: &'a [PathBuf], dir: &Path| -> &'a [PathBuf] {
+        let start = list.partition_point(|p| p.as_path() < dir);
+        let len = list[start..]
+            .iter()
+            .take_while(|p| p.starts_with(dir))
+            .count();
+        &list[start..start + len]
+    };
+    // Untracked folders are few: gathered once, not per file.
+    let their_dirs: Vec<&Path> = theirs
+        .iter()
+        .map(PathBuf::as_path)
+        .filter(|p| is_dir(p))
+        .collect();
+    let mut out: Vec<&Path> = Vec::new();
+    for p in mine {
+        let hit = if is_dir(p) {
+            !under(theirs, p).is_empty()
+        } else {
+            theirs.binary_search(p).is_ok()
+                || (!their_dirs.is_empty()
+                    && p.ancestors().skip(1).any(|a| their_dirs.contains(&a)))
+        };
+        if hit {
+            out.push(p.as_path());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1189,6 +1359,10 @@ mod tests {
                 .map(|(p, st)| (PathBuf::from(p), Ok(st), None))
                 .collect(),
         })));
+    }
+
+    fn paths(list: &[&str]) -> Vec<PathBuf> {
+        list.iter().map(PathBuf::from).collect()
     }
 
     fn state() -> State {
@@ -1380,6 +1554,82 @@ mod tests {
     }
 
     #[test]
+    fn update_is_offered_only_when_the_base_moved_on() {
+        let mut s = state();
+        let mut behind = status(1);
+        behind.base = Some("main".into());
+        behind.behind_base = 2;
+        let mut current = behind.clone();
+        current.behind_base = 0;
+        loaded(&mut s, vec![("/a", behind), ("/b", current)]);
+        let _ = s.update(Message::Select("/a".into()));
+        assert!(matches!(
+            s.output_for(Action::Update),
+            Some(Output::Update { ref branch, ref base, ref tree, behind: 2, .. })
+                if branch == "a" && base == "main" && tree == Path::new("/a")
+        ));
+        let _ = s.update(Message::Select("/b".into()));
+        assert!(
+            s.output_for(Action::Update).is_none(),
+            "nothing to bring in"
+        );
+        let _ = s.update(Message::Select("/r".into()));
+        assert!(s.output_for(Action::Update).is_none(), "no status, no base");
+    }
+
+    #[test]
+    fn shared_files_match_exactly_or_under_an_untracked_folder() {
+        let a = paths(&["new/", "src/a.rs", "src/b.rs", "z.rs"]);
+        let b = paths(&["new/x.rs", "other/", "src/a.rs", "src/c.rs"]);
+        let c = paths(&["other/deep/y.rs", "z.rs"]);
+        assert_eq!(
+            shared_files(&a, &b),
+            [Path::new("new/"), Path::new("src/a.rs")]
+        );
+        assert_eq!(
+            shared_files(&b, &a),
+            [Path::new("new/x.rs"), Path::new("src/a.rs")]
+        );
+        assert_eq!(shared_files(&c, &b), [Path::new("other/deep/y.rs")]);
+        assert!(shared_files(&paths(&["src"]), &paths(&["src-x/a"])).is_empty());
+    }
+
+    #[test]
+    fn overlaps_count_files_once_and_name_each_other_tree() {
+        let a = paths(&["f1", "f2", "f3", "f4", "f5"]);
+        let b = paths(&["f1", "f2", "f3", "f4"]);
+        let c = paths(&["f1", "x"]);
+        let d = paths(&["y"]);
+        let names = ["a", "b", "c", "d", "e"].map(String::from);
+        let found = overlaps(&[Some(&a), Some(&b), Some(&c), Some(&d), None], &names);
+        let a = found[0].as_ref().expect("a overlaps");
+        assert_eq!(a.files, 4);
+        assert_eq!(
+            a.tip,
+            "other worktrees change these files too\n\
+             b: f1, f2, f3 (+1)\n\
+             c: f1\n\
+             merging both may conflict"
+        );
+        assert_eq!(found[2].as_ref().map(|o| o.files), Some(1));
+        assert!(found[3].is_none(), "nothing shared");
+        assert!(found[4].is_none(), "unknown: not compared");
+    }
+
+    #[test]
+    fn the_tabs_own_tree_is_selected_until_another_is_picked() {
+        let mut s = state();
+        assert_eq!(s.selected().map(Card::name).as_deref(), Some("main"));
+        let _ = s.update(Message::Select("/a".into()));
+        s.set_worktrees(&[tree("/r", "main"), tree("/b", "b"), tree("/a", "a")]);
+        assert_eq!(s.selected().map(Card::name).as_deref(), Some("a"), "kept");
+        // Opening the tab again (from another tree) marks its own tree.
+        s.set_tabs(vec!["/r".into(), "/b".into()], "/b".into());
+        s.select_here();
+        assert_eq!(s.selected().map(Card::name).as_deref(), Some("b"));
+    }
+
+    #[test]
     fn tabs_match_by_the_resolved_folder() {
         let mut s = state();
         s.set_tabs(vec!["/real/a".into()], "/r".into());
@@ -1398,6 +1648,7 @@ mod tests {
     fn keys_move_and_act_on_the_selection() {
         let t = crate::theme::preset("gf-dark");
         let mut s = state();
+        s.selected = None;
         let m = s.nav(Nav::plain(Key::Down), &t).expect("moves");
         assert!(matches!(m.message, Some(Message::Select(p)) if p.as_path() == Path::new("/r")));
         let m = s.nav(Nav::plain(Key::Char('l')), &t).expect("used");

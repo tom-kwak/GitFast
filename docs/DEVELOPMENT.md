@@ -32,6 +32,13 @@ cargo test --workspace
   어느 것도 바뀌지 않는 "조용한" 버튼을 찾습니다(`app/ui_sweep.rs`). 이미 고른 것을 다시 고르는
   클릭만 예외입니다. 할 일이 없는 버튼은 비활성(`on_press_maybe(None)`)으로 그립니다.
   `GF_SWEEP_DEPTH=2`로 열린 화면에서 열리는 화면까지 훑습니다(약 10분).
+  `GF_SWEEP_PROFILE=1`이면 스윕마다 끝날 때 단계별 시간(fixture 복사, boot, open, 화면 재진입,
+  렌더링, 상태·저장소 비교, press 등)을 출력합니다(`app/ui_sweep/profile.rs`). 출력을 보려면
+  `-- --ignored --nocapture sweep_history`처럼 `--nocapture`를 붙입니다.
+  스윕은 화면을 `app/ui_sweep/sim.rs`로 그립니다. 렌더러를 테스트 스레드당 하나만 만들고, `Ui`마다
+  위젯 상태를 유지합니다(실제 앱처럼 글자 shaping을 한 번만 합니다). `press`(클릭 미리보기)는 위젯
+  상태를 따로 둬서 다음 실제 클릭이 더블클릭으로 잡히지 않게 합니다. 준비 단계가 있는 스윕은
+  `Ui::open_prepared`로 준비된 저장소를 한 번만 만들고 이후에는 복사해 씁니다.
 - UI는 테스트로 확인할 수 없는 부분(배치, 색, 실제 키 입력)이 있습니다. 앱을 띄워 확인하지 않았다면 결과 보고에 **"화면 미확인"**을 명시합니다.
 - 커밋은 사용자가 요청할 때만 합니다.
 
@@ -74,7 +81,7 @@ src/
 │  ├─ undoing.rs     ⌘Z/⌘⇧Z: 가드 확인 → (확인창) → 복원, undo 목록
 │  ├─ dialogs.rs     공통 확인 다이얼로그(Confirm, Purpose)
 │  ├─ focus.rs       키 라우팅(메뉴→다이얼로그→입력창→패널), 패널 테두리
-│  ├─ worktree_ops.rs  worktrees 패널의 Output 처리(열기, 제거, merge into base …)
+│  ├─ worktree_ops.rs  worktrees 패널의 Output 처리(열기, 제거, merge into base, update from base …)
 │  ├─ branch_delete.rs 여러 ref를 골라 한 번에 삭제
 │  ├─ reveal.rs      blame 등에서 커밋을 히스토리에서 찾아 선택·스크롤
 │  ├─ settings.rs    설정 화면(섹션별) → 공유 설정, 서버 로그인(ACCOUNTS: 토큰 상태·확인)과 인증 실패 시 로그인 후 재실행
@@ -82,7 +89,7 @@ src/
 │  ├─ ui_sweep.rs    헤드리스 앱 드라이버(`Ui`)와 UI 스윕(§1, §8)
 │  └─ regression_tests.rs, keyboard_tests.rs   실제 App으로 돌리는 회귀 테스트
 ├─ features/<name>/mod.rs   피처 하나 = 폴더 하나
-├─ widgets/          재사용 위젯(virtual_list, pointer, graph_canvas, format …)
+├─ widgets/          재사용 위젯(virtual_list, pointer, reorder(끌어서 순서 바꾸기), graph_canvas, format …)
 ├─ theme/            색·폰트 토큰(Tokens), 스타일 함수(style.rs), 프리셋
 └─ highlight/        syntect 구문 강조
 ```
@@ -180,6 +187,13 @@ mod tests { /* update/nav 단위 테스트 */ }
    - `Menu { title, entries: vec![Entry::item(key, label, hint, msg), Entry::Separator, Entry::caution(..)] }`를 `Output`으로 넘깁니다.
    - App은 `open_menu(menu.map(Message::X))`로 엽니다.
 9. **긴 작업은 비동기**로 처리합니다. 진행 표시는 스피너와 상태줄, 결과는 명령 로그와 flash에 남깁니다.
+10. **안내 문구**(다이얼로그·툴팁·메뉴 힌트·빈 상태)는 처음 보는 사람이 한 번에 이해하게 씁니다.
+    - **화면에 보이는 이름만** 씁니다: 브랜치 이름, 폴더 경로(`widgets::format::tilde`). "main tree", "linked" 같은 내부 용어는 쓰지 않습니다. `main` 브랜치와 헷갈리는 말도 피합니다.
+    - **같은 것은 같은 말로** 부릅니다: 작업 트리 하나는 *worktree*, 그 디렉터리는 *folder*, 작업이 돌아갈 브랜치는 *base*입니다. *tree*만 따로 쓰지 않습니다.
+    - **다이얼로그 본문은 2줄 이내**로 씁니다. 1줄은 무슨 일인지, 2줄은 결과(사라지는 것·남는 것)입니다. 그 경우에만 해당하는 경고(예: 커밋하지 않은 변경 N개)는 한 줄 더 붙일 수 있습니다. 버튼이 답이 되도록 질문을 반복하지 않습니다.
+    - **버튼은 하는 동작**으로 씁니다(`Remove`, `View detached`, `Open that worktree`). 체크박스는 켰을 때 하는 일을 씁니다.
+    - **개수는 `widgets::format::count`**로 씁니다(`1 commit`, `3 commits`). `(s)`를 붙이지 않습니다.
+    - 툴팁·메뉴 힌트는 소문자로 시작하는 짧은 구로, 그 동작의 결과를 말합니다(`delete its folder; the branch stays`).
 
 ---
 

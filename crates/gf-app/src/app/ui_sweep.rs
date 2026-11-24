@@ -23,6 +23,8 @@ use super::*;
 use crate::widgets::file_tree;
 
 mod gitlab_e2e;
+mod profile;
+mod sim;
 
 const WINDOW: Size = Size::new(1280.0, 820.0);
 
@@ -43,7 +45,25 @@ impl Fixture {
         static TEMPLATE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
         let template = TEMPLATE.get_or_init(Self::build);
         Self {
-            repo: template.repo.duplicate(),
+            repo: profile::time("fixture copy", || template.repo.duplicate()),
+        }
+    }
+
+    /// A fresh copy of the fixture after `setup` changed it: `setup` runs
+    /// once per `key`, then its result is copied (a sweep gets back to its
+    /// screen hundreds of times, and a merge or rebase each time added up).
+    /// `key` names what `setup` does: the same key, the same setup.
+    pub fn prepared(key: &'static str, setup: fn(&TestRepo)) -> Self {
+        static TEMPLATES: std::sync::Mutex<BTreeMap<&'static str, Fixture>> =
+            std::sync::Mutex::new(BTreeMap::new());
+        let mut templates = TEMPLATES.lock().unwrap_or_else(|e| e.into_inner());
+        let template = templates.entry(key).or_insert_with(|| {
+            let fixture = Self::new();
+            profile::time("setup", || setup(&fixture.repo));
+            fixture
+        });
+        Self {
+            repo: profile::time("fixture copy", || template.repo.duplicate()),
         }
     }
 
@@ -727,6 +747,14 @@ pub(super) struct Ui {
     /// screen it already reached once: those clicks are not checked, and
     /// measuring them was most of the sweep's time.
     measure: bool,
+    /// The widget state the window was last laid out with, as the running
+    /// app keeps it between frames: text is shaped once, not on every
+    /// press (that was most of a sweep's time).
+    widgets: std::cell::RefCell<Option<iced_test::runtime::user_interface::Cache>>,
+    /// The same for [`Self::press`], kept apart: a press only asks what a
+    /// click would send, and must not leave a click behind (the next real
+    /// click on that spot would count as a double-click).
+    probes: std::cell::RefCell<Option<iced_test::runtime::user_interface::Cache>>,
     _home: tempfile::TempDir,
 }
 
@@ -741,7 +769,7 @@ impl Ui {
     pub async fn open() -> Self {
         let mut ui = Self::welcome().await;
         let path = ui.fixture.repo.path().to_path_buf();
-        let _ = ui.send(Message::Open(path)).await;
+        let _ = profile::time_async("open", ui.send(Message::Open(path))).await;
         assert_eq!(ui.app.tabs.len(), 1, "the fixture opens in a tab");
         ui
     }
@@ -750,20 +778,37 @@ impl Ui {
     /// bisect, ...).
     pub async fn open_with(setup: impl FnOnce(&TestRepo)) -> Self {
         let mut ui = Self::welcome().await;
-        setup(&ui.fixture.repo);
+        profile::time("setup", || setup(&ui.fixture.repo));
         let path = ui.fixture.repo.path().to_path_buf();
-        let _ = ui.send(Message::Open(path)).await;
+        let _ = profile::time_async("open", ui.send(Message::Open(path))).await;
         assert_eq!(ui.app.tabs.len(), 1, "the fixture opens in a tab");
         ui
     }
 
     /// gf with no tab open; the fixture is in the recent list.
     pub async fn welcome() -> Self {
-        let fixture = Fixture::new();
+        Self::welcome_to(Fixture::new())
+    }
+
+    /// gf with the fixture open after `setup` changed it, `setup` run once
+    /// per `key` ([`Fixture::prepared`]): for a sweep, which gets back to
+    /// the same screen many times.
+    pub async fn open_prepared(key: &'static str, setup: fn(&TestRepo)) -> Self {
+        let mut ui = Self::welcome_to(Fixture::prepared(key, setup));
+        let path = ui.fixture.repo.path().to_path_buf();
+        let _ = profile::time_async("open", ui.send(Message::Open(path))).await;
+        assert_eq!(ui.app.tabs.len(), 1, "the fixture opens in a tab");
+        ui
+    }
+
+    /// gf with no tab open; `fixture` is in the recent list.
+    fn welcome_to(fixture: Fixture) -> Self {
         let home = tempfile::tempdir().expect("home");
         let mut settings = gf_config::Settings::default();
         settings.remember_repo(fixture.repo.path());
-        let (mut app, _boot) = App::boot(gf_config::AppPaths::under(home.path()), settings);
+        let (mut app, _boot) = profile::time("boot", || {
+            App::boot(gf_config::AppPaths::under(home.path()), settings)
+        });
         // git runs isolated from the developer's config, as in every test.
         app.runner = app
             .runner
@@ -775,6 +820,8 @@ impl Ui {
             fixture,
             others: Vec::new(),
             measure: !REACHING.get(),
+            widgets: std::cell::RefCell::default(),
+            probes: std::cell::RefCell::default(),
             _home: home,
         }
     }
@@ -794,25 +841,22 @@ impl Ui {
                 fx.messages.push(short(&m));
                 tasks.push_back(self.handle_native(m, &mut fx));
             }
-            self.run_tasks(tasks, &mut fx).await;
+            profile::time_async("tasks", self.run_tasks(tasks, &mut fx)).await;
             return fx;
         }
-        let frame = self._home.path().join("frame.png");
-        let _ = std::fs::remove_file(self.frame_file(&frame));
-        if look {
-            let _ = self.looks_like(&frame);
-        }
-        let state_before = self.state();
-        let repo_before = self.repo_state();
+        let frame_before = look.then(|| profile::time("measure › render", || self.frame()));
+        let state_before = profile::time("measure › state", || self.state());
+        let repo_before = profile::time("measure › repo", || self.repo_state());
         let mut tasks = VecDeque::new();
         for m in messages {
             fx.messages.push(short(&m));
             tasks.push_back(self.handle_native(m, &mut fx));
         }
-        self.run_tasks(tasks, &mut fx).await;
-        fx.state_changed = self.state() != state_before;
-        fx.screen_changed = look && !self.looks_like(&frame);
-        fx.repo_changed = self.repo_state() != repo_before;
+        profile::time_async("tasks", self.run_tasks(tasks, &mut fx)).await;
+        fx.state_changed = profile::time("measure › state", || self.state()) != state_before;
+        fx.screen_changed = frame_before
+            .is_some_and(|before| profile::time("measure › render", || self.frame()) != before);
+        fx.repo_changed = profile::time("measure › repo", || self.repo_state()) != repo_before;
         fx
     }
 
@@ -853,30 +897,9 @@ impl Ui {
         }
     }
 
-    /// Whether the window looks like the frame saved at `path` (the first
-    /// call saves it).
-    fn looks_like(&self, path: &std::path::Path) -> bool {
-        let theme = self.app.theme();
-        self.simulator()
-            .snapshot(&theme)
-            .and_then(|s| s.matches_hash(path))
-            .expect("render the window")
-    }
-
-    /// Where [`Self::looks_like`] keeps the frame saved at `path`.
-    fn frame_file(&self, path: &std::path::Path) -> PathBuf {
-        let dir = path.parent().expect("dir");
-        std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| {
-                p.extension().is_some_and(|e| e == "sha256")
-                    && p.file_name()
-                        .is_some_and(|n| n.to_string_lossy().starts_with("frame-"))
-            })
-            .unwrap_or_else(|| dir.join("frame-none.sha256"))
+    /// A hash of the window as drawn.
+    fn frame(&self) -> u64 {
+        self.simulator().frame(&self.app.theme())
     }
 
     /// Everything the app holds, as text (the pointer is left out: every
@@ -928,16 +951,16 @@ impl Ui {
         state.join("\n")
     }
 
-    fn simulator(&self) -> iced_test::Simulator<'_, Message> {
-        let settings = iced_test::core::Settings {
-            default_font: crate::platform::mono_font(),
-            ..iced_test::core::Settings::default()
-        };
-        iced_test::Simulator::with_size(settings, WINDOW, self.app.view())
+    fn simulator(&self) -> sim::Sim<'_> {
+        sim::Sim::new(self.app.view(), &self.widgets)
     }
 
     /// Every piece of text shown, where it can be clicked.
     pub fn targets(&self) -> Vec<Target> {
+        profile::time("targets", || self.find_targets())
+    }
+
+    fn find_targets(&self) -> Vec<Target> {
         let mut found = Vec::new();
         {
             let found = &mut found;
@@ -965,9 +988,13 @@ impl Ui {
 
     /// The messages a press of `button` at `at` produces (nothing runs).
     pub fn press(&self, at: Point, button: mouse::Button) -> Vec<Message> {
-        let mut sim = self.simulator();
+        profile::time("press", || self.press_messages(at, button))
+    }
+
+    fn press_messages(&self, at: Point, button: mouse::Button) -> Vec<Message> {
+        let mut sim = sim::Sim::new(self.app.view(), &self.probes);
         sim.point_at(at);
-        let _ = sim.simulate([
+        sim.simulate([
             iced::Event::Mouse(mouse::Event::CursorMoved { position: at }),
             iced::Event::Mouse(mouse::Event::ButtonPressed(button)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(button)),
@@ -989,12 +1016,12 @@ impl Ui {
         let messages = {
             let mut sim = self.simulator();
             sim.point_at(from);
-            let _ = sim.simulate([
+            sim.simulate([
                 iced::Event::Mouse(mouse::Event::CursorMoved { position: from }),
                 iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             ]);
             sim.point_at(to);
-            let _ = sim.simulate([
+            sim.simulate([
                 iced::Event::Mouse(mouse::Event::CursorMoved { position: to }),
                 iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             ]);
@@ -1008,7 +1035,7 @@ impl Ui {
         let step = |ui: &Self, at: Point, event: mouse::Event| -> Vec<Message> {
             let mut sim = ui.simulator();
             sim.point_at(at);
-            let _ = sim.simulate([
+            sim.simulate([
                 iced::Event::Mouse(mouse::Event::CursorMoved { position: at }),
                 iced::Event::Mouse(event),
             ]);
@@ -1147,6 +1174,10 @@ fn reselect(messages: &[String]) -> bool {
         "Dialog(Choose(",
         "History(Select(",
         "Sidebar(Select(",
+        // The tab's own tree is the selected card until another is
+        // picked; a click on it also starts a double-click (open).
+        "Worktrees(Click(",
+        "Worktrees(Select(",
         "CommitDiff(SelectFile(",
         "LocalDiff(SelectFile(",
         "Blame(Select(",
@@ -1194,6 +1225,8 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Ui>,
 {
+    let started = std::time::Instant::now();
+    let _ = profile::take();
     let mut silent = Vec::new();
     let mut screens = VecDeque::from([Screen {
         name: name.to_owned(),
@@ -1207,6 +1240,7 @@ where
         let Some(base) = reach(&build, &screen.path, std::mem::take(&mut first)).await else {
             continue;
         };
+        let plan_started = std::time::Instant::now();
         let targets = base.targets();
         let labels: std::collections::HashSet<String> =
             targets.iter().map(|t| t.label.clone()).collect();
@@ -1242,13 +1276,14 @@ where
             }
         }
         let modal_before = modal(&base.app);
-        drop(base);
+        profile::record("plan", plan_started.elapsed());
+        profile::time("drop", || drop(base));
         for (target, button, button_name, key) in plan {
             let _ = tried.insert(key.clone());
             let Some(mut ui) = reach(&build, &screen.path, false).await else {
                 continue;
             };
-            let fx = ui.click_at(&target, button).await;
+            let fx = profile::time_async("click", ui.click_at(&target, button)).await;
             let quiet = fx.silent() && !fx.change_reselected && !reselect(&fx.messages);
             println!(
                 "{} › {button_name} {:?} → {}{}",
@@ -1274,31 +1309,41 @@ where
                 "TabList(CloseTab",
                 "Picker(Pick",
             ];
-            if screen.path.len() >= depth()
-                || !(fx.state_changed || fx.repo_changed)
-                || elsewhere.iter().any(|e| fx.messages[0].starts_with(e))
-            {
-                continue;
+            'follow: {
+                if screen.path.len() >= depth()
+                    || !(fx.state_changed || fx.repo_changed)
+                    || elsewhere.iter().any(|e| fx.messages[0].starts_with(e))
+                {
+                    break 'follow;
+                }
+                // Follow clicks that show new buttons: a dialog or menu, or
+                // what a selection brings up.
+                ui.settle();
+                let opened = modal(&ui.app);
+                let new_labels = ui.targets().iter().any(|t| !labels.contains(&t.label));
+                if !(new_labels || opened != modal_before) {
+                    break 'follow;
+                }
+                let id = format!("{opened:?} {}", key.0);
+                if seen_screens.insert(id) {
+                    let mut path = screen.path.clone();
+                    path.push((target.label.clone(), button));
+                    screens.push_back(Screen {
+                        name: format!("{} › {button_name} {:?}", screen.name, target.label.trim()),
+                        path,
+                        known: (opened == modal_before).then(|| labels.clone()),
+                    });
+                }
             }
-            // Follow clicks that show new buttons: a dialog or menu, or
-            // what a selection brings up.
-            ui.settle();
-            let opened = modal(&ui.app);
-            let new_labels = ui.targets().iter().any(|t| !labels.contains(&t.label));
-            if !(new_labels || opened != modal_before) {
-                continue;
-            }
-            let id = format!("{opened:?} {}", key.0);
-            if seen_screens.insert(id) {
-                let mut path = screen.path.clone();
-                path.push((target.label.clone(), button));
-                screens.push_back(Screen {
-                    name: format!("{} › {button_name} {:?}", screen.name, target.label.trim()),
-                    path,
-                    known: (opened == modal_before).then(|| labels.clone()),
-                });
-            }
+            // The temp folders go with it.
+            profile::time("drop", || drop(ui));
         }
+    }
+    if profile::enabled() {
+        println!(
+            "{}",
+            profile::report(name, started.elapsed(), &profile::take())
+        );
     }
     silent
 }
@@ -1313,17 +1358,21 @@ where
     // Only the first build is measured (it checks what `build` asserts
     // about its clicks); later ones only get back to the same screen.
     REACHING.set(!first);
-    let ui = async {
-        let mut ui = build().await;
+    let ui = profile::time_async("reach", async {
+        let mut ui = profile::time_async("reach › build", build()).await;
         ui.settle();
-        for (label, button) in path {
-            let targets = ui.targets();
-            let target = targets.iter().find(|t| &t.label == label)?.clone();
-            let _ = ui.click_at(&target, *button).await;
-            ui.settle();
-        }
+        profile::time_async("reach › path", async {
+            for (label, button) in path {
+                let targets = ui.targets();
+                let target = targets.iter().find(|t| &t.label == label)?.clone();
+                let _ = ui.click_at(&target, *button).await;
+                ui.settle();
+            }
+            Some(())
+        })
+        .await?;
         Some(ui)
-    }
+    })
     .await;
     REACHING.set(false);
     let mut ui = ui?;
@@ -1911,7 +1960,7 @@ async fn reselecting_an_open_conflict_keeps_its_choices() {
 async fn sweep_merge_conflict() {
     let silent = sweep("merge conflict", || async {
         working_tree(
-            Ui::open_with(|r| {
+            Ui::open_prepared("merged", |r| {
                 diverged(r);
                 let _ = r.git_output(&["merge", "feature"]);
             })
@@ -1932,7 +1981,7 @@ async fn sweep_merge_conflict() {
 async fn sweep_rebase_stopped() {
     let silent = sweep("rebase stopped", || async {
         working_tree(
-            Ui::open_with(|r| {
+            Ui::open_prepared("rebase stopped", |r| {
                 diverged(r);
                 let _ = r.git_output(&["rebase", "feature"]);
             })
@@ -1952,7 +2001,7 @@ async fn sweep_rebase_stopped() {
 #[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
 async fn sweep_bisect() {
     let silent = sweep("bisect", || async {
-        Ui::open_with(|r| {
+        Ui::open_prepared("bisecting", |r| {
             r.git(&["reset", "-q", "--hard"]);
             r.git(&["clean", "-qfd"]);
             r.git(&["bisect", "start", "HEAD", "HEAD~2"]);
@@ -2535,7 +2584,7 @@ async fn sweep_selected_lines() {
 #[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
 async fn sweep_rebase_editor() {
     let silent = sweep("rebase editor", || async {
-        let mut ui = Ui::open_with(|r| {
+        let mut ui = Ui::open_prepared("clean", |r| {
             r.git(&["reset", "-q", "--hard"]);
             r.git(&["clean", "-qfd"]);
         })
@@ -2557,7 +2606,7 @@ async fn sweep_rebase_editor() {
 #[ignore = "UI sweep, minutes: cargo test -p gf-app -- --ignored sweep_"]
 async fn sweep_left_changes() {
     let silent = sweep("left changes", || async {
-        let ui = Ui::open_with(|r| {
+        let ui = Ui::open_prepared("left on main", |r| {
             r.git(&["reset", "-q", "--hard"]);
             r.git(&["clean", "-qfd"]);
             r.write("a.txt", "left behind\n");
@@ -2759,6 +2808,118 @@ async fn remote_checkout_switches_to_an_existing_tracking_branch() {
     assert_eq!(
         ui.fixture.repo.git(&["branch", "--show-current"]).trim(),
         "feature"
+    );
+}
+
+/// A linked worktree on `work`, made from `feature`, open in the
+/// active tab (the fixture's main tree stays on `main`).
+async fn linked_from_feature(folder: &std::path::Path) -> Ui {
+    let path = folder.join("linked");
+    let mut ui = Ui::open_with(|repo| {
+        repo.git(&["branch", "other"]);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work",
+            path.to_str().expect("path"),
+            "feature",
+        ]);
+    })
+    .await;
+    let _ = ui.send(Message::Open(path)).await;
+    assert!(ui.app.active_tab().expect("tab").repo.is_linked_worktree());
+    ui
+}
+
+#[tokio::test]
+async fn a_linked_worktree_looks_at_its_base_detached_instead_of_taking_it() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/feature".into()),
+        )))
+        .await;
+    let _ = ui.send(selected_checkout()).await;
+    let dialog = ui.app.dialog.as_ref().expect("asks about the base");
+    assert_eq!(dialog.title, "Switch to the base branch");
+    assert!(matches!(
+        &dialog.purpose,
+        Purpose::LinkedBase { main: Some(_), .. }
+    ));
+
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let linked = folder.path().join("linked");
+    let head = |args: &[&str]| {
+        let mut all = vec!["-C", linked.to_str().expect("path")];
+        all.extend_from_slice(args);
+        ui.fixture.repo.git(&all).trim().to_owned()
+    };
+    assert_eq!(head(&["branch", "--show-current"]), "", "detached");
+    assert_eq!(
+        head(&["rev-parse", "HEAD"]),
+        head(&["rev-parse", "feature"])
+    );
+    // `feature` stays free for the main tree.
+    let _ = ui.fixture.repo.git(&["switch", "-q", "feature"]);
+}
+
+#[tokio::test]
+async fn a_linked_worktree_can_open_the_main_tree_instead_of_its_base() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/feature".into()),
+        )))
+        .await;
+    let _ = ui.send(selected_checkout()).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Check(0))).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let tab = ui.app.active_tab().expect("tab");
+    assert!(!tab.repo.is_linked_worktree(), "the main worktree's tab");
+    assert_eq!(
+        ui.fixture
+            .repo
+            .git(&[
+                "-C",
+                folder.path().join("linked").to_str().expect("path"),
+                "branch",
+                "--show-current"
+            ])
+            .trim(),
+        "work"
+    );
+}
+
+#[tokio::test]
+async fn a_linked_worktree_switches_to_other_branches_as_usual() {
+    let folder = tempfile::tempdir().expect("worktree parent");
+    let mut ui = linked_from_feature(folder.path()).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/other".into()),
+        )))
+        .await;
+    let _ = ui.send(selected_checkout()).await;
+    if let Some(d) = ui.app.dialog.as_ref() {
+        assert_ne!(d.title, "Switch to the base branch");
+        let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    }
+    let linked = folder.path().join("linked");
+    assert_eq!(
+        ui.fixture
+            .repo
+            .git(&[
+                "-C",
+                linked.to_str().expect("path"),
+                "branch",
+                "--show-current"
+            ])
+            .trim(),
+        "other"
     );
 }
 
@@ -3273,6 +3434,262 @@ async fn a_worktrees_branch_merges_into_its_base_in_the_tab_of_the_base() {
 }
 
 #[tokio::test]
+async fn a_branch_from_the_branch_menu_goes_to_a_new_worktree() {
+    let mut ui = Ui::open_with(|_| {}).await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Select(
+            sidebar::Selection::Ref("refs/heads/feature".into()),
+        )))
+        .await;
+    let _ = ui
+        .send(Message::Sidebar(sidebar::Message::Act(
+            sidebar::Action::NewWorktree,
+        )))
+        .await;
+    assert!(ui.shows("Check feature out in its own folder."));
+    assert!(
+        !ui.shows("a new branch starts at"),
+        "the branch exists: no start to pick"
+    );
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(ui.app.tabs.len(), 2, "the new worktree opened in a tab");
+    let tree = ui.app.tabs[1].repo.cwd().to_path_buf();
+    let head = ui.fixture.repo.git(&[
+        "-C",
+        &tree.display().to_string(),
+        "branch",
+        "--show-current",
+    ]);
+    assert_eq!(head.trim(), "feature");
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
+}
+
+/// A tree on `feat` (from main, opened in its own tab) with one commit
+/// changing `file` to `text`, selected in the worktrees panel of main's
+/// tab; main's own tree is clean. Returns the tree's folder.
+async fn feat_tree_with_a_commit(file: &str, text: &str) -> (Ui, PathBuf) {
+    let mut ui = Ui::open_with(|r| {
+        r.git(&["reset", "-q", "--hard"]);
+        r.git(&["clean", "-qfd"]);
+    })
+    .await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(0, "feat".into())))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let tree = ui.app.tabs[1].repo.cwd().to_path_buf();
+    let dir = tree.display().to_string();
+    std::fs::write(tree.join(file), text).expect("write");
+    ui.fixture.repo.git(&["-C", &dir, "add", file]);
+    ui.fixture
+        .repo
+        .git(&["-C", &dir, "commit", "-qm", "feat work"]);
+    let _ = ui.send(Message::WorktreePoll).await;
+    let path = ui.app.tabs[ui.app.active]
+        .worktrees
+        .cards()
+        .iter()
+        .find(|c| c.tree.branch.as_deref() == Some("feat"))
+        .expect("feat card")
+        .tree
+        .path
+        .clone();
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Select(path)))
+        .await;
+    (ui, tree)
+}
+
+/// Two trees made from main (not opened in tabs), from main's tab.
+async fn two_trees(a: &str, b: &str) -> (Ui, PathBuf, PathBuf) {
+    let mut ui = Ui::open_with(|r| {
+        r.git(&["reset", "-q", "--hard"]);
+        r.git(&["clean", "-qfd"]);
+    })
+    .await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    for branch in [a, b] {
+        let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+        let _ = ui
+            .send(Message::Dialog(dialog::Message::Field(0, branch.into())))
+            .await;
+        let _ = ui.send(Message::Dialog(dialog::Message::Check(0))).await;
+        let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    }
+    let tree = |branch: &str| {
+        ui.app.tabs[0]
+            .worktrees
+            .cards()
+            .iter()
+            .find(|c| c.tree.branch.as_deref() == Some(branch))
+            .expect("card")
+            .tree
+            .path
+            .clone()
+    };
+    let (ta, tb) = (tree(a), tree(b));
+    (ui, ta, tb)
+}
+
+#[tokio::test]
+async fn worktrees_changing_the_same_file_are_flagged() {
+    let (mut ui, a, b) = two_trees("feat", "fix").await;
+    // feat commits a change to it; fix has it uncommitted.
+    std::fs::write(a.join("shared.txt"), "feat\n").expect("write");
+    let dir = a.display().to_string();
+    ui.fixture.repo.git(&["-C", &dir, "add", "shared.txt"]);
+    ui.fixture.repo.git(&["-C", &dir, "commit", "-qm", "feat"]);
+    std::fs::write(b.join("shared.txt"), "fix\n").expect("write");
+    std::fs::write(b.join("only-fix.txt"), "x\n").expect("write");
+    let _ = ui.send(Message::WorktreePoll).await;
+    let overlap = |ui: &Ui, path: &std::path::Path| {
+        ui.app.tabs[0]
+            .worktrees
+            .cards()
+            .iter()
+            .find(|c| c.tree.path == path)
+            .and_then(|c| c.overlap.clone())
+    };
+    let o = overlap(&ui, &a).expect("feat is flagged");
+    assert_eq!(o.files, 1);
+    assert!(o.tip.contains("fix: shared.txt"), "{}", o.tip);
+    assert!(overlap(&ui, &b).is_some_and(|o| o.tip.contains("feat: shared.txt")));
+    assert!(ui.shows("⚠1"), "a badge on the card");
+    // Once fix drops its change, nothing is shared.
+    std::fs::remove_file(b.join("shared.txt")).expect("rm");
+    let _ = ui.send(Message::WorktreePoll).await;
+    assert!(overlap(&ui, &a).is_none());
+    assert!(!ui.shows("⚠1"));
+    let _ = std::fs::remove_dir_all(a.parent().expect("root"));
+}
+
+/// main moves on by a commit; the feat tree (from
+/// [`feat_tree_with_a_commit`]) is asked to catch up from main's tab, with
+/// `pull.rebase` set to `rebase`.
+async fn update_feat_from_main(rebase: bool) -> (Ui, PathBuf) {
+    let (mut ui, tree) = feat_tree_with_a_commit("feat.txt", "feat\n").await;
+    if rebase {
+        ui.fixture.repo.git(&["config", "pull.rebase", "true"]);
+    }
+    let main = ui.fixture.repo.path().display().to_string();
+    std::fs::write(ui.fixture.repo.path().join("main.txt"), "main\n").expect("write");
+    ui.fixture.repo.git(&["-C", &main, "add", "main.txt"]);
+    ui.fixture
+        .repo
+        .git(&["-C", &main, "commit", "-qm", "main work"]);
+    // Ask from main's tab: the update runs in feat's.
+    let _ = ui.send(Message::Key(Shortcut::SelectTab(0))).await;
+    assert_eq!(ui.app.active, 0);
+    let _ = ui.send(Message::WorktreePoll).await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Select(tree.clone())))
+        .await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::Update,
+        )))
+        .await;
+    assert!(ui.shows("Bring 1 commit from main into feat?"));
+    let check = if rebase {
+        "■ rebase instead of merge"
+    } else {
+        "□ rebase instead of merge"
+    };
+    assert!(ui.shows(check), "the default follows pull.rebase");
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(ui.app.active, 1, "it runs in the tab of feat");
+    let dir = tree.display().to_string();
+    let behind = ui
+        .fixture
+        .repo
+        .git(&["-C", &dir, "rev-list", "--count", "feat..main"]);
+    assert_eq!(behind.trim(), "0", "feat has main's commit");
+    (ui, tree)
+}
+
+#[tokio::test]
+async fn a_worktree_catches_up_with_its_base_by_a_merge() {
+    let (ui, tree) = update_feat_from_main(false).await;
+    let merges = ui
+        .fixture
+        .repo
+        .git(&["rev-list", "--merges", "--count", "main..feat"]);
+    assert_eq!(merges.trim(), "1", "a merge commit");
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
+}
+
+#[tokio::test]
+async fn a_worktree_catches_up_with_its_base_by_a_rebase_when_pull_rebases() {
+    let (ui, tree) = update_feat_from_main(true).await;
+    let merges = ui
+        .fixture
+        .repo
+        .git(&["rev-list", "--merges", "--count", "main..feat"]);
+    assert_eq!(merges.trim(), "0", "replayed, no merge commit");
+    let ahead = ui.fixture.repo.git(&["rev-list", "--count", "main..feat"]);
+    assert_eq!(ahead.trim(), "1", "feat's own commit on top of main");
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
+}
+
+#[tokio::test]
+async fn a_merged_worktree_and_its_branch_go_away_when_asked() {
+    let (mut ui, tree) = feat_tree_with_a_commit("feat.txt", "feat\n").await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::Merge,
+        )))
+        .await;
+    assert!(ui.shows("then remove the worktree and branch feat"));
+    let _ = ui.send(Message::Dialog(dialog::Message::Check(1))).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    let log = ui.fixture.repo.git(&["log", "--format=%s", "-1", "main"]);
+    assert_eq!(log.trim(), "feat work", "merged");
+    assert!(!tree.exists(), "the tree is removed");
+    let branches = ui.fixture.repo.git(&["branch", "--list", "feat"]);
+    assert!(branches.trim().is_empty(), "the branch is deleted");
+    assert_eq!(ui.app.tabs.len(), 1, "its tab is closed");
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
+}
+
+#[tokio::test]
+async fn a_worktree_stays_when_its_merge_stops_on_conflicts() {
+    let (mut ui, tree) = feat_tree_with_a_commit("clash.txt", "feat\n").await;
+    // main changes the same file its own way.
+    let main = ui.fixture.repo.path().display().to_string();
+    std::fs::write(ui.fixture.repo.path().join("clash.txt"), "main\n").expect("write");
+    ui.fixture.repo.git(&["-C", &main, "add", "clash.txt"]);
+    ui.fixture
+        .repo
+        .git(&["-C", &main, "commit", "-qm", "main work"]);
+    let _ = ui.send(Message::WorktreePoll).await;
+    let _ = ui
+        .send(Message::Worktrees(worktrees::Message::Act(
+            worktrees::Action::Merge,
+        )))
+        .await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Check(1))).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert!(tree.exists(), "the tree stays");
+    let branches = ui.fixture.repo.git(&["branch", "--list", "feat"]);
+    assert!(!branches.trim().is_empty(), "the branch stays");
+    assert!(
+        ui.fixture.repo.path().join(".git/MERGE_HEAD").exists(),
+        "the merge stopped on the conflict"
+    );
+    assert!(
+        ui.app.clean_after_merge.is_none(),
+        "nothing is left to run later"
+    );
+    let _ = std::fs::remove_dir_all(tree.parent().expect("root"));
+}
+
+#[tokio::test]
 async fn a_base_set_by_hand_merges_in_a_tree_opened_for_it() {
     let mut ui = Ui::open_with(|_| {}).await;
     let _ = ui
@@ -3483,7 +3900,7 @@ async fn diff_exposes_copy_only_for_a_selection() {
 async fn sweep_conflict_resolver() {
     let silent = sweep("conflict resolver", || async {
         let mut ui = working_tree(
-            Ui::open_with(|r| {
+            Ui::open_prepared("merged", |r| {
                 diverged(r);
                 let _ = r.git_output(&["merge", "feature"]);
             })
@@ -3517,7 +3934,7 @@ async fn sweep_conflict_resolver() {
 async fn sweep_rebase_resolved() {
     let silent = sweep("rebase resolved", || async {
         working_tree(
-            Ui::open_with(|r| {
+            Ui::open_prepared("rebase resolved", |r| {
                 diverged(r);
                 let _ = r.git_output(&["rebase", "feature"]);
                 r.write("a.txt", "resolved\n");
@@ -3606,7 +4023,7 @@ async fn dragging_the_divider_resizes_the_file_list_and_remembers_it() {
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
         ];
-        let _ = sim.simulate(
+        sim.simulate(
             std::iter::once(iced::Event::Mouse(mouse::Event::CursorMoved {
                 position: at,
             }))
@@ -3655,7 +4072,7 @@ async fn dragging_the_refs_divider_resizes_the_refs_panel_and_remembers_it() {
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
         ];
-        let _ = sim.simulate(
+        sim.simulate(
             std::iter::once(iced::Event::Mouse(mouse::Event::CursorMoved {
                 position: at,
             }))
@@ -4681,7 +5098,10 @@ async fn settings_accounts_show_the_saved_token_and_notice_when_it_is_gone() {
 
     assert!(ui.shows("GitLab"), "the service is told by the host");
     assert!(ui.shows("✓ token saved"));
-    assert!(ui.shows("[ Get token ↗ ]"));
+    assert!(
+        !ui.shows("[ Get token ↗ ]"),
+        "a saved login needs no token page; the log-in dialog offers it"
+    );
     assert!(ui.shows("credential helper `store`"));
 
     // The token disappears outside gf (expired and erased by git, or
@@ -4694,13 +5114,13 @@ async fn settings_accounts_show_the_saved_token_and_notice_when_it_is_gone() {
     let dialog = ui.app.dialog.as_ref().expect("log-in dialog");
     assert_eq!(dialog.fields[0].value, "gitlab.example.com");
     assert_eq!(dialog.fields[1].value, "me");
+    let link = dialog.link.as_ref().expect("token line");
     assert!(
-        dialog.body.iter().any(
-            |l| l.contains("https://gitlab.example.com/-/user_settings/personal_access_tokens")
-        ),
-        "{:?}",
-        dialog.body
+        link.open.as_ref().is_some_and(|(_, url)| url
+            .starts_with("https://gitlab.example.com/-/user_settings/personal_access_tokens")),
+        "{link:?}"
     );
+    assert!(ui.shows("[ Get token ↗ ]"), "next to where the token goes");
 }
 
 #[tokio::test]
@@ -4724,6 +5144,19 @@ async fn settings_list_servers_the_open_tabs_use_and_log_in_to_one_in_a_click() 
     let dialog = ui.app.dialog.as_ref().expect("log-in dialog");
     assert_eq!(dialog.fields[0].value, "git.example.com");
 
+    // The name tells nothing: no token page until the service is picked.
+    assert!(ui.shows("(•) other"));
+    assert!(!ui.shows("[ Get token ↗ ]"));
+    let _ = ui.click("( ) GitLab").await;
+    assert!(ui.shows("(•) GitLab"));
+    let link = ui.app.dialog.as_ref().and_then(|d| d.link.clone());
+    assert!(
+        link.as_ref()
+            .and_then(|l| l.open.as_ref())
+            .is_some_and(|(_, url)| url.starts_with("https://git.example.com/-/user_settings/")),
+        "{link:?}"
+    );
+
     // The login is tried on the tab's remote there before it is kept.
     fill_login(&mut ui, "git.example.com", "me", "tok").await;
     assert!(ui.app.dialog.is_none());
@@ -4734,6 +5167,111 @@ async fn settings_list_servers_the_open_tabs_use_and_log_in_to_one_in_a_click() 
     );
     assert!(!ui.shows("─ NOT LOGGED IN"), "now an account");
     assert!(ui.shows("used by"));
+    assert_eq!(
+        ui.app
+            .settings
+            .services
+            .get("git.example.com")
+            .map(String::as_str),
+        Some("gitlab"),
+        "the picked service is kept for the host"
+    );
+    assert!(ui.shows("GitLab"));
+
+    // The tag asks again.
+    let _ = ui.click("GitLab").await;
+    let dialog = ui.app.dialog.as_ref().expect("service dialog");
+    assert_eq!(dialog.title, "Which service is git.example.com?");
+    let _ = ui.click("( ) Gitea").await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert!(ui.app.dialog.is_none());
+    assert!(ui.shows("Gitea"));
+    assert_eq!(
+        ui.app
+            .settings
+            .services
+            .get("git.example.com")
+            .map(String::as_str),
+        Some("gitea")
+    );
+}
+
+#[tokio::test]
+async fn the_log_in_dialog_guesses_the_service_again_as_the_server_is_typed() {
+    let mut ui = Ui::welcome().await;
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    let _ = ui.click("[ + Add account ]").await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(
+            0,
+            "gitlab.example.com".into(),
+        )))
+        .await;
+    // The name tells the service: no row to pick one, the token line
+    // names it.
+    assert!(!ui.shows("( ) GitHub"), "no service row");
+    assert!(ui.shows("GitLab: use a token"));
+    assert!(ui.shows("[ Get token ↗ ]"));
+
+    // A name that tells nothing asks.
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(
+            0,
+            "git.example.com".into(),
+        )))
+        .await;
+    assert!(ui.shows("(•) other"));
+    assert!(!ui.shows("[ Get token ↗ ]"));
+    // A pick holds while other fields are typed in.
+    let _ = ui.click("( ) Gitea").await;
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(1, "me".into())))
+        .await;
+    assert!(ui.shows("(•) Gitea"));
+    assert!(ui.shows("Gitea: use an access token"));
+    // A known server takes the row away again.
+    let _ = ui
+        .send(Message::Dialog(dialog::Message::Field(
+            0,
+            "github.com".into(),
+        )))
+        .await;
+    assert!(!ui.shows("( ) Gitea"), "no service row");
+    let link = ui.app.dialog.as_ref().and_then(|d| d.link.clone());
+    assert!(
+        link.as_ref()
+            .and_then(|l| l.open.as_ref())
+            .is_some_and(|(_, url)| url.starts_with("https://github.com/settings/tokens/new")),
+        "{link:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_press_elsewhere_in_the_dialog_closes_the_dropped_down_suggestions() {
+    let mut ui = Ui::welcome().await;
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    let _ = ui.click("[ + Add account ]").await;
+    let open = |ui: &Ui| ui.app.dialog.as_ref().is_some_and(|d| d.suggestions_open());
+
+    let _ = ui.click("▾").await;
+    assert!(open(&ui));
+    // A press on another part of the card closes the list.
+    let _ = ui.click("│ user name").await;
+    assert!(!open(&ui), "closed by a press beside it");
+    assert!(ui.shows("▾"));
+
+    // The ▾ is not "elsewhere": it still closes what it opened.
+    let _ = ui.click("▾").await;
+    assert!(open(&ui));
+    let _ = ui.click("▴").await;
+    assert!(!open(&ui), "the ▾ closes it rather than reopening it");
+
+    // A press on another button closes it and still does its work.
+    let _ = ui.click("▾").await;
+    let _ = ui.click("[ Log in ⏎ ]").await;
+    assert!(!open(&ui));
+    let dialog = ui.app.dialog.as_ref().expect("still open: nothing typed");
+    assert!(dialog.error.is_some(), "the press still tried to log in");
 }
 
 #[tokio::test]

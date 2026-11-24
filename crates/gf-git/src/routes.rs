@@ -491,8 +491,10 @@ impl Repository {
     }
 
     // ---- SubmoduleOps
+    /// gix answers when there is none (no gitlink in the index); the
+    /// CLI lists them.
     pub async fn submodules(&self) -> Result<Vec<Submodule>> {
-        SubmoduleOps::submodules(&self.cli).await
+        gix_then_cli!(self, SubmoduleOps::submodules())
     }
     /// `git submodule update --init --recursive`: checks out the recorded
     /// commits, initializing new submodules.
@@ -571,6 +573,22 @@ impl Repository {
     }
     pub async fn default_base(&self) -> Result<Option<String>> {
         gix_then_cli!(self, WorktreeOps::default_base())
+    }
+    /// Whether `git pull` on `branch` in the tree at `path` rebases (see
+    /// `WorktreeOps::pull_rebases`).
+    pub async fn pull_rebases(&self, path: &Path, branch: &str) -> Result<bool> {
+        gix_then_cli!(self, WorktreeOps::pull_rebases(path, branch))
+    }
+    /// The branch work in this tree goes back into, when it is known for
+    /// sure: recorded for the branch checked out here (`gf-base`,
+    /// `gh-merge-base`) or named by its creation. `None` when it is only a
+    /// guess, HEAD is detached, or HEAD is on the default base itself.
+    /// A linked tree that switched to it would hold it, and the tree that
+    /// merges the work could no longer check it out.
+    pub async fn work_base(&self) -> Result<Option<String>> {
+        let default = self.default_base().await?;
+        let here = self.worktree_status(self.cwd(), default.as_deref()).await?;
+        Ok(here.base.filter(|_| !here.base_guessed))
     }
     /// Keeps (or with `None` forgets) the branch `branch` goes back into.
     pub async fn set_branch_base(&self, branch: &str, base: Option<&str>) -> Result<()> {

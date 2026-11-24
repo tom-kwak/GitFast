@@ -38,14 +38,16 @@ macOS 11+ (Apple silicon, Intel) · Windows 10+ x64 · Git 2.43.1+. Run again to
 ## What it does
 
 - **History**: a commit graph drawn in text, with branch and tag labels.
-  `⌘F` lists only the commits that changed a given file.
+  Lines to parents more than 50 rows below are cut into arrows (`↓`, `↑N`),
+  so the graph stays narrow. `⌘F` lists only the commits that changed a given
+  file.
 - **Working tree**: stage and unstage with checkboxes; stage, stash or
   discard several files at once.
 - **Diffs** with syntax highlighting, **blame**, **conflict resolution**
   (ours, theirs or both per block) and **interactive rebase**.
 - **Command log** (`⌘J`): every git command gf ran, with output, exit status
   and duration. The `gf ❯` line runs any git command.
-- **Tabs**: one per repository.
+- **Tabs**: one per repository; drag a tab to reorder them.
 - **Clone and logins**: `⌘O` accepts a URL and clones it in the background.
   Settings keeps your HTTPS git logins in git's own credential helper, and a
   fetch, pull or push that fails on authentication asks for a login and retries.
@@ -88,9 +90,14 @@ Several working trees of one repository, for example one per AI agent, in one pa
 
 - One card per worktree: branch, uncommitted files, and its relation to the
   branch it came from (`from develop · 3 ahead · 1 behind`, or `merged`).
-- `+` adds a worktree; the branch field lists existing branches.
+- `+` adds a worktree; the branch field lists existing branches. The branch
+  menu's "new worktree…" (`w`) starts one for that branch.
+- "update from <base>…" (`u`) on a card merges or rebases the base's new
+  commits into that worktree.
 - Right-click a card to open it in a tab, IDE or terminal, compare it with
-  its base, or merge it into its base.
+  its base, or merge it into its base (and then remove the worktree and its
+  branch).
+- A card shows `⚠n` when other worktrees change the same files.
 - `clean N` removes the worktrees already merged.
 
 ## Undo
@@ -118,6 +125,7 @@ On Windows, `⌘` is `Ctrl` (`⌘⇧Z` is `Ctrl+Shift+Z`).
 | `⌘W` | Close the tab |
 | `⌘1`–`⌘9` | Go to tab 1–9 |
 | `⌘⇧[` / `⌘⇧]` | Previous / next tab |
+| `⌘⌥⇧[` / `⌘⌥⇧]` | Move the tab left / right |
 | `⌃⇥` / `⌃⇧⇥` | Tabs in most-recently-used order |
 | `⌘P` | List all tabs |
 | `⌘[` / `⌘]` | History / working tree |

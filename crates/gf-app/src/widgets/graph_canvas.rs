@@ -20,6 +20,10 @@ pub const LANE_SPACING: f32 = 11.0;
 const PAD: f32 = 7.0;
 /// Lanes drawn at most; wider graphs are clipped with a fade marker.
 pub const MAX_LANES: usize = 14;
+/// How much of a cut line's length is drawn before its arrow head.
+const ARROW_REACH: f32 = 0.85;
+/// Length of an arrow head.
+const ARROW_HEAD: f32 = 4.5;
 
 /// Width needed to draw `lanes` lanes (capped at [`MAX_LANES`]).
 pub fn width_for(lanes: usize) -> f32 {
@@ -120,6 +124,34 @@ impl RowGraph<'_> {
                     .with_color(self.color(e.color))
                     .with_width(1.6),
             );
+        }
+
+        for a in &self.row.arrows {
+            if !visible(a.from_lane) && !visible(a.to_lane) {
+                continue;
+            }
+            let start = Point::new(x(a.from_lane), y(a.from));
+            let full = Point::new(x(a.to_lane), y(a.to));
+            // Stop short of the row edge so the head reads as an end, not
+            // as a line running into the next row.
+            let (dx, dy) = (full.x - start.x, full.y - start.y);
+            let end = Point::new(start.x + dx * ARROW_REACH, start.y + dy * ARROW_REACH);
+            let color = self.color(a.color);
+            frame.stroke(
+                &Path::line(start, end),
+                Stroke::default().with_color(color).with_width(1.6),
+            );
+            let len = dx.hypot(dy).max(f32::EPSILON);
+            let (ux, uy) = (dx / len, dy / len);
+            let base = Point::new(end.x - ux * ARROW_HEAD, end.y - uy * ARROW_HEAD);
+            let half = ARROW_HEAD * 0.6;
+            let head = Path::new(|b| {
+                b.move_to(end);
+                b.line_to(Point::new(base.x - uy * half, base.y + ux * half));
+                b.line_to(Point::new(base.x + uy * half, base.y - ux * half));
+                b.close();
+            });
+            frame.fill(&head, color);
         }
 
         if visible(self.row.lane) {
