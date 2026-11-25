@@ -225,8 +225,8 @@ Update the workspace version in `Cargo.toml` and `Cargo.lock`, add
 push `main` and the tag together.
 
 ```bash
-git tag release-0.0.13 main
-git push --atomic origin main release-0.0.13
+git tag release-0.0.14 main
+git push --atomic origin main release-0.0.14
 ```
 
 The [release workflow](.github/workflows/release.yml) verifies the tagged

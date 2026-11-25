@@ -243,11 +243,18 @@ jobs:
           installers="https://github.com/${{ github.repository }}/releases/latest/download"
           case "$version" in *-*) installers="https://github.com/${{ github.repository }}/releases/download/$TAG" ;; esac
           whats_new="src/docs/release-notes/$version.md"
-          # The tag before this one; for a release, the release before it
-          # (0.0.10 compares with 0.0.9, not with 0.0.10-rc.3).
+          # Compare with the previous published release. Stable releases
+          # compare with the previous stable release.
           older="$(git -C src -c versionsort.suffix=- tag -l 'release-*' --sort=-v:refname | sed -n "/^$TAG\$/,\$p" | tail -n +2)"
           case "$version" in *-*) ;; *) older="$(grep -v '^release-.*-' <<<"$older" || true)" ;; esac
-          previous="$(head -1 <<<"$older")"
+          published="$(gh release list --exclude-drafts --limit 1000 --json tagName -q '.[].tagName')"
+          previous=""
+          while IFS= read -r candidate; do
+            if grep -qxF "$candidate" <<<"$published"; then
+              previous="$candidate"
+              break
+            fi
+          done <<<"$older"
           {
             # Written by hand for each release; without it GitHub lists the
             # merged changes instead (--generate-notes below).
