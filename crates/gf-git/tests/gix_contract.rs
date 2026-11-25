@@ -899,6 +899,26 @@ async fn worktree_status_matches_the_git_cli() {
     add(&["-b", "noted", dir("noted").to_str().unwrap()]);
     work.git(&["config", "branch.noted.gf-base", "feature"]);
     add(&["--detach", dir("detached").to_str().unwrap(), "HEAD~2"]);
+    let in_dir = |name: &str, args: &[&str]| {
+        let d = dir(name);
+        let mut a = vec!["-C", d.to_str().unwrap()];
+        a.extend_from_slice(args);
+        work.git(&a);
+    };
+    // Brought up to date from main with nothing of its own: by a
+    // fast-forward, and by a merge commit.
+    for (name, how) in [("updated", "--ff"), ("pulled", "--no-ff")] {
+        add(&["-b", name, dir(name).to_str().unwrap(), "main~1"]);
+        work.git(&["config", &format!("branch.{name}.gf-base"), "main"]);
+        in_dir(name, &["merge", "-q", how, "-m", "up", "main"]);
+    }
+    // Its work squashed into main, which then moves on.
+    add(&["-b", "squashed", dir("squashed").to_str().unwrap(), "main"]);
+    std::fs::write(dir("squashed").join("s.txt"), "s\n").unwrap();
+    in_dir("squashed", &["add", "s.txt"]);
+    in_dir("squashed", &["commit", "-q", "-m", "S: squashed work"]);
+    work.git(&["merge", "-q", "--squash", "squashed"]);
+    work.git(&["commit", "-q", "-m", "S: squash"]);
 
     // Changes in the main tree: staged, unstaged, a wholly untracked
     // folder (one entry with --untracked-files=normal) and loose files.
@@ -917,8 +937,22 @@ async fn worktree_status_matches_the_git_cli() {
         dir("fresh"),
         dir("noted"),
         dir("detached"),
+        dir("updated"),
+        dir("pulled"),
+        dir("squashed"),
     ];
     worktree_statuses_match(&repo, &trees, "fixture").await;
+    let at = |name: &str| {
+        let repo = &repo;
+        let path = dir(name);
+        async move { repo.worktree_status(&path, Some("main")).await.unwrap() }
+    };
+    for name in ["updated", "pulled"] {
+        let s = at(name).await;
+        assert!((s.ahead_of_base, s.merged()) == (0, false), "{name}: {s:?}");
+    }
+    let s = at("squashed").await;
+    assert!(s.squashed && s.merged() && s.ahead_of_base == 1, "{s:?}");
     let topic_status = repo
         .worktree_status(&dir("topic"), Some("main"))
         .await

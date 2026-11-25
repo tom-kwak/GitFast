@@ -558,7 +558,11 @@ impl State {
             Action::Merge => {
                 let branch = card.tree.branch.clone()?;
                 let s = card.status.as_ref()?;
-                let base = s.base.clone().filter(|_| s.ahead_of_base > 0)?;
+                // Squashed in already: merging again brings nothing.
+                let base = s
+                    .base
+                    .clone()
+                    .filter(|_| s.ahead_of_base > 0 && !s.merged())?;
                 let into = self.tree_of(&base)?;
                 Output::Merge {
                     branch,
@@ -968,7 +972,11 @@ impl State {
             return String::new();
         };
         let mut tip = Vec::new();
-        if s.merged() {
+        if s.squashed {
+            tip.push(format!(
+                "its changes are in {base} (squash or rebase merge) · safe to remove"
+            ));
+        } else if s.merged() {
             tip.push(format!("all merged into {base} · safe to remove"));
         } else if s.ahead_of_base > 0 {
             tip.push(format!(
@@ -982,7 +990,7 @@ impl State {
                 format::count(s.behind_base, "commit")
             ));
         }
-        if s.ahead_of_base > 0 && self.tree_of(base).is_some() {
+        if s.ahead_of_base > 0 && !s.merged() && self.tree_of(base).is_some() {
             tip.push(format!("m merges it into {base}"));
         }
         tip.push(if s.base_guessed {
@@ -1748,7 +1756,7 @@ mod tests {
         );
         st.base_guessed = false;
         st.ahead_of_base = 0;
-        st.had_work = true;
+        st.work_in_base = true;
         loaded(&mut s, vec![("/a", st.clone())]);
         assert_eq!(title(&s, 1), "main ← all merged");
         st.last_commit = None;
@@ -1840,7 +1848,7 @@ mod tests {
         assert_eq!(at(&s), Some(Phase::Conflict));
         let mut merged = status(1);
         merged.base = Some("main".into());
-        merged.had_work = true;
+        merged.work_in_base = true;
         loaded(&mut s, vec![("/a", merged)]);
         assert_eq!(at(&s), Some(Phase::Merged));
     }
@@ -1854,7 +1862,7 @@ mod tests {
         let mut merged = status(1);
         merged.base = Some("main".into());
         merged.behind_base = 2;
-        merged.had_work = true;
+        merged.work_in_base = true;
         let mut dirty = merged.clone();
         dirty.unstaged = 1;
         loaded(
@@ -2003,6 +2011,24 @@ mod tests {
         let _ = s.update(Message::Select("/b".into()));
         assert!(s.output_for(Action::Merge).is_none());
         assert!(s.output_for(Action::SetBase).is_some());
+    }
+
+    #[test]
+    fn squashed_work_is_merged_and_not_offered_to_merge_again() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let mut s = State::default();
+        s.set_worktrees(&[tree("/r", "main"), tree("/a", "a")]);
+        s.set_tabs(vec!["/r".into()], "/r".into());
+        let mut st = status(1);
+        st.base = Some("main".into());
+        st.ahead_of_base = 2;
+        st.behind_base = 1;
+        st.squashed = true;
+        loaded(&mut s, vec![("/a", st)]);
+        let _ = s.update(Message::Select("/a".into()));
+        assert_eq!(phase(&s.cards()[1], now), Some(Phase::Merged));
+        assert!(s.output_for(Action::Merge).is_none());
+        assert_eq!(text(title_parts(&s.cards()[1])), "main ← all merged");
     }
 
     #[test]

@@ -1322,8 +1322,9 @@ pub(super) fn worktree_label(path: &std::path::Path) -> String {
 }
 
 /// Removes trees merged into `base` (and with `delete_branches`, their
-/// branches). Each tree is checked again first: still clean and with no
-/// commit outside `base` — it may have changed since the dialog opened.
+/// branches). Each tree is checked again first: still clean and with
+/// nothing `base` lacks (see [`gf_git::WorktreeStatus::all_in_base`]) — it
+/// may have changed since the dialog opened.
 /// Goes on past a failing tree and reports the failures at the end.
 pub(super) async fn cleanup_worktrees(
     r: &gf_git::Repository,
@@ -1336,14 +1337,15 @@ pub(super) async fn cleanup_worktrees(
         let name = branch.clone().unwrap_or_else(|| worktree_label(path));
         let result = async {
             let s = r.worktree_status(path, Some(base)).await?;
-            if !s.is_clean() || s.ahead_of_base > 0 {
+            if !s.is_clean() || !s.all_in_base() {
                 return Err(gf_core::GfError::Other(format!(
                     "{name} has new work; left as it is"
                 )));
             }
             r.remove_worktree(path, false).await?;
             if delete_branches && let Some(b) = branch {
-                // Checked above: every commit of it is in `base`.
+                // Checked above: all of it is in `base`, if not as the
+                // same commits (squashed): forced.
                 r.delete_branch(b, true).await?;
             }
             Ok(())
