@@ -37,22 +37,65 @@ macOS 11+ (Apple silicon, Intel) · Windows 10+ x64 · Git 2.43.1+. Run again to
 
 ## What it does
 
+gf looks like a terminal (one monospace font, text-drawn graph, `[ OK ]`
+buttons) and works with the mouse or the keyboard alike. Every git command it
+runs is shown, and anything it does not cover can be typed on its `gf ❯` line.
+
+### Everyday work
+
 - **History**: a commit graph drawn in text, with branch and tag labels.
   Lines to parents more than 50 rows below are cut into arrows (`↓`, `↑N`),
-  so the graph stays narrow. `⌘F` lists only the commits that changed a given
-  file.
-- **Working tree**: stage and unstage with checkboxes; stage, stash or
-  discard several files at once.
-- **Diffs** with syntax highlighting, **blame**, **conflict resolution**
-  (ours, theirs or both per block) and **interactive rebase**.
-- **Command log** (`⌘J`): every git command gf ran, with output, exit status
-  and duration. The `gf ❯` line runs any git command.
-- **Tabs**: one per repository; drag a tab to reorder them.
-- **Clone and logins**: `⌘O` accepts a URL and clones it in the background.
-  Settings keeps your HTTPS git logins in git's own credential helper, and a
-  fetch, pull or push that fails on authentication asks for a login and retries.
-- **Compare**: the branch menu's "compare with current" (`c`) diffs the
-  checked-out commit against that branch.
+  so the graph stays narrow. `⌘F` lists only the commits that changed a file.
+- **Working tree**: stage files, hunks or single lines; stage, stash or
+  discard several files at once. `⌘↩` commits, and the commit box can amend
+  the last commit.
+- **Diffs** with syntax highlighting, and **blame** for any file.
+- **Branches, tags and stashes** in the refs panel (`⌘B`), each with its own
+  menu: checkout, "compare with current" (`c`), "new worktree…" (`w`),
+  delete. Tags are listed newest version first.
+- **Fetch, pull and push** from the toolbar. A pull that only fast-forwards
+  runs at once; one that must merge or rebase asks first. Push asks before it
+  would force or be rejected.
+
+### History rewriting and fixes
+
+- From a commit's menu: cherry-pick, revert, reset the branch to it, squash
+  it into the previous one, check it out without a branch, start
+  **interactive rebase** (reorder, squash, reword, drop) or **bisect**.
+- **Merge, rebase and cherry-pick conflicts** open a resolver: take ours,
+  theirs or both, block by block. A banner shows the operation in progress
+  with continue, skip and abort.
+- **Submodules** and **Git LFS** (track, untrack, pull) from the refs panel.
+
+### Safe by default
+
+- Deleting anything asks first and takes a click (Enter does not confirm).
+  Changes to the working tree or `HEAD` say what will change and whether it
+  can be undone.
+- **Undo** (`⌘Z` / `⌘⇧Z`) covers commits, resets, checkouts, pulls,
+  discarded changes and more; see [Undo](#undo).
+- The **command log** (`⌘J`) lists every git command gf ran, with its
+  output, exit status and duration.
+
+### Several repositories and trees
+
+- **Tabs**: one per repository or worktree, restored at start. Drag a tab to
+  reorder it; `⌘1`–`⌘9`, `⌃⇥` and `⌘P` switch between them.
+- **Worktrees panel** (`⌘⇧B`) for several working trees at once, for example
+  one per AI agent; see [Worktrees](#worktrees).
+
+### Remotes and logins
+
+- **Clone by URL**: `⌘O` accepts a URL and clones it in the background; Esc
+  cancels.
+- **Logins**: Settings keeps your HTTPS git logins in git's own credential
+  helper, shared with terminal git. A fetch, pull or push that fails on
+  authentication asks for a login and retries.
+
+### Look
+
+- Themes `gf-dark`, `gf-light`, `dracula`, `cd-dark` and `cd-light`, and
+  the font size, in Settings (`⌘,`).
 
 ## Speed: `git` CLI vs. gf
 
@@ -86,22 +129,36 @@ Other choices that keep gf responsive:
 
 ## Worktrees
 
-Several working trees of one repository, for example one per AI agent, in one panel (`⌘⇧B`).
+Several working trees of one repository, for example one per AI agent, in one
+panel (`⌘⇧B`):
 
-- One card per worktree, hanging from a title that names the branch it
-  merges into and how it stands (`develop ← 3 to merge · 1 new`). The card
-  gives its state in one word (`EDITING`, `UNCOMMITTED`, `READY`,
-  `MERGED`…), its uncommitted files, and its upstream distance (`↑2 ↓1`)
-  with the last commit.
-- `+` adds a worktree; the branch field lists existing branches. The branch
-  menu's "new worktree…" (`w`) starts one for that branch.
-- "update from <base>…" (`u`) on a card merges or rebases the base's new
-  commits into that worktree.
-- Right-click a card to open it in a tab, IDE or terminal, compare it with
-  its base, or merge it into its base (and then remove the worktree and its
-  branch).
-- A card shows `⚠ n shared` when other worktrees change the same files.
-- `clean N` removes the worktrees already merged.
+```text
+ ● main                              CLEAN
+     clean
+     ↑3 · Bump version 25m
+
+main ← 3 to merge · 3 new
+└◉ feature/payment              EDITING 10s
+     3 uncommitted · ⚠ 1 shared
+     ↑1 · Handle declined cards 25m
+```
+
+- Each card hangs from a title naming the branch it merges into and how it
+  stands: commits not there yet (`to merge`), commits the base got since
+  (`new`), or `all merged`.
+- One word gives the tree's state: `EDITING` (files changed in the last
+  2 minutes), `UNCOMMITTED`, `READY`, `MERGED`, `BEHIND`, `CLEAN`, or
+  `CONFLICT` / `MISSING`.
+- Below it: uncommitted files, `⚠ n shared` when other worktrees change the
+  same files, and the upstream distance (`↑2 ↓1`, `⊘` when never pushed) with
+  the last commit.
+- `+` adds a worktree; the branch menu's "new worktree…" (`w`) starts one for
+  that branch.
+- On a card: open it in a tab, IDE (`e`) or terminal (`t`), compare it with
+  its base (`c`), bring in its base's new commits (`u`), or merge it into its
+  base (`m`) and then remove the worktree and its branch.
+- `clean N` removes the worktrees already merged. A worktree added in one tab
+  shows in the others without a refresh.
 
 ## Undo
 
