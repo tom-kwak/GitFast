@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use gf_core::event::CommandId;
 use gf_core::model::RepoId;
 use gf_core::{CommandEvent, CommandPhase, CoreEvent, EventBus, GfError, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -158,6 +158,26 @@ impl GitRunner {
     }
 
     pub async fn run_with(&self, cmd: &GitCommand, opts: RunOptions) -> Result<GitOutput> {
+        self.run_filtered(cmd, opts, None).await
+    }
+
+    /// Keep only matching object IDs from a rev-list, up to the given count.
+    pub(crate) async fn run_oid_prefix(
+        &self,
+        cmd: &GitCommand,
+        opts: RunOptions,
+        prefix: String,
+        limit: usize,
+    ) -> Result<GitOutput> {
+        self.run_filtered(cmd, opts, Some((prefix, limit))).await
+    }
+
+    async fn run_filtered(
+        &self,
+        cmd: &GitCommand,
+        opts: RunOptions,
+        oid_prefix: Option<(String, usize)>,
+    ) -> Result<GitOutput> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
         self.emit(
@@ -172,7 +192,7 @@ impl GitRunner {
         );
         tracing::debug!(id, cmd = %cmd.display(), "git start");
 
-        let result = self.execute(id, cmd, opts).await;
+        let result = self.execute(id, cmd, opts, oid_prefix).await;
 
         let exit_code = result.as_ref().ok().and_then(|o| o.exit_code);
         self.emit(
@@ -206,6 +226,7 @@ impl GitRunner {
         id: CommandId,
         cmd: &GitCommand,
         opts: RunOptions,
+        oid_prefix: Option<(String, usize)>,
     ) -> Result<GitOutput> {
         let mut process = Command::new(&self.git);
         if self.clear_env {
@@ -260,9 +281,26 @@ impl GitRunner {
             let echo = cmd.echo_stdout.then(|| self.line_sink(id, cmd, false));
             let stop_at = opts.stop_at.clone().filter(|l| !l.is_empty());
             let max_stdout = opts.max_stdout;
-            let mut found = Some(found_tx);
             tokio::spawn(async move {
                 let mut buf = Vec::new();
+                if let Some((prefix, limit)) = oid_prefix {
+                    let mut pipe = BufReader::new(pipe);
+                    let mut line = Vec::new();
+                    let mut count = 0;
+                    while pipe.read_until(b'\n', &mut line).await? != 0 {
+                        if line.starts_with(prefix.as_bytes()) {
+                            buf.extend_from_slice(&line);
+                            count += 1;
+                            if count == limit {
+                                let _ = found_tx.send(Stop::Found);
+                                break;
+                            }
+                        }
+                        line.clear();
+                    }
+                    return Ok((buf, None));
+                }
+                let mut found = Some(found_tx);
                 let mut chunk = [0u8; 16 * 1024];
                 let mut lines = LineSplitter::default();
                 loop {

@@ -233,6 +233,19 @@ mod tests {
     /// even for thousands). Returns main's ids, newest first, and side's.
     fn history_repo(n: usize) -> (TestRepo, Vec<Oid>, Vec<Oid>) {
         let repo = TestRepo::new();
+        import_history(&repo, n);
+        let ids = |rev: &str| -> Vec<Oid> {
+            repo.git(&["rev-list", rev])
+                .lines()
+                .map(|l| l.parse().expect("oid"))
+                .collect()
+        };
+        let main = ids("main");
+        let side = ids("main..side");
+        (repo, main, side)
+    }
+
+    fn import_history(repo: &TestRepo, n: usize) {
         let mut stream = String::new();
         let commit = |s: &mut String, branch: &str, mark: usize, from: Option<usize>, msg: &str| {
             s.push_str(&format!(
@@ -254,7 +267,11 @@ mod tests {
                 "main",
                 i,
                 (i > 1).then(|| i - 1),
-                &format!("main {i}"),
+                &if i == 1 {
+                    "main 1\n\n오래된 커밋 marker".into()
+                } else {
+                    format!("main {i}")
+                },
             );
         }
         for j in 0..3 {
@@ -276,15 +293,110 @@ mod tests {
             .expect("write");
         assert!(child.wait().expect("wait").success());
         repo.git(&["reset", "-q", "--hard", "main"]);
-        let ids = |rev: &str| -> Vec<Oid> {
-            repo.git(&["rev-list", rev])
-                .lines()
-                .map(|l| l.parse().expect("oid"))
-                .collect()
+    }
+
+    #[tokio::test]
+    async fn commit_search_reveals_an_older_match_in_the_same_branch() {
+        use crate::app::{focus::KeyInput, ui_sweep::Ui};
+        use crate::features::{diff_view, history, sidebar};
+        use crate::nav::{Key, Nav};
+
+        let mut ui = Ui::open_with(|repo| {
+            repo.git(&["update-ref", "-d", "refs/heads/main"]);
+            import_history(repo, crate::repo_tab::HISTORY_PAGE + 2);
+        })
+        .await;
+        let rev = "refs/heads/main";
+        let _ = ui
+            .send(Message::Sidebar(sidebar::Message::Select(
+                sidebar::Selection::Ref(rev.into()),
+            )))
+            .await;
+        let target: Oid = ui
+            .fixture
+            .repo
+            .git(&["rev-list", "--max-parents=0", rev])
+            .trim()
+            .parse()
+            .expect("root id");
+        let commits = tab(&ui.app).history.loaded_commits().expect("branch graph");
+        assert_eq!(commits.len(), crate::repo_tab::HISTORY_PAGE);
+        assert!(commits.iter().all(|c| c.id != target));
+
+        let mut prefixes: std::collections::BTreeMap<&str, Vec<Oid>> = Default::default();
+        for commit in commits {
+            prefixes
+                .entry(&commit.id.as_str()[..4])
+                .or_default()
+                .push(commit.id.clone());
+        }
+        let (prefix, expected) = prefixes
+            .into_iter()
+            .find(|(_, ids)| ids.len() > 1)
+            .map(|(prefix, ids)| (prefix.to_owned(), ids))
+            .expect("fixture has an ambiguous hash prefix");
+
+        let _ = ui.click("Find ⌘F").await;
+        let press = |key| {
+            Message::KeyInput(KeyInput {
+                shortcut: None,
+                nav: Some(Nav::plain(key)),
+                menu: None,
+            })
         };
-        let main = ids("main");
-        let side = ids("main..side");
-        (repo, main, side)
+        let search = |message| Message::History(history::Message::Search(message));
+        let _ = ui.send(press(Key::Tab)).await;
+        assert!(ui.shows("commits on main"));
+        let _ = ui
+            .send(search(history::search::Message::QueryChanged(
+                prefix.clone(),
+            )))
+            .await;
+        let hashes = tab(&ui.app)
+            .history
+            .commit_search
+            .hits
+            .iter()
+            .take_while(|hit| hit.id.as_str().starts_with(&prefix))
+            .map(|hit| hit.id.clone())
+            .collect::<Vec<_>>();
+        assert!(hashes.starts_with(&expected));
+
+        let _ = ui
+            .send(search(history::search::Message::QueryChanged(
+                "오래된 커밋".into(),
+            )))
+            .await;
+        assert_eq!(tab(&ui.app).history.commit_search.hits[0].id, target);
+        assert!(ui.shows("1 commit · ⇥ switch mode · ↑↓ move · ⏎ show commit · esc close"));
+        let state = &tab(&ui.app).history.commit_search;
+        let (generation, hits) = (state.generation, state.hits.clone());
+        let id = tab(&ui.app).repo.id();
+        let _ = ui.click("□ Files").await;
+        let _ = ui
+            .send(Message::CommitSearchFinished(id, generation, Ok(hits)))
+            .await;
+        assert!(tab(&ui.app).history.commit_search.hits.is_empty());
+        let _ = ui.send(press(Key::Tab)).await;
+        assert_eq!(tab(&ui.app).history.commit_search.hits[0].id, target);
+
+        let _ = ui
+            .send(search(history::search::Message::Composing(true)))
+            .await;
+        let _ = ui.send(press(Key::Enter)).await;
+        assert!(tab(&ui.app).history.file_search_is_open());
+        let _ = ui
+            .send(search(history::search::Message::Composing(false)))
+            .await;
+        let _ = ui.send(press(Key::Enter)).await;
+        let tab = tab(&ui.app);
+        assert!(!tab.history.file_search_is_open());
+        assert_eq!(tab.history.revision(), Some(rev));
+        assert_eq!(tab.history.selected(), Some(&target));
+        assert_eq!(
+            tab.diff(diff_view::Role::Commit).source(),
+            Some(&diff_view::DiffSource::Commit(target))
+        );
     }
 
     async fn open(repo: &TestRepo) -> gf_git::Repository {

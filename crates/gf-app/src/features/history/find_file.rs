@@ -49,14 +49,28 @@ impl State {
         self.file_revision.as_ref().map(|(path, _)| path.as_path())
     }
 
-    pub fn open_file_search(&mut self, oid: Option<Oid>) -> Option<file_search::Work> {
+    pub fn start_search(&mut self) {
         self.search = Some(search::State::default());
-        self.file_search.open(oid)
+    }
+
+    pub fn restart_file_search(&mut self, oid: Option<Oid>) -> Option<file_search::Work> {
+        let query = self.search.as_ref()?.query().to_owned();
+        self.file_search.open_with_query(oid, query)
     }
 
     pub fn close_file_search(&mut self) {
         self.search = None;
+        self.search_scope = None;
         self.file_search.close();
+        self.commit_search.clear();
+    }
+
+    pub fn reset_search_results(&mut self) {
+        if let Some(search) = &mut self.search {
+            search.reset_results();
+        }
+        self.file_search.close();
+        self.commit_search.clear();
     }
 
     pub fn file_search_is_open(&self) -> bool {
@@ -122,17 +136,32 @@ impl State {
         self.search.as_mut()
     }
 
-    pub(super) fn file_search_view<'a>(&'a self, t: &'a Tokens) -> Element<'a, Message> {
+    pub(super) fn file_search_view<'a>(
+        &'a self,
+        t: &'a Tokens,
+        scope: String,
+    ) -> Element<'a, Message> {
         let Some(search) = self.search.as_ref() else {
             return widgets::empty_hint(t, "file search is closed");
         };
         search
             .view(
                 t,
-                "file name or path…",
-                "files",
-                self.file_search.status_text(),
-                |index, _selected| {
+                search::View {
+                    mode: search::Mode::Files,
+                    scope,
+                    status: Some(
+                        self.file_search
+                            .status_text()
+                            .unwrap_or("no files match")
+                            .into(),
+                    ),
+                    error: self.file_search.error(),
+                    truncated: false,
+                    height: search::row_height(t),
+                    locating: false,
+                },
+                |index, ready| {
                     let label = self.file_search.label_for_hit(index).unwrap_or_default();
                     let marks = self.file_search.marks_for_hit(index).unwrap_or_default();
                     // A long path loses folders at the front: the file name
@@ -146,14 +175,22 @@ impl State {
                     for (i, ch) in shown.chars().enumerate() {
                         let marked = (skipped == 0 || i > 0) && marks.contains(&(i + skipped));
                         if marked != run_marked && !run.is_empty() {
-                            let color = if run_marked { t.accent() } else { t.fg };
+                            let color = match (ready, run_marked) {
+                                (false, _) => t.dim,
+                                (true, true) => t.accent(),
+                                (true, false) => t.fg,
+                            };
                             line = line.push(colored(t, std::mem::take(&mut run), color));
                         }
                         run_marked = marked;
                         run.push(ch);
                     }
                     if !run.is_empty() {
-                        let color = if run_marked { t.accent() } else { t.fg };
+                        let color = match (ready, run_marked) {
+                            (false, _) => t.dim,
+                            (true, true) => t.accent(),
+                            (true, false) => t.fg,
+                        };
                         line = line.push(colored(t, run, color));
                     }
                     if skipped == 0 {

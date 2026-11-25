@@ -177,11 +177,32 @@ impl Repository {
         std::fs::write(&file, out)?;
         Ok(())
     }
+    /// Find commits by literal message or hash prefix within a plain history.
+    /// Returns up to `COMMIT_SEARCH_LIMIT` hits plus one to flag truncation.
+    pub async fn search_commits(
+        &self,
+        scope: &LogQuery,
+        term: &str,
+        cancel: crate::CancellationToken,
+    ) -> Result<Vec<Commit>> {
+        self.cli.search_commits(scope, term, cancel).await
+    }
     /// Row of `oid` in the history `query` lists (0 = newest), found by
     /// reading commit ids until it comes up; `None` when it is not in that
     /// history. Limit, skip and filters of `query` are ignored.
     pub async fn log_position(&self, query: &LogQuery, oid: &Oid) -> Result<Option<usize>> {
-        self.cli.log_position(query, oid.as_str()).await
+        self.cli.log_position(query, oid.as_str(), None).await
+    }
+    /// Like log_position, with cancellation while walking the selected history.
+    pub async fn log_position_cancellable(
+        &self,
+        query: &LogQuery,
+        oid: &Oid,
+        cancel: crate::CancellationToken,
+    ) -> Result<Option<usize>> {
+        self.cli
+            .log_position(query, oid.as_str(), Some(cancel))
+            .await
     }
     /// Checks out a commit without a branch (detached HEAD).
     pub async fn checkout_detached(&self, rev: &str) -> Result<()> {

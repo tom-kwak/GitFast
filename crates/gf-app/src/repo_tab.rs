@@ -369,6 +369,8 @@ pub struct Snapshot {
     pub history: Arc<History>,
     /// The refs the history was loaded for (see [`history_key`]).
     pub(crate) history_key: u64,
+    /// Which scope produced the current main graph.
+    pub(crate) history_all_branches: bool,
     /// How many commits the history was loaded for.
     pub(crate) history_limit: usize,
     /// `+added −removed` per file for the working tree list.
@@ -710,6 +712,7 @@ impl Snapshot {
             };
             snap.history = Arc::new(loaded.map_err(err)?);
             snap.history_key = key;
+            snap.history_all_branches = all_branches;
             snap.history_limit = history_limit;
         }
         snap.loaded = Parts {
