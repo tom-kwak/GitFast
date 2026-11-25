@@ -46,6 +46,7 @@ runs is shown, and anything it does not cover can be typed on its `gf ❯` line.
 - **History**: a commit graph drawn in text, with branch and tag labels.
   Lines to parents more than 50 rows below are cut into arrows (`↓`, `↑N`),
   so the graph stays narrow. `⌘F` lists only the commits that changed a file.
+  Drag the divider under the commit list to resize it; double-click resets it.
 - **Working tree**: stage files, hunks or single lines; stage, stash or
   discard several files at once. `⌘↩` commits, and the commit box can amend
   the last commit.
@@ -148,7 +149,9 @@ main ← 3 to merge · 3 new
   (`new`), or `all merged`.
 - One word gives the tree's state: `EDITING` (files changed in the last
   2 minutes), `UNCOMMITTED`, `READY`, `MERGED`, `BEHIND`, `CLEAN`, or
-  `CONFLICT` / `MISSING`.
+  `CONFLICT` / `MISSING`. `MERGED` means commits made on the branch reached
+  the base, also by squash, rebase merge or cherry-pick; bringing the base in
+  alone does not count.
 - Below it: uncommitted files, `⚠ n shared` when other worktrees change the
   same files, and the upstream distance (`↑2 ↓1`, `⊘` when never pushed) with
   the last commit.
