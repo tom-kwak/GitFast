@@ -136,11 +136,16 @@ pub enum OpKind {
     DeleteBranches(PathBuf),
     /// Close the tabs of these trees once removed.
     RemoveWorktrees(Vec<PathBuf>),
-    /// Open the new tree in a tab when `open`.
+    /// Open the new tree in a tab when `open`; then copy the files
+    /// `.worktreeinclude` lists into it when `include`.
     AddWorktree {
         path: PathBuf,
         open: bool,
+        include: bool,
     },
+    /// Copying `.worktreeinclude` files into a new tree: it runs after the
+    /// tree opens, so the add never waits on the walk of ignored files.
+    CopyIncluded,
     Commit,
     Fetch,
     Push {

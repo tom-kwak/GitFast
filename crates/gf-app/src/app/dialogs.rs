@@ -1046,19 +1046,14 @@ impl App {
                 let include = self.settings.worktrees.copy_included;
                 self.op(
                     format!("add worktree {branch}"),
-                    OpKind::AddWorktree { path, open },
+                    OpKind::AddWorktree {
+                        path,
+                        open,
+                        include,
+                    },
                     move |r| async move {
                         r.add_worktree(&folder, &branch, new_branch, base.as_deref())
-                            .await?;
-                        if include {
-                            // The tree is there either way: a file that could
-                            // not be copied is in the command log, not a
-                            // failed add.
-                            if let Err(e) = r.copy_included(&folder).await {
-                                tracing::warn!("copying .worktreeinclude files: {e}");
-                            }
-                        }
-                        Ok(())
+                            .await
                     },
                 )
             }

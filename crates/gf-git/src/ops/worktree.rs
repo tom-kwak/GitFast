@@ -404,7 +404,7 @@ pub struct IncludedCopy {
 }
 
 impl IncludedCopy {
-    /// What happened, one line per file, for the command log.
+    /// The files that are there, one line each, for the command log.
     pub fn lines(&self) -> Vec<String> {
         let mut lines: Vec<String> = self
             .copied
@@ -415,16 +415,19 @@ impl IncludedCopy {
                     .iter()
                     .map(|p| format!("kept {}: already in the worktree", p.display())),
             )
-            .chain(
-                self.failed
-                    .iter()
-                    .map(|(p, e)| format!("could not copy {}: {e}", p.display())),
-            )
             .collect();
-        if lines.is_empty() && self.listed {
+        if lines.is_empty() && self.failed.is_empty() && self.listed {
             lines.push(format!("{INCLUDE_FILE} matched no ignored file"));
         }
         lines
+    }
+
+    /// The files that could not be copied, one line each with the reason.
+    pub fn failure_lines(&self) -> Vec<String> {
+        self.failed
+            .iter()
+            .map(|(p, e)| format!("could not copy {}: {e}", p.display()))
+            .collect()
     }
 }
 
@@ -797,13 +800,28 @@ impl WorktreeOps for CliBackend {
             .await
             .map_err(|e| GfError::Other(format!("copying {INCLUDE_FILE} files: {e}")))?;
         copy.listed = true;
-        self.runner().report_in_process(
-            Some(self.handle().id),
-            vec!["gf".into(), INCLUDE_FILE.into(), dest.display().to_string()],
-            &copy.lines(),
-            i32::from(!copy.failed.is_empty()),
-            started.elapsed(),
-        );
+        // Two entries, so the files that are there do not read as errors
+        // next to the ones that failed.
+        let argv = || vec!["gf".into(), INCLUDE_FILE.into(), dest.display().to_string()];
+        let (lines, failures) = (copy.lines(), copy.failure_lines());
+        if !lines.is_empty() {
+            self.runner().report_in_process(
+                Some(self.handle().id),
+                argv(),
+                &lines,
+                0,
+                started.elapsed(),
+            );
+        }
+        if !failures.is_empty() {
+            self.runner().report_in_process(
+                Some(self.handle().id),
+                argv(),
+                &failures,
+                1,
+                started.elapsed(),
+            );
+        }
         Ok(copy)
     }
 }
@@ -868,12 +886,15 @@ mod tests {
         };
         assert_eq!(
             copy.lines(),
-            vec![
-                "copied .env",
-                "kept b: already in the worktree",
-                "could not copy c: denied"
-            ]
+            vec!["copied .env", "kept b: already in the worktree"]
         );
+        assert_eq!(copy.failure_lines(), vec!["could not copy c: denied"]);
+        let only_failed = IncludedCopy {
+            listed: true,
+            failed: vec![("c".into(), "denied".into())],
+            ..IncludedCopy::default()
+        };
+        assert!(only_failed.lines().is_empty(), "not 'matched nothing'");
         let none = IncludedCopy {
             listed: true,
             ..IncludedCopy::default()
