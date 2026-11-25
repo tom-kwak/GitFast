@@ -4116,6 +4116,67 @@ async fn dragging_the_refs_divider_resizes_the_refs_panel_and_remembers_it() {
     );
 }
 
+#[tokio::test]
+async fn dragging_the_history_divider_resizes_history_and_remembers_it() {
+    let mut ui = Ui::open().await;
+    ui.settle();
+    // The divider runs across the main area between HISTORY and the
+    // commit's changes: scan down the middle for where a press starts it.
+    let x = WINDOW.width * 0.7;
+    let y = (60..WINDOW.height as i32)
+        .map(|y| y as f32)
+        .find(|&y| {
+            ui.press(Point::new(x, y), mouse::Button::Left)
+                .iter()
+                .any(|m| matches!(m, Message::ResizeHistoryStart))
+        })
+        .expect("the history divider");
+    let before = ui.app.settings.appearance.history_share;
+    let fx = ui
+        .drag_through(Point::new(x, y), Point::new(x, y + 80.0))
+        .await;
+    let after = ui.app.settings.appearance.history_share;
+    assert!(after > before, "{before} → {after}: {fx:?}");
+    let saved = gf_config::Settings::load(&ui.app.paths.settings_file()).expect("saved");
+    assert!((saved.appearance.history_share - after).abs() < f32::EPSILON);
+
+    // A double-click puts it back.
+    ui.settle();
+    // A press soon after the drag counts as its second click (a reset),
+    // which marks the divider just as well.
+    let moved = (60..WINDOW.height as i32)
+        .map(|y| y as f32)
+        .find(|&y| {
+            ui.press(Point::new(x, y), mouse::Button::Left)
+                .iter()
+                .any(|m| matches!(m, Message::ResizeHistoryStart | Message::ResizeHistoryReset))
+        })
+        .expect("the moved divider");
+    assert!(moved > y, "the divider moved down: {y} → {moved}");
+    let at = Point::new(x, moved);
+    let messages = {
+        let mut sim = ui.simulator();
+        sim.point_at(at);
+        let click = [
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ];
+        sim.simulate(
+            std::iter::once(iced::Event::Mouse(mouse::Event::CursorMoved {
+                position: at,
+            }))
+            .chain(click.clone())
+            .chain(click),
+        );
+        sim.into_messages().collect()
+    };
+    let _ = ui.run(messages, false).await;
+    assert!(
+        (ui.app.settings.appearance.history_share - gf_config::DEFAULT_HISTORY_SHARE).abs()
+            < f32::EPSILON
+    );
+}
+
 // Fast checks for buttons the sweep found doing nothing (these run with
 // every `cargo test`; the sweeps above are `--ignored`).
 

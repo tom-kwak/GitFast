@@ -59,6 +59,9 @@ pub struct AppearanceSettings {
     /// Width of the refs panel (left), in character columns; the same in
     /// REFS and WORKTREES. Dragged with the divider.
     pub refs_cols: f32,
+    /// Share of the HISTORY mode's height the commit list takes; the
+    /// commit's changes get the rest. Dragged with the divider.
+    pub history_share: f32,
     /// Directory tree in the working tree's changes list.
     pub working_tree_dirs: bool,
     /// Directory tree in the history commit's file list.
@@ -73,6 +76,9 @@ pub const DEFAULT_LIST_COLS: f32 = 34.0;
 /// Default width of the refs panel (character columns).
 pub const DEFAULT_REFS_COLS: f32 = 36.0;
 
+/// Default share of the HISTORY mode's height the commit list takes.
+pub const DEFAULT_HISTORY_SHARE: f32 = 0.4;
+
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
@@ -83,6 +89,7 @@ impl Default for AppearanceSettings {
             show_history: true,
             list_cols: DEFAULT_LIST_COLS,
             refs_cols: DEFAULT_REFS_COLS,
+            history_share: DEFAULT_HISTORY_SHARE,
             working_tree_dirs: false,
             history_file_dirs: true,
             worktrees_view: false,
