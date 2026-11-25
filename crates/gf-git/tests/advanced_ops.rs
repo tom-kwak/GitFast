@@ -616,3 +616,156 @@ async fn reset_modes_treat_changes_differently() {
         "one\n"
     );
 }
+
+/// What a tree's card says of where its work stands, as the worktrees view
+/// decides it from a clean tree's status.
+fn standing(s: &gf_git::WorktreeStatus) -> &'static str {
+    if s.merged() {
+        "merged"
+    } else if s.ahead_of_base > 0 {
+        "ready"
+    } else if s.behind_base > 0 {
+        "behind"
+    } else {
+        "clean"
+    }
+}
+
+/// A tree on `topic` made from main, `act` run on (main repo, tree), then
+/// how it stands against main.
+async fn standing_after(act: impl FnOnce(&TestRepo, &Path)) -> (&'static str, u32) {
+    let repo = TestRepo::new();
+    repo.git(&["branch", "-M", "main"]);
+    repo.write("a.txt", "a\n");
+    repo.commit_all("a");
+    let r = open(&repo).await;
+    let extra = tempfile::tempdir().unwrap();
+    let wt = extra.path().join("wt");
+    r.add_worktree(&wt, "topic", true, Some("main"))
+        .await
+        .unwrap();
+    act(&repo, &wt);
+    let s = r.worktree_status(&wt, Some("main")).await.unwrap();
+    assert!(s.is_clean(), "{s:?}");
+    (standing(&s), s.ahead_of_base)
+}
+
+fn in_tree(repo: &TestRepo, wt: &Path, args: &[&str]) {
+    let out = repo.command().current_dir(wt).args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn main_moves(repo: &TestRepo, file: &str) {
+    repo.write(file, "m\n");
+    repo.commit_all(file);
+}
+
+fn tree_commits(repo: &TestRepo, wt: &Path, file: &str) {
+    std::fs::write(wt.join(file), "w\n").unwrap();
+    in_tree(repo, wt, &["add", file]);
+    in_tree(repo, wt, &["commit", "-qm", file]);
+}
+
+#[tokio::test]
+async fn taking_in_the_base_is_not_work_that_got_merged() {
+    // Brought up to date without a commit of its own: not merged.
+    let ff = standing_after(|r, wt| {
+        main_moves(r, "m1");
+        in_tree(r, wt, &["merge", "-q", "main"]);
+    });
+    assert_eq!(ff.await, ("clean", 0), "fast-forward update");
+    let rebased = standing_after(|r, wt| {
+        main_moves(r, "m1");
+        in_tree(r, wt, &["rebase", "-q", "main"]);
+    });
+    assert_eq!(rebased.await, ("clean", 0), "rebase update");
+    let reset = standing_after(|r, wt| {
+        main_moves(r, "m1");
+        in_tree(r, wt, &["reset", "-q", "--hard", "main"]);
+    });
+    assert_eq!(reset.await, ("clean", 0), "reset to main");
+    // The merge commit that brought main in is not work to merge back.
+    let no_ff = standing_after(|r, wt| {
+        main_moves(r, "m1");
+        in_tree(r, wt, &["merge", "-q", "--no-ff", "-m", "up", "main"]);
+    });
+    assert_eq!(no_ff.await, ("clean", 0), "--no-ff update");
+    let work_and_update = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        main_moves(r, "m1");
+        in_tree(r, wt, &["merge", "-q", "-m", "up", "main"]);
+    });
+    assert_eq!(work_and_update.await, ("ready", 1), "only w1 to merge");
+    // Work thrown away never reached main.
+    let discarded = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        in_tree(r, wt, &["reset", "-q", "--hard", "main"]);
+    });
+    assert_eq!(discarded.await, ("clean", 0), "work discarded");
+}
+
+#[tokio::test]
+async fn work_that_reached_the_base_is_merged_however_it_got_there() {
+    let merged = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        r.git(&["merge", "-q", "--no-ff", "-m", "mg", "topic"]);
+        main_moves(r, "m2");
+    });
+    assert_eq!(merged.await, ("merged", 0), "--no-ff merge");
+    let ff = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        r.git(&["merge", "-q", "topic"]);
+    });
+    assert_eq!(ff.await, ("merged", 0), "fast-forwarded into main");
+    let rebased_then_merged = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        main_moves(r, "m1");
+        in_tree(r, wt, &["rebase", "-q", "main"]);
+        r.git(&["merge", "-q", "--no-ff", "-m", "mg", "topic"]);
+    });
+    assert_eq!(rebased_then_merged.await, ("merged", 0), "rebased first");
+    let amended = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        in_tree(r, wt, &["commit", "-q", "--amend", "-m", "w1b"]);
+        r.git(&["merge", "-q", "topic"]);
+    });
+    assert_eq!(amended.await, ("merged", 0), "amended first");
+    let squashed = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        tree_commits(r, wt, "w2");
+        main_moves(r, "m1");
+        r.git(&["merge", "-q", "--squash", "topic"]);
+        r.git(&["commit", "-qm", "squash topic"]);
+    });
+    assert_eq!(squashed.await, ("merged", 2), "squash merge");
+    let picked = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        main_moves(r, "m1");
+        r.git(&["cherry-pick", "topic"]);
+    });
+    assert_eq!(picked.await, ("merged", 1), "rebase merge / cherry-pick");
+    // Main changed the same file again after the squash: not told apart
+    // from work still to merge.
+    let changed_after = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        r.git(&["merge", "-q", "--squash", "topic"]);
+        r.git(&["commit", "-qm", "squash topic"]);
+        r.write("w1", "later\n");
+        r.commit_all("later");
+    });
+    assert_eq!(
+        changed_after.await,
+        ("ready", 1),
+        "changed after the squash"
+    );
+    let more_work = standing_after(|r, wt| {
+        tree_commits(r, wt, "w1");
+        r.git(&["merge", "-q", "--no-ff", "-m", "mg", "topic"]);
+        tree_commits(r, wt, "w2");
+    });
+    assert_eq!(more_work.await, ("ready", 1), "work after the merge");
+}

@@ -79,16 +79,21 @@ pub struct WorktreeStatus {
     /// nearest of the usual branches, a guess the user can correct.
     pub base_guessed: bool,
     /// Commits on HEAD that the base does not have: the work done here.
+    /// Merge commits are left out: bringing the base in is not work.
     pub ahead_of_base: u32,
     /// Commits on the base that HEAD does not have.
     pub behind_base: u32,
     /// Where HEAD left the base: comparing from here shows only the work
     /// done in this tree.
     pub merge_base: Option<Oid>,
-    /// The branch moved after it was created (its reflog has more than the
-    /// creation): it had work of its own, so being in the base means it
-    /// was merged, not that it is new.
-    pub had_work: bool,
+    /// A commit the branch made itself (see [`made_here`]) is in the base:
+    /// with nothing ahead, its work was merged. A branch that only took in
+    /// the base (fast-forwards, rebases that carried nothing, resets) or
+    /// whose commits were thrown away made nothing that got there.
+    pub work_in_base: bool,
+    /// Its commits are not in the base, but every file they change is the
+    /// same there as here: merged by squash, rebase or cherry-pick.
+    pub squashed: bool,
     pub last_commit: Option<LastCommit>,
     /// Newest modification time among the changed files: whether someone
     /// (an agent) is editing in this tree right now.
@@ -137,9 +142,15 @@ impl WorktreeStatus {
     }
 
     /// The branch had work of its own and all of it is in the base (merged,
-    /// or fast-forwarded into it): the tree can go.
+    /// fast-forwarded, or squashed into it): the tree can go.
     pub fn merged(&self) -> bool {
-        self.base.is_some() && self.ahead_of_base == 0 && self.had_work
+        self.base.is_some() && ((self.ahead_of_base == 0 && self.work_in_base) || self.squashed)
+    }
+
+    /// Nothing here the base lacks: no commit of its own outside it, or
+    /// only ones whose changes it has. Removing the branch loses nothing.
+    pub fn all_in_base(&self) -> bool {
+        self.ahead_of_base == 0 || self.squashed
     }
 }
 
@@ -185,11 +196,54 @@ pub fn parse_last_commit(out: &[u8]) -> Option<LastCommit> {
     })
 }
 
+/// Parses `git reflog show --format=%H%x00%gs`: `(new id, message)`,
+/// newest first, without entries that have no message.
+pub fn parse_reflog(out: &[u8]) -> Vec<(String, String)> {
+    String::from_utf8_lossy(out)
+        .lines()
+        .filter_map(|l| {
+            let (id, message) = l.split_once('\0')?;
+            (!message.is_empty()).then(|| (id.to_owned(), message.to_owned()))
+        })
+        .collect()
+}
+
+/// [`WorktreeStatus::squashed`]: none of the files the branch's commits
+/// change (`committed`) is among those that differ between the base and
+/// HEAD.
+pub(crate) fn squashed(committed: &[PathBuf], differ: &[PathBuf]) -> bool {
+    let differ: std::collections::HashSet<&PathBuf> = differ.iter().collect();
+    !committed.is_empty() && !committed.iter().any(|p| differ.contains(p))
+}
+
 /// Parses `git rev-list --left-right --count A...B`: (only in A, only in B).
 pub fn parse_left_right(out: &[u8]) -> Option<(u32, u32)> {
     let text = String::from_utf8_lossy(out);
     let mut n = text.split_whitespace().map(str::parse);
     Some((n.next()?.ok()?, n.next()?.ok()?))
+}
+
+/// How many of the newest commits [`made_here`] lists are looked for in the
+/// base: enough for any branch a tree is made for.
+pub(crate) const MADE_HERE_CHECKED: usize = 64;
+
+/// Commits a branch made itself, newest first, from its reflog (`(new id,
+/// message)`, newest first): commits (with amends, merges it concluded),
+/// cherry-picks, reverts, and the tip of a rebase that carried commits
+/// onto its target. Fast-forwards, merges from the base, resets and
+/// rebases that carried nothing only took in what was already there.
+pub(crate) fn made_here(reflog: &[(String, String)]) -> impl Iterator<Item = &str> {
+    reflog.iter().filter_map(|(to, message)| {
+        let own = ["commit", "cherry-pick", "revert"]
+            .iter()
+            .any(|p| message.starts_with(p))
+            || (message.starts_with("rebase")
+                && message.contains("(finish)")
+                && message
+                    .rsplit_once(" onto ")
+                    .is_some_and(|(_, onto)| onto.trim() != to));
+        own.then_some(to.as_str())
+    })
 }
 
 /// Branches work usually goes into, tried after the default base when
@@ -413,23 +467,22 @@ impl WorktreeOps for CliBackend {
         let mut s = status_counts(&report);
         s.last_commit = last.as_deref().and_then(parse_last_commit);
         // The branch's reflog, newest first: its creation is the last line.
-        let reflog: Vec<String> = match report.head.branch.as_deref() {
+        let reflog: Vec<(String, String)> = match report.head.branch.as_deref() {
             Some(branch) => {
                 let full = format!("refs/heads/{branch}");
-                let args = ["reflog", "show", "--format=%gs", "--end-of-options", &full];
-                self.read_in(path, &args).await.map_or_else(Vec::new, |o| {
-                    String::from_utf8_lossy(&o)
-                        .lines()
-                        .filter(|l| !l.is_empty())
-                        .map(str::to_owned)
-                        .collect()
-                })
+                let args = [
+                    "reflog",
+                    "show",
+                    "--format=%H%x00%gs",
+                    "--end-of-options",
+                    &full,
+                ];
+                self.read_in(path, &args)
+                    .await
+                    .map_or_else(Vec::new, |o| parse_reflog(&o))
             }
             None => Vec::new(),
         };
-        // It moved after it was made: it had work of its own, so being in
-        // the base means it was merged, not that it is new.
-        s.had_work = reflog.len() > 1;
         // The default base itself goes nowhere; nor does a tree without
         // commits.
         let on_default = base.is_some_and(|b| {
@@ -438,8 +491,8 @@ impl WorktreeOps for CliBackend {
         let (tree_base, guessed) = match report.head.branch.as_deref() {
             _ if on_default || s.last_commit.is_none() => (None, false),
             Some(branch) => {
-                self.base_of(path, branch, reflog.last().map(String::as_str), base)
-                    .await
+                let created = reflog.last().map(|(_, m)| m.as_str());
+                self.base_of(path, branch, created, base).await
             }
             None => (base.map(str::to_owned), true),
         };
@@ -457,7 +510,30 @@ impl WorktreeOps for CliBackend {
             if let Some((behind, ahead)) = count.as_deref().and_then(parse_left_right) {
                 s.behind_base = behind;
                 s.ahead_of_base = ahead;
+                if ahead > 0 {
+                    // Without the merges that brought the base in.
+                    let range = format!("{base}..HEAD");
+                    let args = [
+                        "rev-list",
+                        "--count",
+                        "--no-merges",
+                        "--end-of-options",
+                        &range,
+                    ];
+                    if let Some(n) = self.line_in(path, &args).await.and_then(|l| l.parse().ok()) {
+                        s.ahead_of_base = n;
+                    }
+                }
                 s.merge_base = fork.and_then(|o| String::from_utf8_lossy(&o).trim().parse().ok());
+                if s.ahead_of_base == 0 {
+                    for id in made_here(&reflog).take(MADE_HERE_CHECKED) {
+                        let args = ["merge-base", "--is-ancestor", id, &base];
+                        if self.read_in(path, &args).await.is_some() {
+                            s.work_in_base = true;
+                            break;
+                        }
+                    }
+                }
                 s.base = Some(base);
                 s.base_guessed = guessed;
             }
@@ -482,6 +558,29 @@ impl WorktreeOps for CliBackend {
             }
             _ => Some(Vec::new()),
         };
+        // Its commits are not in the base, which moved on: did their
+        // changes get there another way (squash, rebase, cherry-pick)?
+        if let (Some(base), Some(paths)) = (&s.base, &committed)
+            && s.ahead_of_base > 0
+            && s.behind_base > 0
+            && !paths.is_empty()
+            && paths.len() <= TOUCHED_CAP
+        {
+            let args = [
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                "--no-ext-diff",
+                "--end-of-options",
+                base,
+                "HEAD",
+            ];
+            if let Some(out) = self.read_in(path, &args).await {
+                let differ = crate::ops::log::parse_tree_paths(&out);
+                s.squashed = squashed(paths, &differ);
+            }
+        }
         s.touched = committed.and_then(|c| touched(&report, c));
         let mut newest = None;
         for e in report
@@ -708,11 +807,51 @@ mod tests {
         s.base = Some("main".into());
         s.behind_base = 1;
         assert!(!s.merged(), "a fresh branch the base moved past");
-        s.had_work = true;
+        s.work_in_base = true;
         assert!(s.merged());
         s.behind_base = 0;
         assert!(s.merged(), "fast-forwarded into the base");
         s.ahead_of_base = 1;
         assert!(!s.merged(), "work not in main yet");
+        assert!(!s.all_in_base());
+        s.squashed = true;
+        assert!(s.merged() && s.all_in_base(), "squashed into main");
+    }
+
+    #[test]
+    fn made_here_keeps_commits_and_rebases_that_carried_work() {
+        let log = super::parse_reflog(
+            b"a1\0merge main: Fast-forward\n\
+              a2\0rebase (finish): refs/heads/t onto a2\n\
+              a3\0rebase -i (finish): refs/heads/t onto b9\n\
+              a4\0reset: moving to main\n\
+              a5\0commit (amend): w\n\
+              a6\0cherry-pick: x\n\
+              a7\0revert: y\n\
+              a8\0merge main: Merge made by the 'ort' strategy.\n\
+              a9\0gf: undo\n\
+              b0\0\n\
+              b1\0commit: w\n\
+              b2\0branch: Created from main\n",
+        );
+        assert_eq!(log.len(), 11, "the entry without a message is dropped");
+        assert_eq!(
+            log.last().map(|(_, m)| m.as_str()),
+            Some("branch: Created from main")
+        );
+        let own: Vec<&str> = super::made_here(&log).collect();
+        assert_eq!(own, ["a3", "a5", "a6", "a7", "b1"]);
+    }
+
+    #[test]
+    fn squashed_when_no_committed_file_differs_from_the_base() {
+        use std::path::PathBuf;
+        let p = |v: &[&str]| v.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert!(super::squashed(&p(&["b.rs", "a.rs"]), &p(&["c.rs"])));
+        assert!(!super::squashed(&p(&["b.rs", "a.rs"]), &p(&["a.rs"])));
+        assert!(
+            !super::squashed(&[], &[]),
+            "nothing committed, nothing squashed"
+        );
     }
 }

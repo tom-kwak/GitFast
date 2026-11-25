@@ -16,8 +16,8 @@ use super::gix_backend::{count, err, head_id, oid, resolve, text, unsupported};
 use super::gix_status::status_with;
 use crate::cli::parse::log::split_message;
 use crate::ops::worktree::{
-    ACTIVITY_SAMPLE, LastCommit, USUAL_BASES, WorktreeStatus, parse_created_from, status_counts,
-    touched,
+    ACTIVITY_SAMPLE, LastCommit, MADE_HERE_CHECKED, TOUCHED_CAP, USUAL_BASES, WorktreeStatus,
+    made_here, parse_created_from, status_counts, touched,
 };
 
 /// `git config --get <section>.<sub>.<key>`: the last value, trimmed;
@@ -108,9 +108,10 @@ fn base_of(
     )
 }
 
-/// `git reflog show --format=%gs refs/heads/<branch>`, newest first,
-/// without empty messages.
-fn branch_reflog(repo: &gix::Repository, branch: &str) -> Result<Vec<String>> {
+/// `git reflog show --format=%H%x00%gs refs/heads/<branch>` as
+/// [`parse_reflog`](crate::ops::worktree::parse_reflog) reads it: `(new
+/// id, message)`, newest first, without empty messages.
+fn branch_reflog(repo: &gix::Repository, branch: &str) -> Result<Vec<(String, String)>> {
     let Some(reference) = repo
         .try_find_reference(format!("refs/heads/{branch}").as_str())
         .map_err(err)?
@@ -126,7 +127,7 @@ fn branch_reflog(repo: &gix::Repository, branch: &str) -> Result<Vec<String>> {
         let line = line.map_err(err)?;
         let message = text(line.message.as_ref());
         if !message.is_empty() {
-            out.push(message);
+            out.push((line.new_oid.to_string(), message));
         }
     }
     Ok(out)
@@ -167,36 +168,61 @@ pub(super) fn worktree_status(path: &Path, base: Option<&str>) -> Result<Worktre
         Some(branch) => branch_reflog(&repo, branch)?,
         None => Vec::new(),
     };
-    s.had_work = reflog.len() > 1;
     let on_default = base.is_some_and(|b| {
         report.head.branch.as_deref() == Some(b) || report.head.upstream.as_deref() == Some(b)
     });
     let (tree_base, guessed) = match (report.head.branch.as_deref(), head) {
         (_, None) => (None, false),
         _ if on_default => (None, false),
-        (Some(branch), Some(head)) => {
-            base_of(&repo, head, branch, reflog.last().map(String::as_str), base)
-        }
+        (Some(branch), Some(head)) => base_of(
+            &repo,
+            head,
+            branch,
+            reflog.last().map(|(_, m)| m.as_str()),
+            base,
+        ),
         (None, Some(_)) => (base.map(str::to_owned), true),
     };
+    let mut base_id = None;
     if let (Some(base), Some(head)) = (tree_base, head)
         && let Some((behind, ahead)) = left_right(&repo, &base, head)
     {
-        s.behind_base = behind;
-        s.ahead_of_base = ahead;
         let other = resolve(&repo, &base)?;
+        s.behind_base = behind;
+        s.ahead_of_base = if ahead > 0 {
+            // Without the merges that brought the base in.
+            count_no_merges(&repo, head, other)?
+        } else {
+            0
+        };
         s.merge_base = repo
             .merge_base(other, head)
             .ok()
             .flatten()
             .map(|id| oid(id.detach()));
+        if s.ahead_of_base == 0 {
+            s.work_in_base = made_here(&reflog)
+                .take(MADE_HERE_CHECKED)
+                .filter_map(|id| ObjectId::from_hex(id.as_bytes()).ok())
+                .any(|id| is_ancestor(&repo, id, other));
+        }
         s.base = Some(base);
         s.base_guessed = guessed;
+        base_id = Some(other);
     }
     let committed = match (&s.merge_base, head, s.ahead_of_base) {
         (Some(fork), Some(head), 1..) => committed_paths(&repo, fork, head)?,
         _ => Vec::new(),
     };
+    // See the CLI's: changes of its commits that got into the base
+    // another way.
+    if let (Some(other), Some(head)) = (base_id, head)
+        && s.behind_base > 0
+        && !committed.is_empty()
+        && committed.len() <= TOUCHED_CAP
+    {
+        s.squashed = same_in_both(&repo, &committed, other, head)?;
+    }
     s.touched = touched(&report, committed);
     let mut newest: Option<SystemTime> = None;
     for e in report
@@ -211,6 +237,56 @@ pub(super) fn worktree_status(path: &Path, base: Option<&str>) -> Result<Worktre
     }
     s.last_activity = newest;
     Ok(s)
+}
+
+/// `git merge-base --is-ancestor <id> <of>`.
+fn is_ancestor(repo: &gix::Repository, id: ObjectId, of: ObjectId) -> bool {
+    id == of
+        || repo
+            .merge_base(id, of)
+            .is_ok_and(|base| base.is_some_and(|b| b.detach() == id))
+}
+
+/// `git rev-list --count --no-merges <tip> --not <hidden>`.
+fn count_no_merges(repo: &gix::Repository, tip: ObjectId, hidden: ObjectId) -> Result<u32> {
+    let mut n = 0u32;
+    for info in repo
+        .rev_walk([tip])
+        .with_hidden([hidden])
+        .all()
+        .map_err(err)?
+    {
+        if info.map_err(err)?.parent_ids.len() < 2 {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Every one of `paths` is the same in `a` and `b` (or missing from
+/// both): `git diff --name-only --no-renames a b` names none of them.
+fn same_in_both(
+    repo: &gix::Repository,
+    paths: &[std::path::PathBuf],
+    a: ObjectId,
+    b: ObjectId,
+) -> Result<bool> {
+    let tree = |id: ObjectId| -> Result<gix::Tree<'_>> {
+        repo.find_commit(id).map_err(err)?.tree().map_err(err)
+    };
+    let (a, b) = (tree(a)?, tree(b)?);
+    for path in paths {
+        let entry =
+            |t: &gix::Tree<'_>| -> Result<Option<(ObjectId, gix::object::tree::EntryMode)>> {
+                Ok(t.lookup_entry_by_path(path)
+                    .map_err(err)?
+                    .map(|e| (e.object_id(), e.mode())))
+            };
+        if entry(&a)? != entry(&b)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Files changed between `fork` and `head` (`git diff --name-only
