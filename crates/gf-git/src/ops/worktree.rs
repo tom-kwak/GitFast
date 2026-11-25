@@ -9,6 +9,7 @@ use gf_core::{GfError, Result};
 
 use crate::backend::{CliBackend, WorktreeOps};
 use crate::cli::parse::status::parse_status;
+use crate::{DIFF_LIMIT, RunOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
@@ -64,7 +65,7 @@ pub struct WorktreeStatus {
     pub staged: usize,
     /// Tracked files with unstaged changes.
     pub unstaged: usize,
-    /// Untracked files and folders (folders count once).
+    /// Untracked files.
     pub untracked: usize,
     pub conflicts: usize,
     /// Upstream short name and how far HEAD is ahead of / behind it.
@@ -98,19 +99,14 @@ pub struct WorktreeStatus {
     /// Newest modification time among the changed files: whether someone
     /// (an agent) is editing in this tree right now.
     pub last_activity: Option<SystemTime>,
-    /// Files the work here touches, sorted: changed by its commits since
-    /// [`Self::merge_base`] (renames as both paths) and changed, staged or
-    /// untracked now (an untracked folder ends in `/`). `None` when there
-    /// are more than [`TOUCHED_CAP`]: too many to compare usefully.
+    /// Sorted paths changed by pending commits (both paths of a rename)
+    /// or by uncommitted changes, including individual untracked files.
+    /// `None` when the committed paths could not be read.
     pub touched: Option<Vec<PathBuf>>,
 }
 
-/// Most files [`WorktreeStatus::touched`] lists.
-pub const TOUCHED_CAP: usize = 2000;
-
-/// [`WorktreeStatus::touched`]: `committed` and the uncommitted paths of
-/// `report`, sorted and once each.
-pub(crate) fn touched(report: &StatusReport, mut committed: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+/// Joins pending commits and uncommitted changes into sorted, unique paths.
+pub(crate) fn touched(report: &StatusReport, mut committed: Vec<PathBuf>) -> Vec<PathBuf> {
     for e in &report.entries {
         match e {
             StatusEntry::Ignored { .. } => {}
@@ -122,13 +118,10 @@ pub(crate) fn touched(report: &StatusReport, mut committed: Vec<PathBuf>) -> Opt
             }
             other => committed.push(other.path().clone()),
         }
-        if committed.len() > 2 * TOUCHED_CAP {
-            return None;
-        }
     }
     committed.sort_unstable();
     committed.dedup();
-    (committed.len() <= TOUCHED_CAP).then_some(committed)
+    committed
 }
 
 impl WorktreeStatus {
@@ -272,14 +265,19 @@ pub fn parse_created_from(subject: &str) -> Option<&str> {
 pub(crate) const ACTIVITY_SAMPLE: usize = 256;
 
 impl CliBackend {
-    /// Reads a command's stdout in `dir`; `None` when git fails.
+    /// Reads a command's stdout in `dir`, up to the byte limit used for
+    /// diffs. A failed or truncated read yields no paths.
     async fn read_in(&self, dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
         let cmd = self
             .command(args.iter().copied())
             .current_dir(dir)
             .read_only()
             .allow_failure();
-        let out = self.runner().run(&cmd).await.ok()?;
+        let opts = RunOptions {
+            max_stdout: Some(DIFF_LIMIT),
+            ..RunOptions::default()
+        };
+        let out = self.runner().run_with(&cmd, opts).await.ok()?;
         out.success().then_some(out.stdout)
     }
 
@@ -536,7 +534,7 @@ impl WorktreeOps for CliBackend {
             "--porcelain=v2",
             "-z",
             "--branch",
-            "--untracked-files=normal",
+            "--untracked-files=all",
         ];
         let log_args = ["log", "-1", "--format=%H%x00%ct%x00%s"];
         let (status, last) = tokio::join!(
@@ -647,7 +645,6 @@ impl WorktreeOps for CliBackend {
             && s.ahead_of_base > 0
             && s.behind_base > 0
             && !paths.is_empty()
-            && paths.len() <= TOUCHED_CAP
         {
             let args = [
                 "diff",
@@ -664,7 +661,12 @@ impl WorktreeOps for CliBackend {
                 s.squashed = squashed(paths, &differ);
             }
         }
-        s.touched = committed.and_then(|c| touched(&report, c));
+        s.touched = committed.map(|mut paths| {
+            if s.squashed {
+                paths.clear();
+            }
+            touched(&report, paths)
+        });
         let mut newest = None;
         for e in report
             .entries
@@ -907,13 +909,13 @@ mod tests {
     }
 
     #[test]
-    fn touched_joins_commits_and_changes_up_to_the_cap() {
+    fn touched_joins_commits_and_changes_without_a_file_count_limit() {
         use gf_core::model::{StatusEntry, StatusReport};
         use std::path::PathBuf;
         let report = StatusReport {
             entries: vec![
                 StatusEntry::Untracked {
-                    path: "new/".into(),
+                    path: "new/file".into(),
                 },
                 StatusEntry::Ignored {
                     path: "target/".into(),
@@ -924,12 +926,14 @@ mod tests {
         let committed = vec![PathBuf::from("b.rs"), PathBuf::from("a.rs")];
         assert_eq!(
             super::touched(&report, committed),
-            Some(vec!["a.rs".into(), "b.rs".into(), "new/".into()])
+            vec![
+                PathBuf::from("a.rs"),
+                PathBuf::from("b.rs"),
+                PathBuf::from("new/file")
+            ]
         );
-        let many = (0..=super::TOUCHED_CAP)
-            .map(|i| PathBuf::from(format!("f{i}")))
-            .collect();
-        assert_eq!(super::touched(&report, many), None, "past the cap");
+        let many = (0..2001).map(|i| PathBuf::from(format!("f{i}"))).collect();
+        assert_eq!(super::touched(&report, many).len(), 2002);
     }
 
     #[test]

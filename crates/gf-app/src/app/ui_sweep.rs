@@ -25,6 +25,7 @@ use crate::widgets::file_tree;
 mod gitlab_e2e;
 mod profile;
 mod sim;
+mod worktree_overlap;
 
 const WINDOW: Size = Size::new(1280.0, 820.0);
 
