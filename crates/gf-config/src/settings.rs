@@ -7,10 +7,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gf_core::{GfError, Result};
+use gf_hosting::Account;
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of remembered recent repositories.
 const MAX_RECENT: usize = 100;
+
+/// Default parent folder for repositories cloned from the open window.
+pub const DEFAULT_CLONE_ROOT: &str = "~/gf-workspace";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -20,24 +24,13 @@ pub struct Settings {
     pub git: GitSettings,
     pub repos: RepoSettings,
     pub worktrees: WorktreeSettings,
-    /// Git servers logged in from the settings screen (newest last). Only
+    /// HTTPS accounts added in gf. Only
     /// who and where: the token lives in git's credential helper.
     pub accounts: Vec<Account>,
     /// Hosting service picked by hand for a host (`git.example.com` →
     /// `gitlab`), where its name does not tell. Guessed from the name
     /// otherwise.
     pub services: BTreeMap<String, String>,
-}
-
-/// A login to a git server over HTTPS. The token is not here: git's
-/// credential helper (macOS Keychain, Windows Credential Manager …) keeps it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Account {
-    /// `https` (or `http` for a server without TLS).
-    pub protocol: String,
-    /// Host name, with `:port` when not the default one.
-    pub host: String,
-    pub username: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,6 +123,8 @@ pub struct GitSettings {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepoSettings {
+    /// Parent folder for new clones. An unset value uses [`DEFAULT_CLONE_ROOT`].
+    pub clone_root: Option<PathBuf>,
     /// Most recently opened first.
     pub recent: Vec<PathBuf>,
     /// Tabs open when the app last quit, restored on start.
@@ -198,12 +193,11 @@ impl Settings {
         Ok(())
     }
 
-    /// Adds or replaces the login to `account.host` (one per server and
-    /// protocol: logging in again as someone else replaces it).
+    /// Remembers each user separately and keeps the order when a token is updated.
     pub fn remember_account(&mut self, account: Account) {
-        self.accounts
-            .retain(|a| !(a.host == account.host && a.protocol == account.protocol));
-        self.accounts.push(account);
+        if !self.accounts.contains(&account) {
+            self.accounts.push(account);
+        }
     }
 
     /// Remembers the hosting service picked for `host`; `None` forgets it
@@ -251,6 +245,7 @@ mod tests {
         s.git.executable = Some("/opt/git/bin/git".into());
         s.repos.open = vec!["/a".into(), "/b".into()];
         s.repos.active = Some(1);
+        s.repos.clone_root = Some("/clones".into());
         s.worktrees.editor = "cursor".into();
         s.worktrees.root = Some("/w".into());
         s.worktrees.copy_included = false;
@@ -261,6 +256,35 @@ mod tests {
         }];
         s.save(&path).expect("save");
         assert_eq!(Settings::load(&path).expect("load"), s);
+    }
+
+    #[test]
+    fn existing_accounts_and_provider_overrides_load_unchanged() {
+        let settings: Settings = toml::from_str(
+            r#"
+[[accounts]]
+protocol = "https"
+host = "git.example.com:8443"
+username = "personal"
+
+[[accounts]]
+protocol = "https"
+host = "git.example.com:8443"
+username = "work"
+
+[services]
+"git.example.com:8443" = "gitlab"
+"future.example.com" = "future-provider"
+"#,
+        )
+        .expect("existing settings");
+        assert_eq!(settings.accounts.len(), 2);
+        assert_eq!(settings.accounts[0].protocol, "https");
+        assert_eq!(settings.accounts[0].host, "git.example.com:8443");
+        assert_eq!(settings.accounts[0].username, "personal");
+        assert_eq!(settings.accounts[1].username, "work");
+        assert_eq!(settings.services["git.example.com:8443"], "gitlab");
+        assert_eq!(settings.services["future.example.com"], "future-provider");
     }
 
     #[test]
@@ -277,6 +301,7 @@ mod tests {
         assert!(s.appearance.show_history);
         assert!(!s.appearance.show_command_log);
         assert_eq!(s.appearance.theme, "gf-dark");
+        assert_eq!(s.repos.clone_root, None);
         // Files from before the setting existed copy included files.
         assert!(s.worktrees.copy_included);
     }
@@ -309,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn logging_in_again_replaces_the_account_for_that_server() {
+    fn accounts_for_the_same_server_are_distinct_and_updates_keep_their_order() {
         let account = |host: &str, user: &str| Account {
             protocol: "https".into(),
             host: host.into(),
@@ -319,9 +344,14 @@ mod tests {
         s.remember_account(account("github.com", "a"));
         s.remember_account(account("gitlab.com", "a"));
         s.remember_account(account("github.com", "b"));
+        s.remember_account(account("github.com", "a"));
         assert_eq!(
             s.accounts,
-            vec![account("gitlab.com", "a"), account("github.com", "b")]
+            vec![
+                account("github.com", "a"),
+                account("gitlab.com", "a"),
+                account("github.com", "b"),
+            ]
         );
     }
 

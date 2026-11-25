@@ -233,15 +233,14 @@ pub enum Message {
     Switcher(tab_switcher::Message),
     TabList(tab_list::Message),
     Settings(settings_view::Message),
-    /// A login was saved in git's credential helper (its name), or not;
-    /// then run what the server refused before, if anything.
+    /// A login was saved in Git's credential helper, with the result of the read check.
     LoggedIn(
-        gf_config::Account,
-        Result<settings::LoginSaved, String>,
+        gf_hosting::Account,
+        Result<settings::LoginCheck, String>,
         Option<Box<settings::Retry>>,
     ),
     /// A login was removed from git's credential helper, or not.
-    LoggedOut(gf_config::Account, Result<(), String>),
+    LoggedOut(gf_hosting::Account, Result<(), String>),
     /// Something the settings screen reads in the background.
     SettingsProbed(settings::Probed),
     /// Show the open-repository window (⌘O, `+ open`).
@@ -740,10 +739,7 @@ impl App {
             Message::Settings(m) => self.on_settings(m),
             Message::LoggedIn(account, result, retry) => self.logged_in(account, result, retry),
             Message::LoggedOut(account, result) => self.logged_out(account, result),
-            Message::SettingsProbed(probed) => {
-                self.settings_probed(probed);
-                Task::none()
-            }
+            Message::SettingsProbed(probed) => self.settings_probed(probed),
             Message::CodeDialog(m) => self.on_code_view(m),
             Message::PathRevealed(result) => {
                 if let Err(e) = result {
@@ -1018,6 +1014,7 @@ impl App {
                     return self.on_dialog_outcome(outcome);
                 }
                 self.sync_login_dialog(before.first().map(String::as_str));
+                self.sync_clone_destination(before.first().map(String::as_str));
                 let Some(dialog) = self.dialog.as_ref() else {
                     return Task::none();
                 };
@@ -1030,6 +1027,13 @@ impl App {
                     .iter()
                     .zip(&before)
                     .position(|(f, old)| f.value != *old)
+                    .map(|i| {
+                        if i == 0 && matches!(dialog.purpose, dialogs::Purpose::LogIn(_)) {
+                            1
+                        } else {
+                            i
+                        }
+                    })
                     .and_then(dialog::field_id)
                     .map_or_else(Task::none, |id| {
                         Task::batch([operation::focus(id), operation::move_cursor_to_end(id)])

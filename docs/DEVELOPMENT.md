@@ -52,11 +52,13 @@ cargo test --workspace
 |---|---|---|
 | `gf-core` | 도메인 모델(`model::{Commit, Oid, Branch, StatusEntry, FileDiff…}`), `GfError`/`Result`, 이벤트 버스(`CoreEvent`, `EventBus`) | UI 의존성 금지 |
 | `gf-git` | git 백엔드. `backend/`는 영역별 인터페이스(trait)와 `CliBackend`, `backend/gix_*.rs`는 gix 구현, `ops/*.rs`는 영역별 타입·파서·CLI 구현, `routes.rs`는 명령별 백엔드 선택, `cli/`는 실행기(`GitRunner`)와 porcelain 파서 | 명령별 백엔드는 [GIX_MIGRATION.md](GIX_MIGRATION.md) 표를 따릅니다. 모든 명령은 CLI 구현을 가집니다 |
-| `gf-config` | 설정(`Settings`), 경로(`AppPaths`) | serde + toml |
+| `gf-hosting` | 공통 계정 모델, 제공자 식별과 토큰 설정 인터페이스 | 개별 제공자 크레이트나 UI에 의존하지 않습니다 |
+| `gf-hosting-{github,gitlab,bitbucket,gitea,azure}` | 호스트 판별, 토큰 생성 주소와 권한 등 제공자별 정책 | `gf-hosting`의 인터페이스를 구현합니다. 새 제공자는 `gf-app/src/hosting.rs`에서 등록합니다 |
+| `gf-config` | 설정(`Settings`), 경로(`AppPaths`), 호스팅 계정 메타데이터 저장 | serde + toml. 토큰은 Git credential helper가 보관합니다 |
 | `gf-watch` | 파일 감시 → `CoreEvent` | |
 | `gf-test-support` | 테스트용 임시 저장소 | |
 | `gf-app` | iced 0.14 앱(바이너리) | 코어를 부르기만 하고 git 로직을 넣지 않습니다 |
-| `gf-commands`, `gf-flow`, `gf-hosting*`, `gf-auth` | M5~M7용 자리(현재 비어 있음) | 사용 시작 시 루트 `Cargo.toml`의 주석을 풉니다 |
+| `gf-commands`, `gf-flow`, `gf-auth` | M5~M7용 자리(현재 비어 있음) | 사용 시작 시 루트 `Cargo.toml`의 주석을 풉니다 |
 
 ### 2.2 gf-app 내부
 
@@ -84,8 +86,8 @@ src/
 │  ├─ worktree_ops.rs  worktrees 패널의 Output 처리(열기, 제거, merge into base, update from base …)
 │  ├─ branch_delete.rs 여러 ref를 골라 한 번에 삭제
 │  ├─ reveal.rs      blame 등에서 커밋을 히스토리에서 찾아 선택·스크롤
-│  ├─ settings.rs    설정 화면(섹션별) → 공유 설정, 서버 로그인(ACCOUNTS: 토큰 상태·확인)과 인증 실패 시 로그인 후 재실행
-│  ├─ clone.rs       open 창의 URL clone(폴더 묻기 → 백그라운드 clone, 상태 줄 진행률·Esc 취소 → 탭으로 열기)
+│  ├─ settings.rs    설정 화면(섹션별) → 공유 설정, 서버별 HTTPS 계정(ACCOUNTS: 사용자별 토큰 보관 상태·새로 확인)과 인증 실패 시 로그인 후 재실행
+│  ├─ clone.rs       open 창의 URL clone(`repos.clone_root` 또는 `~/gf-workspace` 아래에 경로 제안 → 백그라운드 clone → 탭으로 열기)
 │  ├─ ui_sweep.rs    헤드리스 앱 드라이버(`Ui`)와 UI 스윕(§1, §8)
 │  └─ regression_tests.rs, keyboard_tests.rs   실제 App으로 돌리는 회귀 테스트
 ├─ features/<name>/mod.rs   피처 하나 = 폴더 하나

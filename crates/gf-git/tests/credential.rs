@@ -4,12 +4,15 @@
 //! global config and a `store` helper file, so the user's keychain is never
 //! touched.
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gf_git::GitRunner;
 use gf_git::ops::credential::{
-    Login, NO_HELPER, credential_helper, forget_login, has_login, set_credential_helper,
-    store_login,
+    Login, NO_HELPER, check_remote_access, credential_helper, forget_login, has_login,
+    set_credential_helper, store_login,
 };
 
 struct Home {
@@ -182,8 +185,132 @@ async fn a_saved_token_is_found_until_it_is_forgotten() {
 }
 
 #[tokio::test]
+async fn checking_a_rejected_replacement_preserves_the_saved_token() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let home = Home::new(Some("store --file={store}"));
+    let runner = home.runner();
+    let mut candidate = login(&host, "me", "old");
+    candidate.protocol = "http".into();
+    store_login(&runner, &candidate).await.unwrap();
+    let before = home.stored();
+
+    let (requests, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut client, _) = listener.accept().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let headers: Vec<_> = BufReader::new(&client)
+                .lines()
+                .map(|line| line.unwrap())
+                .take_while(|line| !line.is_empty())
+                .collect();
+            requests.send(headers).unwrap();
+            client
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"test\"\r\n\
+                      Content-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        }
+    });
+
+    candidate.token = "new".into();
+    let url = format!("http://{host}/private.git");
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        check_remote_access(&runner, &url, &candidate),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("Authentication failed"),
+        "{error}"
+    );
+    let first = received.recv_timeout(Duration::from_secs(1)).unwrap();
+    let second = received.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(!first.iter().any(|line| line.starts_with("Authorization:")));
+    assert!(
+        second
+            .iter()
+            .any(|line| line == "Authorization: Basic bWU6bmV3")
+    );
+    assert_eq!(home.stored(), before);
+}
+
+#[tokio::test]
+async fn only_a_server_that_accepts_the_token_verifies_the_login() {
+    let home = Home::new(Some("store --file={store}"));
+    let runner = home.runner();
+    for requires_login in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = listener.local_addr().unwrap().to_string();
+        let (requests, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for challenge in [true, false].into_iter().skip(usize::from(!requires_login)) {
+                let (mut client, _) = listener.accept().unwrap();
+                client
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let authenticated = BufReader::new(&client)
+                    .lines()
+                    .map(|line| line.unwrap())
+                    .take_while(|line| !line.is_empty())
+                    .any(|line| line == "Authorization: Basic bWU6dG9r");
+                requests.send(authenticated).unwrap();
+                if challenge {
+                    client.write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"test\"\r\n\
+                          Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    ).unwrap();
+                } else {
+                    let advertisement = "001e# service=git-upload-pack\n00000000";
+                    write!(client,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-advertisement\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{advertisement}",
+                        advertisement.len()
+                    ).unwrap();
+                }
+            }
+        });
+        let mut login = login(&host, "me", "tok");
+        login.protocol = "http".into();
+        let url = format!("http://{host}/repo.git");
+        let verified = tokio::time::timeout(
+            Duration::from_secs(10),
+            check_remote_access(&runner, &url, &login),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!received.recv_timeout(Duration::from_secs(1)).unwrap());
+        if requires_login {
+            assert!(received.recv_timeout(Duration::from_secs(1)).unwrap());
+        }
+        assert_eq!(verified, requires_login);
+        assert!(
+            home.stored().is_empty(),
+            "a check does not persist credentials"
+        );
+    }
+}
+
+#[tokio::test]
 async fn without_a_helper_no_token_is_found_and_none_is_asked_for() {
     let home = Home::new(None);
+    assert!(
+        !has_login(&home.runner(), "https", "github.com", "me")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_helper_returning_a_different_username_does_not_count_as_saved() {
+    let home = Home::new(Some(r#"!echo username=other && echo password=token"#));
     assert!(
         !has_login(&home.runner(), "https", "github.com", "me")
             .await

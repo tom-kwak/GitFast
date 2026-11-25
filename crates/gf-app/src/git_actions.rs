@@ -510,11 +510,7 @@ pub fn auth_server(error: &str) -> Option<String> {
         .take_while(|c| !matches!(c, '\'' | '"' | ' ' | '\n'))
         .collect();
     let (protocol, host) = gf_git::ops::credential::server_of(&url)?;
-    Some(if protocol == "https" {
-        host
-    } else {
-        format!("{protocol}://{host}")
-    })
+    Some(format!("{protocol}://{host}"))
 }
 
 /// Reads git's refusal to check out a branch another worktree has:
@@ -598,11 +594,14 @@ mod tests {
         let e = "`git push` failed with exit code Some(128): remote: Invalid username or token.\n\
                  fatal: Authentication failed for 'https://github.com/a/b.git/'";
         assert!(needs_login(e));
-        assert_eq!(auth_server(e).as_deref(), Some("github.com"));
+        assert_eq!(auth_server(e).as_deref(), Some("https://github.com"));
         let e = "fatal: could not read Username for 'https://git.example.com:8443': \
                  terminal prompts disabled";
         assert!(needs_login(e));
-        assert_eq!(auth_server(e).as_deref(), Some("git.example.com:8443"));
+        assert_eq!(
+            auth_server(e).as_deref(),
+            Some("https://git.example.com:8443")
+        );
         let e = "fatal: Authentication failed for 'http://10.0.0.5/a.git/'";
         assert_eq!(auth_server(e).as_deref(), Some("http://10.0.0.5"));
         let ssh = "git@github.com: Permission denied (publickey).";

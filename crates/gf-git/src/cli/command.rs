@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use gf_core::model::RepoId;
@@ -6,7 +7,7 @@ use gf_core::model::RepoId;
 /// Description of one git invocation. Built by ops or, for arbitrary
 /// subcommands, directly from user input; executed by
 /// [`GitRunner`](super::GitRunner).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct GitCommand {
     pub(crate) args: Vec<OsString>,
     pub(crate) cwd: Option<PathBuf>,
@@ -16,6 +17,16 @@ pub struct GitCommand {
     pub(crate) read_only: bool,
     pub(crate) allow_failure: bool,
     pub(crate) echo_stdout: bool,
+}
+
+impl fmt::Debug for GitCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Credential commands can carry secrets in their environment and stdin.
+        f.debug_struct("GitCommand")
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GitCommand {
@@ -135,5 +146,15 @@ mod tests {
     fn empty_pathspec_adds_no_separator() {
         let cmd = GitCommand::new(["status"]).paths(Vec::<PathBuf>::new());
         assert_eq!(cmd.display(), "git status");
+    }
+
+    #[test]
+    fn debug_hides_process_environment_and_stdin() {
+        let cmd = GitCommand::new(["credential", "approve"])
+            .env("GF_LOGIN_TOKEN", "environment-secret")
+            .stdin("password=stdin-secret");
+        let debug = format!("{cmd:?}");
+        assert!(debug.contains("credential"));
+        assert!(!debug.contains("secret"));
     }
 }
