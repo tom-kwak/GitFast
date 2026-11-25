@@ -54,7 +54,9 @@ jobs:
           git fetch -q --tags origin +refs/heads/main:refs/remotes/origin/main
           released="$(gh release list --limit 1000 --json tagName -q '.[].tagName')"
           tag=""
-          for t in $(git tag -l 'release-*' --merged origin/main --sort=-v:refname); do
+          # `versionsort.suffix=-`: 0.0.10 is newer than 0.0.10-rc.3 (plain
+          # version sort puts the suffixed one after it).
+          for t in $(git -c versionsort.suffix=- tag -l 'release-*' --merged origin/main --sort=-v:refname); do
             if ! grep -qxF "$t" <<<"$released"; then tag="$t"; fi
             break
           done
@@ -241,7 +243,11 @@ jobs:
           installers="https://github.com/${{ github.repository }}/releases/latest/download"
           case "$version" in *-*) installers="https://github.com/${{ github.repository }}/releases/download/$TAG" ;; esac
           whats_new="src/docs/release-notes/$version.md"
-          previous="$(git -C src tag -l 'release-*' --sort=-v:refname | grep -vxF "$TAG" | head -1)"
+          # The tag before this one; for a release, the release before it
+          # (0.0.10 compares with 0.0.9, not with 0.0.10-rc.3).
+          older="$(git -C src -c versionsort.suffix=- tag -l 'release-*' --sort=-v:refname | sed -n "/^$TAG\$/,\$p" | tail -n +2)"
+          case "$version" in *-*) ;; *) older="$(grep -v '^release-.*-' <<<"$older" || true)" ;; esac
+          previous="$(head -1 <<<"$older")"
           {
             # Written by hand for each release; without it GitHub lists the
             # merged changes instead (--generate-notes below).
