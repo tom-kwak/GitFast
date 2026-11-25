@@ -50,6 +50,7 @@ gf-git/src/
 | | log: 경로 필터, `--follow`, `--author`, `--grep`, `-S`, `a...b` | CLI | gix가 `Unsupported` 반환 |
 | | head_exists | **gix** ✅ | |
 | RefOps / RemoteOps | branches(upstream·ahead/behind·gone 포함), tags, remotes, unpushed_count, unpushed | **gix** ✅ | gix-ref·config 안정화 후보. 서명된 태그, `insteadOf`, URL이 여러 개인 remote는 CLI |
+| | 히스토리 커밋 검색(메시지·해시) | CLI | 메시지는 대소문자 무시 고정 문자열 grep, 해시는 같은 범위의 rev-list에서 접두어를 비교합니다. 해시 일치를 먼저 보여주고 중복을 제거합니다 |
 | ReflogOps | reflog, head_oid | **gix** ✅ | |
 | | reset, undo_to | CLI | 고수준 reset 없음 |
 | StashOps | stashes(목록) | **gix** ✅ | `refs/stash` reflog |

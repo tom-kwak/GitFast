@@ -1468,7 +1468,7 @@ impl App {
                 lines.push(
                     "file lists: T switches list / tree · ↑/↓ skip open folders · - folds the current folder · Enter unfolds".into(),
                 );
-                lines.push("history ⌘F finds a file · ↑/↓ move · Enter shows the commits that changed it · Esc closes".into());
+                lines.push("history ⌘F finds files or commits · ⇥ switches mode · ↑/↓ move · Enter opens the selection · Esc closes".into());
                 lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());
                 lines.push("working tree ⌘-click / ⇧-click / ⇧↑/↓ selects several files · ⌘A all · right-click, Space or d acts on all · Esc clears".into());
                 lines.push("file viewer / blame ⌘F find · Enter / ⌘G next · ⇧Enter / ⌘⇧G previous · Esc closes search".into());

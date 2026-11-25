@@ -398,13 +398,24 @@ impl App {
     }
 
     fn history_file_search_key(&mut self, k: KeyInput) -> Task<Message> {
-        let row_height = search::row_height(&self.tokens);
+        if self
+            .active_tab()
+            .and_then(|tab| tab.history.search_state())
+            .is_some_and(|search| search.composing)
+            && (k
+                .nav
+                .is_some_and(|nav| matches!(nav.key, Key::Enter | Key::Up | Key::Down))
+                || matches!(k.shortcut, Some(Shortcut::Escape)))
+        {
+            return Task::none();
+        }
         if let Some(nav) = k.nav {
             return match nav.key {
                 Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
                     let Some(tab) = self.tabs.get_mut(self.active) else {
                         return Task::none();
                     };
+                    let row_height = tab.history.search_row_height(&self.tokens);
                     let Some(state) = tab.history.search_state_mut() else {
                         return Task::none();
                     };
@@ -413,6 +424,12 @@ impl App {
                     } else {
                         Task::none()
                     }
+                }
+                Key::Tab => {
+                    let Some(tab) = self.active_tab() else {
+                        return Task::none();
+                    };
+                    self.set_history_search_mode(tab.history.search_mode.other())
                 }
                 Key::Enter => {
                     let selected = self
@@ -429,11 +446,16 @@ impl App {
             };
         }
         match k.shortcut {
+            Some(Shortcut::FindInFile) => operation::focus(search::INPUT_ID),
             Some(Shortcut::Escape) => self.update(Message::History(history::Message::Search(
                 search::Message::Dismiss,
             ))),
             Some(
-                s @ (Shortcut::CloseTab | Shortcut::TabList | Shortcut::Open | Shortcut::Quit),
+                s @ (Shortcut::CloseTab
+                | Shortcut::TabList
+                | Shortcut::Open
+                | Shortcut::Quit
+                | Shortcut::CycleTab { .. }),
             ) => {
                 let dismiss = self.update(Message::History(history::Message::Search(
                     search::Message::Dismiss,

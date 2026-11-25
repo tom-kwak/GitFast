@@ -154,15 +154,24 @@ impl App {
         let Some(tab) = self.active_tab_mut() else {
             return Task::none();
         };
+        tab.history.start_search();
+        self.focus_pane(crate::nav::Pane::History);
+        self.sync_history_search()
+    }
+
+    pub(super) fn restart_file_search(&mut self) -> Task<Message> {
+        let Some(tab) = self.active_tab_mut() else {
+            return Task::none();
+        };
         let oid = tab
             .snapshot
             .as_ref()
             .and_then(|snap| tab.history.file_search_base(snap));
-        let repo = tab.repo.clone();
-        let id = repo.id();
-        let work = tab.history.open_file_search(oid);
-        let task = work.map_or_else(Task::none, |work| file_search_work(id, repo, work));
-        Task::batch([task, iced::widget::operation::focus(search::INPUT_ID)])
+        tab.history
+            .restart_file_search(oid)
+            .map_or_else(Task::none, |work| {
+                file_search_work(tab.repo.id(), tab.repo.clone(), work)
+            })
     }
 
     /// ⌘F in the main window: the History panel's Find. Brings History to
@@ -200,10 +209,13 @@ impl App {
     }
 
     pub(super) fn close_file_search(&mut self) -> Task<Message> {
-        if let Some(tab) = self.active_tab_mut() {
-            tab.history.close_file_search();
-        }
-        self.restore_focus()
+        let Some(tab) = self.active_tab_mut() else {
+            return Task::none();
+        };
+        tab.history.close_file_search();
+        let scroll = tab.history.restore_graph_scroll();
+        self.focus_pane(crate::nav::Pane::History);
+        Task::batch([scroll, self.restore_focus()])
     }
 
     /// Mouse and ⏎ both land here: opens the picked file's history from
@@ -514,7 +526,10 @@ impl App {
                     tab.undo.set_pending(None, &tab.repo.handle().git_dir);
                 }
                 // A commit waiting for a longer history (`reveal`).
-                reveal = snap.loaded.history;
+                reveal = snap.loaded.history
+                    && tab.history.revision().is_none()
+                    && snap.history_all_branches == tab.all_branches
+                    && (snap.history_limit >= tab.history.head_limit() || !snap.history.more);
                 // A long history (a full page) loads much faster with a
                 // commit-graph: write one in the background if missing.
                 if !tab.graph_checked && snap.history.more {

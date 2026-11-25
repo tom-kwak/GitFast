@@ -184,6 +184,13 @@ pub enum Purpose {
         oid: gf_core::model::Oid,
         at: super::reveal::Located,
     },
+    /// Reveal a search result after confirming the longer load.
+    RevealSearchCommit {
+        id: gf_core::model::RepoId,
+        generation: u64,
+        oid: gf_core::model::Oid,
+        rows: usize,
+    },
     MarkResolved(PathBuf),
     /// Fields: branch, folder (empty: `root/<branch>`). Choice: start a
     /// new branch at HEAD or `base`. Check: open it in a tab. A branch in
@@ -1156,6 +1163,12 @@ impl App {
                 choices,
             } => self.run_resolve(path, segments, choices),
             Purpose::RevealCommit { oid, at } => self.show_located(oid, at),
+            Purpose::RevealSearchCommit {
+                id,
+                generation,
+                oid,
+                rows,
+            } => self.load_search_commit(id, generation, oid, rows),
             Purpose::TakeSide(path, side) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.conflict = None;
