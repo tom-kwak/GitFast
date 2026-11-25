@@ -3344,6 +3344,61 @@ async fn new_worktree_goes_beside_the_repository_and_opens_in_a_tab() {
 }
 
 #[tokio::test]
+async fn a_new_worktree_gets_worktreeinclude_files_until_that_is_turned_off() {
+    let mut ui = Ui::open_with(|r| {
+        r.write(".worktreeinclude", ".env\n");
+        r.write(".env", "A=1\n");
+        let exclude = r.path().join(".git/info/exclude");
+        let mut ignored = std::fs::read_to_string(&exclude).unwrap_or_default();
+        ignored.push_str(".env\n");
+        std::fs::write(exclude, ignored).expect("exclude");
+    })
+    .await;
+    let _ = ui
+        .send(Message::RefsMode(worktrees::RefsMode::Worktrees))
+        .await;
+    let name = ui.app.tabs[0].name();
+    let root = ui
+        .fixture
+        .repo
+        .path()
+        .parent()
+        .expect("parent")
+        .join(format!("{name}-worktrees"));
+    let add = async |ui: &mut Ui, branch: &str| {
+        let _ = ui.send(Message::Tabs(tabs::Message::Select(0))).await;
+        let _ = ui.send(Message::Worktrees(worktrees::Message::New)).await;
+        let _ = ui
+            .send(Message::Dialog(dialog::Message::Field(0, branch.into())))
+            .await;
+        let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    };
+
+    assert!(ui.app.settings.worktrees.copy_included, "on by default");
+    add(&mut ui, "with-env").await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("with-env/.env"))
+            .ok()
+            .as_deref(),
+        Some("A=1\n"),
+        "copied once the tree is there"
+    );
+
+    let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    let _ = ui.click("TOOLS").await;
+    let _ = ui.click("Turn off").await;
+    assert!(!ui.app.settings.worktrees.copy_included);
+    let saved = Settings::load(&ui.app.paths.settings_file()).expect("saved settings");
+    assert!(!saved.worktrees.copy_included, "and remembered");
+    let _ = ui.send(Message::Key(Shortcut::Escape)).await;
+    assert!(!ui.app.settings_open);
+    add(&mut ui, "without-env").await;
+    assert!(root.join("without-env").exists());
+    assert!(!root.join("without-env/.env").exists(), "turned off");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn a_new_worktree_checks_an_existing_branch_out_instead_of_failing() {
     let mut ui = Ui::open_with(|r| {
         r.git(&["branch", "side"]);

@@ -47,7 +47,7 @@ use crate::ops::state::RepoState;
 use crate::ops::submodule::Submodule;
 use crate::ops::sync::{PullMode, PushOptions};
 use crate::ops::undo::{Capture, HeadMode, Scope};
-use crate::ops::worktree::{Worktree, WorktreeStatus};
+use crate::ops::worktree::{IncludedCopy, Worktree, WorktreeStatus};
 
 /// `git bisect`: find the commit that introduced a bug.
 pub trait BisectOps {
@@ -519,4 +519,9 @@ pub trait WorktreeOps {
     fn remove_worktree(&self, path: &Path, force: bool) -> impl Future<Output = Result<()>> + Send;
 
     fn prune_worktrees(&self) -> impl Future<Output = Result<()>> + Send;
+
+    /// Copies into the new tree at `dest` the git-ignored files this
+    /// tree's `.worktreeinclude` selects (gitignore patterns; a file must
+    /// match one and be ignored by git). Nothing without the file.
+    fn copy_included(&self, dest: &Path) -> impl Future<Output = Result<IncludedCopy>> + Send;
 }

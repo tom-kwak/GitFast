@@ -760,6 +760,13 @@ impl WorktreeOps for GixBackend {
     async fn prune_worktrees(&self) -> Result<()> {
         unsupported("worktree prune")
     }
+
+    async fn copy_included(
+        &self,
+        _: &std::path::Path,
+    ) -> Result<crate::ops::worktree::IncludedCopy> {
+        unsupported("worktreeinclude")
+    }
 }
 
 impl RebaseOps for GixBackend {
