@@ -21,6 +21,7 @@ mod branch_delete;
 mod clone;
 mod dialogs;
 mod focus;
+mod history_search;
 #[cfg(test)]
 mod keyboard_tests;
 /// Memory benchmark, kept with its instructions in `tools/mem-bench/`.
@@ -233,15 +234,14 @@ pub enum Message {
     Switcher(tab_switcher::Message),
     TabList(tab_list::Message),
     Settings(settings_view::Message),
-    /// A login was saved in git's credential helper (its name), or not;
-    /// then run what the server refused before, if anything.
+    /// A login was saved in Git's credential helper, with the result of the read check.
     LoggedIn(
-        gf_config::Account,
-        Result<settings::LoginSaved, String>,
+        gf_hosting::Account,
+        Result<settings::LoginCheck, String>,
         Option<Box<settings::Retry>>,
     ),
     /// A login was removed from git's credential helper, or not.
-    LoggedOut(gf_config::Account, Result<(), String>),
+    LoggedOut(gf_hosting::Account, Result<(), String>),
     /// Something the settings screen reads in the background.
     SettingsProbed(settings::Probed),
     /// Show the open-repository window (⌘O, `+ open`).
@@ -273,6 +273,17 @@ pub enum Message {
     Picked(Option<PathBuf>),
     Loaded(RepoId, Result<Arc<Snapshot>, String>),
     HistoryLoaded(RepoId, u64, String, Result<Arc<History>, String>),
+    CommitSearchFinished(
+        RepoId,
+        u64,
+        Result<Vec<history::commit_search::Hit>, String>,
+    ),
+    CommitSearchLocated(
+        RepoId,
+        u64,
+        gf_core::model::Oid,
+        Result<Option<usize>, String>,
+    ),
     FileSearchPathsLoaded(
         RepoId,
         u64,
@@ -694,7 +705,7 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
         // Any message may have brought a tab to the front or queued a read.
-        let task = Task::batch([task, self.load_due()]);
+        let task = Task::batch([task, self.sync_history_search(), self.load_due()]);
         self.busy_since = if self.busy() {
             self.busy_since.or_else(|| Some(Instant::now()))
         } else {
@@ -740,10 +751,7 @@ impl App {
             Message::Settings(m) => self.on_settings(m),
             Message::LoggedIn(account, result, retry) => self.logged_in(account, result, retry),
             Message::LoggedOut(account, result) => self.logged_out(account, result),
-            Message::SettingsProbed(probed) => {
-                self.settings_probed(probed);
-                Task::none()
-            }
+            Message::SettingsProbed(probed) => self.settings_probed(probed),
             Message::CodeDialog(m) => self.on_code_view(m),
             Message::PathRevealed(result) => {
                 if let Err(e) = result {
@@ -934,12 +942,30 @@ impl App {
             Message::History(history::Message::FindFile) => self.open_file_search(),
             Message::History(history::Message::Search(history::search::Message::QueryChanged(
                 query,
-            ))) => self.query_file_search(query),
+            ))) => self.query_history_search(query),
             Message::History(history::Message::Search(history::search::Message::Dismiss)) => {
                 self.close_file_search()
             }
             Message::History(history::Message::Search(history::search::Message::Activate(row))) => {
-                self.activate_file_search(row)
+                self.activate_history_search(row)
+            }
+            Message::History(history::Message::Search(history::search::Message::Mode(mode))) => {
+                self.set_history_search_mode(mode)
+            }
+            Message::History(history::Message::Search(history::search::Message::Retry)) => {
+                let task = self.restart_history_search();
+                Task::batch([task, self.restore_focus()])
+            }
+            Message::History(history::Message::Search(history::search::Message::Composing(
+                active,
+            ))) => {
+                if let Some(search) = self
+                    .active_tab_mut()
+                    .and_then(|tab| tab.history.search_state_mut())
+                {
+                    search.composing = active;
+                }
+                Task::none()
             }
             Message::History(m) => {
                 // Shift-click selects a range, ⌘-click adds/removes one.
@@ -1018,6 +1044,7 @@ impl App {
                     return self.on_dialog_outcome(outcome);
                 }
                 self.sync_login_dialog(before.first().map(String::as_str));
+                self.sync_clone_destination(before.first().map(String::as_str));
                 let Some(dialog) = self.dialog.as_ref() else {
                     return Task::none();
                 };
@@ -1030,6 +1057,13 @@ impl App {
                     .iter()
                     .zip(&before)
                     .position(|(f, old)| f.value != *old)
+                    .map(|i| {
+                        if i == 0 && matches!(dialog.purpose, dialogs::Purpose::LogIn(_)) {
+                            1
+                        } else {
+                            i
+                        }
+                    })
                     .and_then(dialog::field_id)
                     .map_or_else(Task::none, |id| {
                         Task::batch([operation::focus(id), operation::move_cursor_to_end(id)])
@@ -1202,14 +1236,24 @@ impl App {
                     return Task::none();
                 };
                 match result {
-                    Ok(h) => tab.history.loaded(&rev, h),
+                    Ok(h) => {
+                        tab.history.loaded(&rev, h);
+                        return self.reveal_pending(id);
+                    }
                     Err(e) => {
                         tab.history.load_failed();
+                        tab.history.take_pending_reveal();
                         self.log
                             .note(NoteKind::Error, format!("history of {rev}"), vec![e]);
                     }
                 }
                 Task::none()
+            }
+            Message::CommitSearchFinished(id, generation, result) => {
+                self.commit_search_finished(id, generation, result)
+            }
+            Message::CommitSearchLocated(id, generation, oid, result) => {
+                self.commit_search_located(id, generation, oid, result)
             }
             Message::FileSearchPathsLoaded(id, request, oid, result) => {
                 self.file_search_paths_loaded(id, request, oid, result)
@@ -2582,6 +2626,16 @@ fn global_event(event: iced::Event, status: event::Status, _id: window::Id) -> O
             };
             (input.shortcut.is_some() || input.menu.is_some() || input.nav.is_some())
                 .then_some(Message::KeyInput(input))
+        }
+        iced::Event::InputMethod(iced::advanced::input_method::Event::Preedit(text, _)) => {
+            Some(Message::History(history::Message::Search(
+                history::search::Message::Composing(!text.is_empty()),
+            )))
+        }
+        iced::Event::InputMethod(iced::advanced::input_method::Event::Closed) => {
+            Some(Message::History(history::Message::Search(
+                history::search::Message::Composing(false),
+            )))
         }
         // Native dialogs can swallow the key-up of ⌘; never keep it stuck.
         iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocus(true)),

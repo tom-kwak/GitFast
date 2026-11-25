@@ -1,24 +1,21 @@
 //! App-wide preferences: a section list on the left (↑/↓, ⌘1–⌘4) and the
 //! chosen section on the right.
 //!
-//! ACCOUNTS lists the git servers logged in to with whether git's
-//! credential helper still holds their token, the servers the open
-//! repositories use without a login (one click to log in), and SSH
-//! servers, which use the user's SSH keys. The other sections make the
+//! ACCOUNTS shows saved HTTPS logins and the servers used by open
+//! repositories. SSH remotes use the user's SSH setup. The other sections make the
 //! `:` prompt settings (`:theme`, `:editor`, `:terminal`,
 //! `:confirm reset`) clickable.
 
-pub mod provider;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-use std::collections::BTreeMap;
-
-use gf_config::{Account, Settings};
+use gf_config::{DEFAULT_CLONE_ROOT, Settings};
+use gf_hosting::Account;
 use iced::widget::{Column, Row, button, column, container, row, space};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::theme::{self, Tokens, style};
 use crate::widgets::{self, colored, dim, mono};
-pub use provider::Provider;
 
 /// Smallest and largest font size offered.
 pub const FONT_SIZES: std::ops::RangeInclusive<u16> = 10..=20;
@@ -83,12 +80,53 @@ pub struct ServerUse {
     pub host: String,
     /// The first remote URL on it, without a user name (checks a login).
     pub url: String,
-    /// `repo · remote` for each remote on it.
-    pub used_by: Vec<String>,
+    pub repositories: RepositoryList,
+}
+
+/// Open repositories for a host, counted once across remotes and worktrees.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepositoryList {
+    seen: BTreeSet<PathBuf>,
+    first: String,
+    tooltip: String,
+}
+
+impl RepositoryList {
+    pub fn add(&mut self, common_dir: &Path, name: &str) {
+        if self.seen.insert(common_dir.to_path_buf()) {
+            if self.first.is_empty() {
+                self.first = name.to_owned();
+            } else {
+                self.tooltip.push('\n');
+            }
+            self.tooltip.push_str(name);
+        }
+    }
+
+    fn view<'a>(&self, t: &'a Tokens) -> Option<Element<'a, Message>> {
+        match self.seen.len() {
+            0 => None,
+            1 => Some(dim(t, self.first.clone()).into()),
+            count => Some(widgets::tip(
+                t,
+                dim(t, format!("{} and {} more", self.first, count - 1)),
+                self.tooltip.clone(),
+            )),
+        }
+    }
+}
+
+/// What an account's local credential and optional remote check established.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountStatus {
+    Missing,
+    Saved,
+    Verified,
+    Rejected,
 }
 
 impl ServerUse {
-    /// As typed in the log-in dialog: `https` is left out.
+    /// Display label for the remote list.
     pub fn label(&self) -> String {
         if self.protocol == "https" {
             self.host.clone()
@@ -102,30 +140,33 @@ impl ServerUse {
 #[derive(Debug, Default)]
 pub struct Page {
     pub section: Section,
+    pub probe_generation: u64,
+    /// A credential write is in flight, so another one must wait.
+    pub changing_login: bool,
     /// HTTP(S) servers of the open tabs' remotes.
     pub servers: Vec<ServerUse>,
     /// SSH servers of the open tabs' remotes.
     pub ssh: Vec<ServerUse>,
     /// git's credential helper (`None`: there is none).
     pub helper: Probe<Option<String>>,
-    /// Whether the helper still has each account's token.
-    pub tokens: Vec<(Account, Probe<bool>)>,
+    /// Server used to look up the helper in Git's URL-specific config.
+    pub helper_server: String,
+    pub tokens: Vec<(Account, Probe<AccountStatus>)>,
 }
 
 impl Page {
-    pub fn token(&self, account: &Account) -> &Probe<bool> {
-        static CHECKING: Probe<bool> = Probe::Checking;
+    pub fn token(&self, account: &Account) -> &Probe<AccountStatus> {
+        static CHECKING: Probe<AccountStatus> = Probe::Checking;
         self.tokens
             .iter()
             .find(|(a, _)| a == account)
             .map_or(&CHECKING, |(_, probe)| probe)
     }
 
-    fn used_by(&self, protocol: &str, host: &str) -> &[String] {
+    pub fn server(&self, protocol: &str, host: &str) -> Option<&ServerUse> {
         self.servers
             .iter()
             .find(|s| s.protocol == protocol && s.host == host)
-            .map_or(&[], |s| s.used_by.as_slice())
     }
 }
 
@@ -149,20 +190,22 @@ pub enum Message {
     SetTheme(&'static str),
     /// Font size one step smaller (`-1`) or larger (`1`).
     FontSize(i8),
-    /// Open the log-in dialog empty.
+    /// Open the log-in dialog with the current repository's host if available.
     AddAccount,
+    RefreshAccounts,
     /// Open the log-in dialog for this server (as typed there).
     LogInTo(String),
-    /// Log in to `accounts[i]` again: a new token for the same user.
-    UpdateToken(usize),
-    /// Log out of `accounts[i]` (asks first).
-    LogOut(usize),
+    /// Save a new token for the same user.
+    UpdateToken(Account),
+    /// Remove the account's saved credential (asks first).
+    LogOut(Account),
     /// Ask which hosting service this host is (its tag was clicked).
     PickService(String),
     /// Make git keep logins with this credential helper (asks first).
     UseHelper(&'static str),
     EditEditor,
     EditTerminal,
+    EditCloneRoot,
     EditWorktreeRoot,
     /// Turn copying `.worktreeinclude` files into new worktrees on or off.
     ToggleCopyIncluded,
@@ -177,7 +220,7 @@ pub fn view<'a>(t: &'a Tokens, p: Props<'a>) -> Element<'a, Message> {
         colored(t, "Settings", t.accent()),
         dim(t, concat!("gf v", env!("CARGO_PKG_VERSION"))),
         space().width(Length::Fill),
-        widgets::text_button(t, "Done", Some("Esc"), Some(Message::Close)),
+        widgets::icon_button(t, "×", t.dim, "close  esc", Message::Close),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -292,38 +335,42 @@ fn labeled<'a>(
         .align_y(Alignment::Center)
 }
 
-fn used_by_line<'a>(t: &'a Tokens, used_by: &[String]) -> Element<'a, Message> {
-    if used_by.is_empty() {
-        dim(t, "no open repository uses it").into()
-    } else {
-        dim(t, format!("used by {}", used_by.join(", "))).into()
-    }
-}
-
 fn accounts<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
     let page = p.page;
     let accounts = &p.settings.accounts;
     let mut col = Column::new().spacing(10).push(heading(
         t,
         "ACCOUNTS",
-        Some("HTTPS logins"),
-        Some(widgets::text_button(
-            t,
-            "+ Add account",
-            None,
-            Some(Message::AddAccount),
-        )),
+        None,
+        Some(
+            row![
+                widgets::tip(
+                    t,
+                    widgets::text_button(t, "Refresh", None, Some(Message::RefreshAccounts)),
+                    "Check saved logins against open repositories".into(),
+                ),
+                widgets::text_button(
+                    t,
+                    "+ Add account",
+                    None,
+                    (!page.changing_login).then_some(Message::AddAccount)
+                ),
+            ]
+            .spacing(6)
+            .wrap()
+            .into(),
+        ),
     ));
-
+    if page.changing_login {
+        col = col.push(dim(t, "… updating Git credentials"));
+    }
+    col = col.extend(helper_notice(t, p));
     if accounts.is_empty() {
-        col = col.push(dim(
-            t,
-            "No accounts yet. Add one here, or push/fetch: gf asks when a server wants a login.",
-        ));
+        col = col.push(dim(t, "No saved accounts."));
     }
     let services = &p.settings.services;
-    for (i, account) in accounts.iter().enumerate() {
-        col = col.push(account_card(t, page, services, i, account));
+    for account in accounts {
+        col = col.push(account_card(t, page, services, account));
     }
 
     let others: Vec<&ServerUse> = page
@@ -336,32 +383,33 @@ fn accounts<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
         })
         .collect();
     if !others.is_empty() {
-        col = col.push(heading(
-            t,
-            "NOT LOGGED IN",
-            Some("used by the open repositories"),
-            None,
-        ));
+        col = col.push(heading(t, "OTHER HTTPS REMOTES", None, None));
         for server in others {
-            col = col.push(server_card(t, services, server));
+            col = col.push(server_card(t, services, server, page.changing_login));
         }
     }
     if !page.ssh.is_empty() {
-        col = col.push(heading(t, "SSH", Some("log in with your SSH keys"), None));
+        col = col.push(heading(t, "SSH REMOTES", None, None));
         for server in &page.ssh {
             col = col.push(
-                column![
-                    mono(t, server.host.as_str()),
-                    container(used_by_line(t, &server.used_by)).padding(Padding {
-                        left: t.cols(2),
-                        ..Padding::ZERO
-                    }),
-                ]
-                .spacing(2),
+                column![mono(t, server.host.as_str())]
+                    .extend(server.repositories.view(t).map(|list| {
+                        container(list)
+                            .padding(Padding {
+                                left: t.cols(2),
+                                ..Padding::ZERO
+                            })
+                            .into()
+                    }))
+                    .spacing(2),
             );
         }
     }
-    col.push(helper_line(t, p)).into()
+    col.push(dim(
+        t,
+        "Git's credential helper stores tokens and passwords.",
+    ))
+    .into()
 }
 
 /// The host's service; a click asks which one it is (the name can
@@ -371,7 +419,7 @@ fn provider_tag<'a>(
     services: &BTreeMap<String, String>,
     host: &str,
 ) -> Element<'a, Message> {
-    let provider = Provider::for_host(services, host);
+    let provider = crate::hosting::PROVIDERS.for_host(services, host);
     let tag = button(colored(t, provider.name(), t.accent()))
         .padding(0)
         .style(style::text_button(t, t.accent()))
@@ -385,11 +433,13 @@ fn account_card<'a>(
     t: &'a Tokens,
     page: &Page,
     services: &BTreeMap<String, String>,
-    i: usize,
     account: &'a Account,
 ) -> Element<'a, Message> {
     let token = page.token(account);
-    let missing = matches!(token, Probe::Known(false));
+    let needs_token = matches!(
+        token,
+        Probe::Known(AccountStatus::Missing | AccountStatus::Rejected)
+    );
     // The token page is offered in the log-in dialog, where the token
     // is typed: a saved login has no use for it.
     let top = row![
@@ -397,38 +447,57 @@ fn account_card<'a>(
         mono(t, server_label(account)),
         dim(t, "as"),
         mono(t, account.username.as_str()),
-        space().width(Length::Fill),
     ]
     .spacing(6)
-    .align_y(Alignment::Center)
-    .push(widgets::text_button(
-        t,
-        if missing { "Log in again" } else { "New token" },
-        None,
-        Some(Message::UpdateToken(i)),
-    ))
-    .push(widgets::danger_button(
-        t,
-        "Log out",
-        Some(Message::LogOut(i)),
-    ));
-
-    let status: Element<'a, Message> = match token {
-        Probe::Checking => dim(t, "… checking the saved token").into(),
-        Probe::Known(true) => colored(t, "✓ token saved", t.success()).into(),
-        Probe::Known(false) => colored(
+    .align_y(Alignment::Center);
+    let actions = row![
+        widgets::text_button(
             t,
-            "⚠ no saved token (expired, revoked or removed)",
-            t.warning(),
+            if needs_token {
+                "Save token"
+            } else {
+                "Update token"
+            },
+            None,
+            (!page.changing_login).then(|| Message::UpdateToken(account.clone())),
+        ),
+        widgets::danger_button(
+            t,
+            "Remove saved login",
+            (!page.changing_login).then(|| Message::LogOut(account.clone())),
         )
-        .into(),
-        Probe::Failed(e) => dim(t, format!("? could not check the token: {e}")).into(),
-    };
-    let detail = column![
-        status,
-        used_by_line(t, page.used_by(&account.protocol, &account.host))
     ]
-    .spacing(2);
+    .spacing(6)
+    .wrap();
+
+    let server = page.server(&account.protocol, &account.host);
+    let checked_repository = server.map_or("the repository", |server| {
+        server.repositories.first.as_str()
+    });
+    let status: Element<'a, Message> = match token {
+        Probe::Checking => dim(t, "… Checking login").into(),
+        Probe::Known(AccountStatus::Saved) => widgets::tip(
+            t,
+            dim(t, "Token saved"),
+            "Server authentication unverified".into(),
+        ),
+        Probe::Known(AccountStatus::Verified) => widgets::tip(
+            t,
+            colored(t, "✓ Connected", t.success()),
+            format!("Authenticated read of {checked_repository}"),
+        ),
+        Probe::Known(AccountStatus::Missing) => colored(t, "⚠ No saved token", t.warning()).into(),
+        Probe::Known(AccountStatus::Rejected) => widgets::tip(
+            t,
+            colored(t, "⚠ Login rejected", t.warning()),
+            format!("Login rejected while reading {checked_repository}"),
+        ),
+        Probe::Failed(e) => dim(t, format!("? Could not check login: {e}")).into(),
+    };
+    let detail = column![status]
+        .extend(server.and_then(|server| server.repositories.view(t)))
+        .push(actions)
+        .spacing(2);
     column![
         top,
         container(detail).padding(Padding {
@@ -444,6 +513,7 @@ fn server_card<'a>(
     t: &'a Tokens,
     services: &BTreeMap<String, String>,
     server: &ServerUse,
+    changing_login: bool,
 ) -> Element<'a, Message> {
     let top = row![
         provider_tag(t, services, &server.host),
@@ -454,45 +524,35 @@ fn server_card<'a>(
     .align_y(Alignment::Center)
     .push(widgets::text_button(
         t,
-        "Log in",
+        "Add login",
         None,
-        Some(Message::LogInTo(server.label())),
+        (!changing_login)
+            .then(|| Message::LogInTo(format!("{}://{}", server.protocol, server.host))),
     ));
-    column![
-        top,
-        container(used_by_line(t, &server.used_by)).padding(Padding {
-            left: t.cols(11),
-            ..Padding::ZERO
-        })
-    ]
-    .spacing(2)
-    .into()
+    column![top]
+        .extend(server.repositories.view(t).map(|list| {
+            container(list)
+                .padding(Padding {
+                    left: t.cols(11),
+                    ..Padding::ZERO
+                })
+                .into()
+        }))
+        .spacing(2)
+        .into()
 }
 
-/// Where tokens are kept, or a one-click fix when git keeps none.
-fn helper_line<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
+/// Show a credential helper problem and its setup action when available.
+fn helper_notice<'a>(t: &'a Tokens, p: &Props<'a>) -> Option<Element<'a, Message>> {
     match &p.page.helper {
-        Probe::Checking => dim(t, "… reading git's credential helper").into(),
-        Probe::Failed(e) => dim(t, format!("? could not read git's credential helper: {e}")).into(),
-        Probe::Known(Some(helper)) => {
-            // `store --file=/long/path` reads as `store`.
-            let name = helper.split_whitespace().next().unwrap_or(helper);
-            widgets::tip(
-                t,
-                dim(
-                    t,
-                    format!(
-                        "Tokens are kept by git's credential helper `{name}`, not by gf; \
-                         git in the terminal uses them too."
-                    ),
-                ),
-                format!("credential.helper = {helper}"),
-            )
+        Probe::Checking | Probe::Known(Some(_)) => None,
+        Probe::Failed(e) => {
+            Some(dim(t, format!("? Could not read Git's credential helper: {e}")).into())
         }
         Probe::Known(None) => {
             let warning = colored(
                 t,
-                "⚠ git has no credential helper, so it can't keep a login.",
+                format!("⚠ No credential helper for {}.", p.page.helper_server),
                 t.warning(),
             );
             let fix: Element<'a, Message> = match p.offer_helper {
@@ -500,12 +560,11 @@ fn helper_line<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
                     t,
                     &format!("Use {name}"),
                     None,
-                    Some(Message::UseHelper(helper)),
+                    (!p.page.changing_login).then_some(Message::UseHelper(helper)),
                 ),
                 None => dim(t, "git config --global credential.helper <helper>").into(),
             };
-            // The fix on its own line: beside the warning it wrapped.
-            column![warning, fix].spacing(4).into()
+            Some(column![warning, fix].spacing(4).into())
         }
     }
 }
@@ -575,6 +634,12 @@ fn theme_row<'a>(t: &'a Tokens, name: &'static str) -> Element<'a, Message> {
 
 fn tools<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
     let wt = &p.settings.worktrees;
+    let clone_root = p
+        .settings
+        .repos
+        .clone_root
+        .as_deref()
+        .map_or_else(|| DEFAULT_CLONE_ROOT.to_owned(), widgets::format::tilde);
     let change = |m: Message| widgets::text_button(t, "Change", None, Some(m));
     let terminal = match &wt.terminal {
         Some(app) => mono(t, app.clone()),
@@ -596,6 +661,13 @@ fn tools<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
         .spacing(2)
     };
     column![
+        heading(t, "CLONE", None, Some(change(Message::EditCloneRoot))),
+        row![
+            container(dim(t, "Default workspace")).width(t.cols(19)),
+            mono(t, clone_root),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
         heading(t, "OPEN WORKTREES WITH", None, None),
         item(
             "editor",
@@ -629,11 +701,7 @@ fn tools<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
                     space().width(Length::Fill),
                     widgets::text_button(
                         t,
-                        if wt.copy_included {
-                            "Turn off"
-                        } else {
-                            "Turn on"
-                        },
+                        if wt.copy_included { "Off" } else { "On" },
                         None,
                         Some(Message::ToggleCopyIncluded),
                     ),
@@ -686,6 +754,18 @@ fn confirmations<'a>(t: &'a Tokens, settings: &'a Settings) -> Element<'a, Messa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_tooltip_gives_each_repository_its_own_line() {
+        let mut list = RepositoryList::default();
+        list.add(Path::new("first/.git"), "first");
+        list.add(Path::new("first/.git"), "first-worktree");
+        list.add(Path::new("second/.git"), "second");
+        list.add(Path::new("third/.git"), "third");
+        assert_eq!(list.seen.len(), 3);
+        assert_eq!(list.first, "first");
+        assert_eq!(list.tooltip, "first\nsecond\nthird");
+    }
 
     #[test]
     fn sections_step_and_stop_at_the_ends() {

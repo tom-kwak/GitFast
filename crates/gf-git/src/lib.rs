@@ -32,7 +32,7 @@ pub use ops::conflict::Side;
 pub use ops::diff::{DIFF_LIMIT, DiffOptions, DiffTarget, FILE_PREVIEW_LIMIT, FileVersion};
 pub use ops::integrate::{Integration, MergeStyle};
 pub use ops::lfs::LfsFile;
-pub use ops::log::{HIDDEN_REFS, LogOrder, LogQuery};
+pub use ops::log::{COMMIT_SEARCH_LIMIT, HIDDEN_REFS, LogOrder, LogQuery};
 pub use ops::rebase_interactive::{
     SquashPreview, TodoAction, TodoItem, melds_into_nothing, squash_plan, squash_range,
 };

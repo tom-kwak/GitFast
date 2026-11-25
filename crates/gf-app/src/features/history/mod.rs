@@ -10,6 +10,7 @@
 //! to the end, or moving the selection onto the last row, asks the app for
 //! the next page ([`Output::LoadMore`]).
 
+pub mod commit_search;
 pub mod file_search;
 mod find_file;
 pub mod search;
@@ -75,6 +76,9 @@ pub struct State {
     reveal_pending: Option<Oid>,
     search: Option<search::State>,
     file_search: file_search::State,
+    pub(crate) search_mode: search::Mode,
+    pub(crate) search_scope: Option<commit_search::Scope>,
+    pub(crate) commit_search: commit_search::State,
 }
 
 #[derive(Debug, Clone)]
@@ -103,7 +107,7 @@ pub enum Message {
     OpenActions,
     /// Load the next page of history.
     LoadMore,
-    /// Open the file search from the history toolbar.
+    /// Open Find from the history toolbar.
     FindFile,
     Search(search::Message),
 }
@@ -166,7 +170,7 @@ pub enum Output {
 impl State {
     /// Starts showing `revision`; the app loads it and calls [`Self::loaded`].
     pub fn set_revision(&mut self, revision: Option<String>) {
-        self.close_file_search();
+        self.reveal_pending = None;
         self.file_history_origin = None;
         self.loading = revision.is_some();
         self.revision = revision;
@@ -183,6 +187,7 @@ impl State {
             Some(oid) => format!("file {oid}: {}", path.display()),
             None => format!("file: {}", path.display()),
         };
+        self.close_file_search();
         self.set_revision(Some(label.clone()));
         self.file_revision = Some((path, start));
         label
@@ -238,6 +243,10 @@ impl State {
         true
     }
 
+    pub fn restore_graph_scroll<M: Send + 'static>(&self) -> Task<M> {
+        nav::scroll_y(LIST_ID, self.scroll.offset)
+    }
+
     /// Highlights `oid` in the list (e.g. picked from blame).
     pub fn select(&mut self, oid: Oid) {
         self.cursor = Some(oid.clone());
@@ -277,6 +286,18 @@ impl State {
         let pages = rows.div_ceil(HISTORY_PAGE).max(1) + 1;
         self.head_limit = self.head_limit().max(pages * HISTORY_PAGE);
         self.reveal_pending = Some(oid);
+    }
+
+    /// Raise the limit of the current scope for a search result.
+    pub fn reveal_search_after_load(&mut self, oid: Oid, rows: usize) {
+        if self.revision.is_some() {
+            let pages = rows.div_ceil(HISTORY_PAGE).max(1) + 1;
+            self.revision_limit = self.revision_limit().max(pages * HISTORY_PAGE);
+            self.loading_more = true;
+            self.reveal_pending = Some(oid);
+        } else {
+            self.reveal_after_load(oid, rows);
+        }
     }
 
     /// The commit waiting for a longer history, once that history arrived:
@@ -1122,8 +1143,7 @@ impl Feature for State {
             toolbar = toolbar.push(widgets::tip(
                 t,
                 widgets::text_button(t, "Find", Some("⌘F"), Some(Message::FindFile)),
-                "⌘F: search the files in this history's latest commit, then show the commits that changed one"
-                    .into(),
+                "⌘F: find files or commits in this history".into(),
             ));
         }
 
@@ -1143,7 +1163,9 @@ impl Feature for State {
         if self.search.is_some() {
             return panel(
                 "HISTORY".into(),
-                column![toolbar, self.file_search_view(t)].into(),
+                column![toolbar, self.history_search_view(t, all, snap)]
+                    .spacing(4)
+                    .into(),
             );
         }
         if self.loading {

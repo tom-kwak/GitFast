@@ -131,15 +131,13 @@ fn head_info(repo: &gix::Repository) -> Result<HeadInfo> {
 }
 
 fn status(repo: &gix::Repository) -> Result<StatusReport> {
-    status_with(repo, gix::status::UntrackedFiles::Files, submodules(true))
+    status_with(repo, submodules(true))
 }
 
-/// [`status`] with git's other choices: `Collapsed` is
-/// `--untracked-files=normal` (a wholly untracked folder is one entry),
-/// `Submodule::AsConfigured` is status without `--ignore-submodules`.
+/// [`status`] with configurable submodule checks. Both callers report
+/// individual untracked files, like `git status --untracked-files=all`.
 pub(super) fn status_with(
     repo: &gix::Repository,
-    untracked_files: gix::status::UntrackedFiles,
     submodule_check: gix::status::Submodule,
 ) -> Result<StatusReport> {
     let head = head_info(repo)?;
@@ -149,7 +147,7 @@ pub(super) fn status_with(
     let iter = repo
         .status(gix::progress::Discard)
         .map_err(err)?
-        .untracked_files(untracked_files)
+        .untracked_files(gix::status::UntrackedFiles::Files)
         .index_worktree_rewrites(None)
         .index_worktree_submodules(submodule_check)
         .into_iter(Vec::<BString>::new())

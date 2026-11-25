@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.12"
+version = "0.0.13"
 edition = "2024"
 rust-version = "1.92"
 license = "UNLICENSED"
@@ -15,9 +15,12 @@ gf-core = { path = "crates/gf-core" }
 gf-git = { path = "crates/gf-git" }
 # gf-commands = { path = "crates/gf-commands" }
 # gf-flow = { path = "crates/gf-flow" }
-# gf-hosting = { path = "crates/gf-hosting" }
-# gf-hosting-gitlab = { path = "crates/gf-hosting-gitlab" }
-# gf-hosting-github = { path = "crates/gf-hosting-github" }
+gf-hosting = { path = "crates/gf-hosting" }
+gf-hosting-azure = { path = "crates/gf-hosting-azure" }
+gf-hosting-bitbucket = { path = "crates/gf-hosting-bitbucket" }
+gf-hosting-gitea = { path = "crates/gf-hosting-gitea" }
+gf-hosting-github = { path = "crates/gf-hosting-github" }
+gf-hosting-gitlab = { path = "crates/gf-hosting-gitlab" }
 # gf-auth = { path = "crates/gf-auth" }
 gf-config = { path = "crates/gf-config" }
 gf-watch = { path = "crates/gf-watch" }

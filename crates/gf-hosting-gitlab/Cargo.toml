@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# gf-core is added when this crate gets its first implementation.
+gf-hosting.workspace = true
 
 [lints]
 workspace = true

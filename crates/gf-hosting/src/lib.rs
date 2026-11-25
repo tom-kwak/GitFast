@@ -1,3 +1,7 @@
-//! Hosting provider abstraction (repos, merge requests, pipelines).
-//!
-//! Status: skeleton only. Implementation lands in M7 (see `PLAN.md`).
+//! Shared account models and interfaces for Git hosting providers.
+
+mod account;
+mod provider;
+
+pub use account::Account;
+pub use provider::{HostingProvider, ProviderKind, Providers, TokenSetup};

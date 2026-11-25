@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use gf_core::Result;
 use gf_core::model::{Commit, Oid};
+use tokio_util::sync::CancellationToken;
 
 use crate::backend::{CliBackend, LogOps};
 use crate::cli::parse::log::{LOG_ARGS, parse_log};
@@ -46,6 +47,9 @@ fn push_all_refs(args: &mut Vec<String>) {
     args.extend(HIDDEN_REFS.iter().map(|p| format!("--exclude={p}")));
     args.push("--all".into());
 }
+
+/// Number of commit-search hits to display before asking for a narrower query.
+pub const COMMIT_SEARCH_LIMIT: usize = 100;
 
 /// What `git log` should list. The default lists everything reachable from
 /// HEAD.
@@ -166,6 +170,112 @@ pub(crate) fn parse_tree_paths(out: &[u8]) -> Vec<PathBuf> {
 }
 
 impl CliBackend {
+    /// Search a plain history without materializing non-matching commits.
+    pub(crate) async fn search_commits(
+        &self,
+        scope: &LogQuery,
+        term: &str,
+        cancel: CancellationToken,
+    ) -> Result<Vec<Commit>> {
+        let term = term.trim();
+        if term.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query = LogQuery {
+            revisions: scope.revisions.clone(),
+            all_refs: scope.all_refs,
+            order: scope.order,
+            max_count: Some(COMMIT_SEARCH_LIMIT + 1),
+            grep: Some(term.to_owned()),
+            ..LogQuery::default()
+        };
+        let mut args = query.to_args();
+        args.splice(3..3, ["--fixed-strings".into(), "--no-notes".into()]);
+        let messages = self.search_log(
+            args,
+            !scope.all_refs && scope.revisions.is_empty(),
+            cancel.clone(),
+        );
+        let hashes = self.search_hashes(scope, term, cancel);
+        let (hashes, messages) = tokio::join!(hashes, messages);
+        let mut hashes = hashes?;
+        let ids: std::collections::HashSet<_> = hashes.iter().map(|c| c.id.clone()).collect();
+        hashes.extend(messages?.into_iter().filter(|c| !ids.contains(&c.id)));
+        hashes.truncate(COMMIT_SEARCH_LIMIT + 1);
+        Ok(hashes)
+    }
+
+    async fn search_hashes(
+        &self,
+        scope: &LogQuery,
+        term: &str,
+        cancel: CancellationToken,
+    ) -> Result<Vec<Commit>> {
+        if !(4..=Oid::SHA256_HEX_LEN).contains(&term.len())
+            || !term.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Ok(Vec::new());
+        }
+        let cmd = self
+            .command(scope.rev_list_args())
+            .read_only()
+            .allow_failure();
+        let opts = crate::cli::RunOptions {
+            cancel: Some(cancel.clone()),
+            ..Default::default()
+        };
+        let out = self
+            .runner()
+            .run_oid_prefix(
+                &cmd,
+                opts,
+                term.to_ascii_lowercase(),
+                COMMIT_SEARCH_LIMIT + 1,
+            )
+            .await?;
+        if !out.success() {
+            if scope.revisions.is_empty() && !scope.all_refs && !self.head_exists().await? {
+                return Ok(Vec::new());
+            }
+            return Err(log_error(&cmd, &out));
+        }
+        let ids = out.stdout_str();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args: Vec<_> = LOG_ARGS.iter().map(|s| (*s).to_owned()).collect();
+        args.extend(["--no-walk=unsorted".into(), "--end-of-options".into()]);
+        args.extend(ids.lines().map(str::to_owned));
+        self.search_log(args, false, cancel).await
+    }
+
+    async fn search_log(
+        &self,
+        args: Vec<String>,
+        walks_head: bool,
+        cancel: CancellationToken,
+    ) -> Result<Vec<Commit>> {
+        let cmd = self.command(args).read_only().allow_failure();
+        let out = self
+            .runner()
+            .run_with(
+                &cmd,
+                crate::cli::RunOptions {
+                    cancel: Some(cancel),
+                    max_stdout: Some(crate::DIFF_LIMIT),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        if out.success() {
+            parse_log(&out.stdout)
+        } else if walks_head && !self.head_exists().await? {
+            Ok(Vec::new())
+        } else {
+            Err(log_error(&cmd, &out))
+        }
+    }
+
     /// Paths present in the tree of `commit`, preserving native path bytes.
     pub(crate) async fn commit_file_paths(&self, commit: &Oid) -> Result<Vec<PathBuf>> {
         let out = self
@@ -177,9 +287,15 @@ impl CliBackend {
     /// Row of `oid` in `query`'s history (0 = first), reading ids only and
     /// stopping at it; `None` when the walk never reaches it. The query's
     /// limit, skip and filters are ignored: plain histories only.
-    pub(crate) async fn log_position(&self, query: &LogQuery, oid: &str) -> Result<Option<usize>> {
+    pub(crate) async fn log_position(
+        &self,
+        query: &LogQuery,
+        oid: &str,
+        cancel: Option<CancellationToken>,
+    ) -> Result<Option<usize>> {
         let cmd = self.command(query.rev_list_args()).read_only();
         let opts = crate::cli::RunOptions {
+            cancel,
             stop_at: Some(oid.as_bytes().to_vec()),
             ..crate::cli::RunOptions::default()
         };
@@ -285,17 +401,21 @@ impl CliBackend {
             if walks_head && !self.head_exists().await? {
                 return Ok(Vec::new());
             }
-            return Err(gf_core::GfError::GitCommand {
-                argv: cmd
-                    .user_args()
-                    .iter()
-                    .map(|a| a.to_string_lossy().into_owned())
-                    .collect(),
-                exit_code: out.exit_code,
-                stderr: out.stderr.trim().to_owned(),
-            });
+            return Err(log_error(&cmd, &out));
         }
         parse_log(&out.stdout)
+    }
+}
+
+fn log_error(cmd: &crate::cli::GitCommand, out: &crate::cli::GitOutput) -> gf_core::GfError {
+    gf_core::GfError::GitCommand {
+        argv: cmd
+            .user_args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect(),
+        exit_code: out.exit_code,
+        stderr: out.stderr.trim().to_owned(),
     }
 }
 

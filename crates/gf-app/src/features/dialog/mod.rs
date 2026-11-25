@@ -93,6 +93,8 @@ pub struct Field {
     pub placeholder: String,
     /// Values to pick from below the field (see [`Dialog::suggest`]).
     pub suggestions: Vec<Suggestion>,
+    /// Shortcuts shown under an empty field before the user starts typing.
+    quick_suggestions: usize,
     /// Highlighted match (↑/↓), an index into [`Field::matches`].
     highlight: Option<usize>,
     /// The suggestions are dropped down (▾, ↓ or typing opens them).
@@ -218,6 +220,28 @@ pub struct Choice {
     hovered: Option<usize>,
     /// Drawn on one (wrapping) line: `(•) a  ( ) b`, for short labels.
     pub in_a_row: bool,
+    /// Inline row placement. By default choices follow all fields.
+    row_after_field: Option<usize>,
+}
+
+impl Choice {
+    fn row<'a>(&'a self, t: &'a Tokens) -> Element<'a, Message> {
+        let options = self.options.iter().enumerate().map(|(i, option)| {
+            let marker = if i == self.selected { "(•)" } else { "( )" };
+            let text = format!("{marker} {}", option.label);
+            widgets::text_button(
+                t,
+                &text,
+                None,
+                (!option.disabled).then_some(Message::Choose(i)),
+            )
+        });
+        column![
+            dim(t, format!("│ {}", self.label)),
+            iced::widget::Row::with_children(options).spacing(4).wrap()
+        ]
+        .into()
+    }
 }
 
 /// A line that says what to do outside gf, with a button that opens the
@@ -435,6 +459,7 @@ impl<P: Clone> Dialog<P> {
             value: value.into(),
             placeholder: placeholder.into(),
             suggestions: Vec::new(),
+            quick_suggestions: 0,
             highlight: None,
             open: false,
             no_match: String::new(),
@@ -458,6 +483,14 @@ impl<P: Clone> Dialog<P> {
         if let Some(f) = self.fields.last_mut() {
             f.suggestions = suggestions;
             f.no_match = no_match.into();
+        }
+        self
+    }
+
+    /// Shows the first few suggestions as buttons while the last field is empty.
+    pub fn quick_suggestions(mut self, count: usize) -> Self {
+        if let Some(field) = self.fields.last_mut() {
+            field.quick_suggestions = count;
         }
         self
     }
@@ -547,6 +580,7 @@ impl<P: Clone> Dialog<P> {
             inline: false,
             hovered: None,
             in_a_row: false,
+            row_after_field: None,
         });
         self
     }
@@ -565,9 +599,12 @@ impl<P: Clone> Dialog<P> {
         self
     }
 
-    /// Puts a row of options (see [`Self::options_in_a_row`]) into a
-    /// dialog already open, or takes it out with `None`.
-    pub fn set_options_in_a_row(&mut self, row: Option<(String, Vec<Opt>, usize)>) {
+    /// Inserts a row of options after a field, or takes it out with `None`.
+    pub fn set_options_after_field(
+        &mut self,
+        field: usize,
+        row: Option<(String, Vec<Opt>, usize)>,
+    ) {
         self.choice = row.map(|(label, options, selected)| Choice {
             label,
             options,
@@ -575,6 +612,7 @@ impl<P: Clone> Dialog<P> {
             inline: false,
             hovered: None,
             in_a_row: true,
+            row_after_field: Some(field),
         });
     }
 
@@ -911,6 +949,25 @@ impl<P: Clone> Dialog<P> {
                 dim(t, format!("│ {}", f.label)).into()
             };
             col = col.push(column![label, input].spacing(2));
+            if f.quick_suggestions > 0 && f.value.is_empty() {
+                let presets = f
+                    .suggestions
+                    .iter()
+                    .take(f.quick_suggestions)
+                    .map(|suggestion| {
+                        let pick = (!suggestion.disabled)
+                            .then(|| Message::Suggest(i, suggestion.value.clone()));
+                        widgets::text_button(t, &suggestion.hint, None, pick)
+                    });
+                col = col.push(iced::widget::Row::with_children(presets).spacing(4).wrap());
+            }
+            if let Some(choice) = self
+                .choice
+                .as_ref()
+                .filter(|c| c.row_after_field == Some(i))
+            {
+                col = col.push(choice.row(t));
+            }
         }
         if let Some(area) = &self.area {
             let editor = text_editor(&area.content)
@@ -923,17 +980,12 @@ impl<P: Clone> Dialog<P> {
             col = col.push(column![dim(t, format!("│ {}", area.label)), editor].spacing(2));
         }
         let inline = self.choice.as_ref().filter(|c| c.inline);
-        if let Some(choice) = self.choice.as_ref().filter(|c| c.in_a_row) {
-            let options = choice.options.iter().enumerate().map(|(i, o)| {
-                let picked = i == choice.selected;
-                let text = format!("{} {}", if picked { "(•)" } else { "( )" }, o.label);
-                let pick = (!o.disabled).then_some(Message::Choose(i));
-                widgets::text_button(t, &text, None, pick)
-            });
-            col = col.push(column![
-                dim(t, format!("│ {}", choice.label)),
-                iced::widget::Row::with_children(options).spacing(4).wrap()
-            ]);
+        if let Some(choice) = self
+            .choice
+            .as_ref()
+            .filter(|c| c.in_a_row && c.row_after_field.is_none())
+        {
+            col = col.push(choice.row(t));
         }
         if let Some(choice) = self.choice.as_ref().filter(|c| !c.inline && !c.in_a_row) {
             col = col.push(dim(t, format!("│ {}", choice.label)));

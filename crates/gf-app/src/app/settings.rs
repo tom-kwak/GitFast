@@ -1,8 +1,9 @@
 //! Routes the settings screen and prompt to the app's shared preferences,
 //! and logs in to / out of git servers (ACCOUNTS).
 
-use gf_config::Account;
+use gf_config::DEFAULT_CLONE_ROOT;
 use gf_git::ops::credential::{self, Login};
+use gf_hosting::{Account, ProviderKind};
 use iced::advanced::widget::operation::focusable;
 use iced::{Element, Task};
 
@@ -12,7 +13,8 @@ use super::dialogs::{Confirm, Purpose};
 use super::{App, Message, OpKind, RemoteOp};
 use crate::features::command_log::NoteKind;
 use crate::features::dialog::{Dialog, Link, Opt, Suggestion};
-use crate::features::settings_view::{self, Probe, Provider, Section, ServerUse};
+use crate::features::settings_view::{self, AccountStatus, Probe, Section, ServerUse};
+use crate::hosting::{PROVIDERS, provider_label};
 use crate::theme::{self, Tokens};
 
 /// Servers offered in the log-in dialog besides the open tabs' own.
@@ -34,7 +36,7 @@ impl App {
             self.undo_list = None;
             Task::batch([
                 iced::advanced::widget::operate(focusable::unfocus()),
-                self.refresh_settings_page(),
+                self.refresh_settings_page(false),
             ])
         } else {
             self.restore_focus()
@@ -66,9 +68,11 @@ impl App {
     /// Reads again what the settings screen shows from outside gf: the
     /// servers the open tabs use, git's credential helper and whether it
     /// still has each account's token.
-    pub(super) fn refresh_settings_page(&mut self) -> Task<Message> {
+    fn refresh_settings_page(&mut self, check_access: bool) -> Task<Message> {
         let (servers, ssh) = self.servers_in_use();
         let page = &mut self.settings_page;
+        page.probe_generation += 1;
+        let generation = page.probe_generation;
         page.servers = servers;
         page.ssh = ssh;
         page.helper = Probe::Checking;
@@ -83,9 +87,14 @@ impl App {
             .settings
             .accounts
             .first()
-            .map_or(("https".to_owned(), "github.com".to_owned()), |a| {
-                (a.protocol.clone(), a.host.clone())
-            });
+            .map(|a| (a.protocol.clone(), a.host.clone()))
+            .or_else(|| {
+                page.servers
+                    .first()
+                    .map(|s| (s.protocol.clone(), s.host.clone()))
+            })
+            .unwrap_or_else(|| ("https".to_owned(), "github.com".to_owned()));
+        page.helper_server = server_label(&protocol, &host);
         let runner = self.runner.clone();
         let helper = Task::perform(
             async move {
@@ -94,53 +103,71 @@ impl App {
                     Err(e) => Probe::Failed(e.to_string()),
                 }
             },
-            |probe| Message::SettingsProbed(Probed::Helper(probe)),
+            move |probe| Message::SettingsProbed(Probed::Helper(generation, probe)),
         );
         let tokens = self.settings.accounts.iter().cloned().map(|account| {
             let runner = self.runner.clone();
+            let url = check_access
+                .then(|| {
+                    page.server(&account.protocol, &account.host)
+                        .map(|server| server.url.clone())
+                })
+                .flatten();
             Task::perform(
                 async move {
-                    let probe = match credential::has_login(
-                        &runner,
-                        &account.protocol,
-                        &account.host,
-                        &account.username,
-                    )
-                    .await
-                    {
-                        Ok(saved) => Probe::Known(saved),
-                        Err(e) => Probe::Failed(e.to_string()),
+                    let probe = match probe_account(&runner, &account, url.as_deref()).await {
+                        Ok(status) => Probe::Known(status),
+                        Err(error) => Probe::Failed(first_line(&error.to_string())),
                     };
                     (account, probe)
                 },
-                |(account, probe)| Message::SettingsProbed(Probed::Token(account, probe)),
+                move |(account, probe)| {
+                    Message::SettingsProbed(Probed::Token(generation, account, probe))
+                },
             )
         });
-        Task::batch(std::iter::once(helper).chain(tokens))
+        let probes = Task::batch(std::iter::once(helper).chain(tokens));
+        if check_access {
+            probes.chain(Task::done(Message::SettingsProbed(Probed::Refreshed(
+                generation,
+            ))))
+        } else {
+            probes
+        }
     }
 
-    pub(super) fn settings_probed(&mut self, probed: Probed) {
+    pub(super) fn settings_probed(&mut self, probed: Probed) -> Task<Message> {
         let page = &mut self.settings_page;
         match probed {
-            Probed::Helper(probe) => page.helper = probe,
+            Probed::Helper(generation, probe) if generation == page.probe_generation => {
+                page.helper = probe;
+            }
             Probed::HelperSet(Ok(helper)) => {
-                page.helper = Probe::Known(Some(helper.clone()));
+                page.changing_login = false;
                 self.flash(
                     NoteKind::Info,
                     format!("git keeps logins with `{helper}` now"),
                 );
+                return self.refresh_settings_page(false);
             }
-            Probed::HelperSet(Err(e)) => self.flash(
-                NoteKind::Error,
-                format!("could not set git's credential helper: {e}"),
-            ),
-            Probed::Token(account, probe) => {
-                match page.tokens.iter_mut().find(|(a, _)| *a == account) {
-                    Some(entry) => entry.1 = probe,
-                    None => page.tokens.push((account, probe)),
+            Probed::HelperSet(Err(e)) => {
+                page.changing_login = false;
+                self.flash(
+                    NoteKind::Error,
+                    format!("could not set git's credential helper: {e}"),
+                );
+            }
+            Probed::Token(generation, account, probe) if generation == page.probe_generation => {
+                if let Some(entry) = page.tokens.iter_mut().find(|(a, _)| *a == account) {
+                    entry.1 = probe;
                 }
             }
+            Probed::Refreshed(generation) if generation == page.probe_generation => {
+                self.flash(NoteKind::Info, "↻ accounts refreshed");
+            }
+            Probed::Helper(..) | Probed::Token(..) | Probed::Refreshed(_) => {}
         }
+        Task::none()
     }
 
     pub(super) fn on_settings(&mut self, message: settings_view::Message) -> Task<Message> {
@@ -158,35 +185,45 @@ impl App {
                 self.step_font_size(step);
                 Task::none()
             }
+            M::AddAccount
+            | M::LogInTo(_)
+            | M::UpdateToken(_)
+            | M::LogOut(_)
+            | M::UseHelper(_)
+                if self.settings_page.changing_login =>
+            {
+                Task::none()
+            }
             M::AddAccount => self.login_dialog(LoginAsk::default()),
+            M::RefreshAccounts => self.refresh_settings_page(true),
             M::LogInTo(server) => self.login_dialog(LoginAsk {
                 server: Some(server),
                 ..LoginAsk::default()
             }),
-            M::UpdateToken(i) => match self.settings.accounts.get(i).cloned() {
-                Some(account) => self.login_dialog(LoginAsk {
-                    server: Some(server_label(&account.protocol, &account.host)),
+            M::UpdateToken(account) if self.settings.accounts.contains(&account) => {
+                self.login_dialog(LoginAsk {
+                    server: Some(format!("{}://{}", account.protocol, account.host)),
                     user: Some(account.username),
+                    updating: true,
                     ..LoginAsk::default()
-                }),
-                None => Task::none(),
-            },
-            M::LogOut(i) => match self.settings.accounts.get(i).cloned() {
-                Some(account) => self.confirm(Confirm::delete(
-                    format!("Log out of {}?", account.host),
+                })
+            }
+            M::LogOut(account) if self.settings.accounts.contains(&account) => {
+                self.confirm(Confirm::delete(
+                    format!("Remove saved login for {}?", account.username),
                     vec![
                         format!(
-                            "git's credential helper forgets the token of {} on {}.",
-                            account.username, account.host
+                            "Git removes the saved credential for {}.",
+                            server_label(&account.protocol, &account.host)
                         ),
-                        "Fetching and pushing over HTTPS there will fail until you log in again."
+                        "This can also affect Git in your terminal. The token stays active on the server."
                             .into(),
                     ],
-                    "Log out",
+                    "Remove saved login",
                     Purpose::LogOut(account),
-                )),
-                None => Task::none(),
-            },
+                ))
+            }
+            M::UpdateToken(_) | M::LogOut(_) => Task::none(),
             M::PickService(host) => self.service_dialog(host),
             M::UseHelper(helper) => self.confirm(
                 Confirm::change(
@@ -205,6 +242,7 @@ impl App {
             ),
             M::EditEditor => self.tool_dialog(Tool::Editor),
             M::EditTerminal => self.tool_dialog(Tool::Terminal),
+            M::EditCloneRoot => self.tool_dialog(Tool::CloneRoot),
             M::EditWorktreeRoot => self.tool_dialog(Tool::WorktreeRoot),
             M::ToggleCopyIncluded => {
                 let on = !self.settings.worktrees.copy_included;
@@ -279,6 +317,18 @@ impl App {
                 wt.terminal.clone().unwrap_or_default(),
                 crate::platform::TERMINAL,
             ),
+            Tool::CloneRoot => (
+                "Default workspace",
+                "Leave it empty to use ~/gf-workspace.",
+                "folder",
+                self.settings
+                    .repos
+                    .clone_root
+                    .as_deref()
+                    .map(crate::widgets::format::tilde)
+                    .unwrap_or_default(),
+                DEFAULT_CLONE_ROOT,
+            ),
             Tool::WorktreeRoot => (
                 "Folder for new worktrees",
                 "Leave it empty to put them in <repository>-worktrees/ beside each repository.",
@@ -310,6 +360,15 @@ impl App {
                     wt.terminal.as_deref().unwrap_or(crate::platform::TERMINAL)
                 )
             }
+            Tool::CloneRoot => {
+                self.settings.repos.clone_root =
+                    (!value.is_empty()).then(|| crate::widgets::format::expand_tilde(value));
+                let root = self.settings.repos.clone_root.as_deref().map_or_else(
+                    || DEFAULT_CLONE_ROOT.to_owned(),
+                    crate::widgets::format::tilde,
+                );
+                format!("default clone workspace: {root}")
+            }
             Tool::WorktreeRoot => {
                 wt.root = (!value.is_empty()).then(|| crate::widgets::format::expand_tilde(value));
                 match &wt.root {
@@ -327,6 +386,7 @@ impl App {
     }
 
     pub(super) fn use_credential_helper(&mut self, helper: String) -> Task<Message> {
+        self.settings_page.changing_login = true;
         let runner = self.runner.clone();
         Task::perform(
             async move {
@@ -344,76 +404,74 @@ impl App {
     /// after a failed attempt, or for a push/pull/fetch the server refused
     /// (then run again once logged in).
     pub(super) fn login_dialog(&mut self, ask: LoginAsk) -> Task<Message> {
+        if self.settings_page.changing_login {
+            return Task::none();
+        }
         let mut servers = self.remote_servers();
-        // The active tab's server, unless already logged in there.
+        // Prefer the active tab's server when adding an account.
         let server = ask.server.clone().unwrap_or_else(|| {
             servers
                 .iter()
-                .find(|s| s.hint.starts_with("this tab") && !s.disabled)
+                .find(|s| s.hint.starts_with("this tab"))
                 .map(|s| s.value.clone())
                 .unwrap_or_default()
         });
         for host in WELL_KNOWN {
-            if servers.iter().any(|s| s.value == host) {
+            let url = format!("https://{host}");
+            if servers.iter().any(|s| s.value == url) {
                 continue;
             }
-            let account = self
-                .settings
-                .accounts
-                .iter()
-                .find(|a| a.protocol == "https" && a.host == host);
-            let hint = account.map_or_else(
-                || Provider::of(host).name().to_owned(),
-                |a| format!("logged in as {}", a.username),
-            );
-            servers.push(Suggestion::new(host, hint).disabled(account.is_some()));
+            servers.push(Suggestion::new(url, PROVIDERS.guess(host).name()));
         }
-        let known = credential::server_of(&server);
-        let user = ask.user.clone().unwrap_or_else(|| {
-            known
-                .as_ref()
-                .and_then(|(protocol, host)| {
-                    self.settings
-                        .accounts
-                        .iter()
-                        .find(|a| a.protocol == *protocol && a.host == *host)
+        let known = login_server(&server);
+        let user =
+            ask.user
+                .or_else(|| {
+                    let (protocol, host) = known.as_ref()?;
+                    ask.reason.as_ref()?;
+                    let mut users =
+                        self.settings.accounts.iter().filter(|account| {
+                            account.protocol == *protocol && account.host == *host
+                        });
+                    let account = users.next()?;
+                    users.next().is_none().then(|| account.username.clone())
                 })
-                .map(|a| a.username.clone())
-                .unwrap_or_default()
-        });
-        let mut body = ask.reason.clone().map_or_else(Vec::new, |r| vec![r]);
+                .unwrap_or_default();
+        let body = ask.reason.into_iter().collect();
         let provider = self.service_of(known.as_ref());
-        body.push(
-            "gf hands it to git's credential helper (Keychain, Credential Manager …) and \
-             does not keep it; git in the terminal uses it too."
-                .to_owned(),
-        );
         let confirm = match &ask.retry {
             Some(retry) => format!(
                 "Log in and {}",
                 crate::widgets::format::truncate(&retry.label, 40)
             ),
-            None => "Log in".to_owned(),
+            None if ask.updating => "Save token".to_owned(),
+            None => "Save login".to_owned(),
         };
         // The first field still empty takes the typing.
         let first_empty = [server.is_empty(), user.is_empty()]
             .iter()
             .position(|empty| *empty)
             .unwrap_or(2);
-        let dialog = Dialog::confirm(
-            "Log in to a git server",
+        let mut dialog = Dialog::confirm(
+            if ask.updating {
+                "Update Git token"
+            } else {
+                "Log in to a Git server"
+            },
             body,
             confirm,
             Purpose::LogIn(ask.retry.clone()),
         )
-        .field("server", server, "github.com")
-        .suggest(servers, "not a server of the open tabs");
-        let mut dialog = dialog
-            .field("user name", user, "your user name on the server")
-            .field("token", "", "personal access token or password")
-            .secret()
-            .link(token_link(known.as_ref(), provider));
-        dialog.set_options_in_a_row(service_row(known.as_ref(), provider));
+        .field("Server URL", server, "https://github.com")
+        .suggest(servers, "")
+        .quick_suggestions(WELL_KNOWN.len())
+        .field("Username", user, "")
+        .field("Access token", "", "")
+        .secret();
+        dialog.set_options_after_field(0, service_row(known.as_ref(), provider));
+        if let Some(server) = known.as_ref() {
+            dialog = dialog.link(token_link(server, provider));
+        }
         dialog.error = ask.error;
         let task = self.open_dialog(dialog);
         match first_empty {
@@ -424,9 +482,9 @@ impl App {
 
     /// The hosting service of a server: picked for its host in the
     /// settings, else guessed from the name. `Other` for no server.
-    fn service_of(&self, server: Option<&(String, String)>) -> Provider {
-        server.map_or(Provider::Other, |(_, host)| {
-            Provider::for_host(&self.settings.services, host)
+    fn service_of(&self, server: Option<&(String, String)>) -> ProviderKind {
+        server.map_or(ProviderKind::Other, |(_, host)| {
+            PROVIDERS.for_host(&self.settings.services, host)
         })
     }
 
@@ -445,31 +503,32 @@ impl App {
         else {
             return;
         };
-        let known = credential::server_of(&server);
+        let known = login_server(&server);
+        let origin_changed = server_before.and_then(login_server) != known;
         let guessed = self.service_of(known.as_ref());
-        let typed = server_before != Some(server.as_str());
         let Some(dialog) = self.dialog.as_mut() else {
             return;
         };
-        if typed {
-            dialog.set_options_in_a_row(service_row(known.as_ref(), guessed));
+        if origin_changed {
+            dialog.fields[2].value.clear();
+            dialog.set_options_after_field(0, service_row(known.as_ref(), guessed));
         }
         // A pick holds while the other fields are typed in.
         let provider = dialog
             .choice
             .as_ref()
-            .and_then(|c| Provider::ALL.get(c.selected).copied())
+            .and_then(|c| ProviderKind::ALL.get(c.selected).copied())
             .unwrap_or(guessed);
-        dialog.link = Some(token_link(known.as_ref(), provider));
+        dialog.link = known.as_ref().map(|server| token_link(server, provider));
     }
 
     /// Saves the service picked for `server`'s host; one the name already
     /// tells is not kept, so the guess applies again.
-    pub(super) fn remember_service(&mut self, server: &str, picked: Option<Provider>) {
+    pub(super) fn remember_service(&mut self, server: &str, picked: Option<ProviderKind>) {
         let (Some((_, host)), Some(picked)) = (credential::server_of(server), picked) else {
             return;
         };
-        let keep = (picked != Provider::of(&host)).then(|| picked.key());
+        let keep = (picked != PROVIDERS.guess(&host)).then(|| picked.key());
         if self.settings.services.get(&host).map(String::as_str) != keep {
             self.settings.set_service(&host, keep);
             self.save_settings();
@@ -479,10 +538,10 @@ impl App {
     /// Asks which hosting service `host` is (its tag on the settings
     /// screen was clicked).
     pub(super) fn service_dialog(&mut self, host: String) -> Task<Message> {
-        let current = Provider::for_host(&self.settings.services, &host);
-        let options = Provider::ALL
+        let current = PROVIDERS.for_host(&self.settings.services, &host);
+        let options = ProviderKind::ALL
             .iter()
-            .map(|p| Opt::new(p.pick_label()))
+            .map(|p| Opt::new(provider_label(*p)))
             .collect();
         let dialog = Dialog::confirm(
             format!("Which service is {host}?"),
@@ -501,12 +560,16 @@ impl App {
         self.open_dialog(dialog)
     }
 
-    pub(super) fn set_service(&mut self, host: &str, service: Option<Provider>) -> Task<Message> {
+    pub(super) fn set_service(
+        &mut self,
+        host: &str,
+        service: Option<ProviderKind>,
+    ) -> Task<Message> {
         if let Some(service) = service {
             self.remember_service(host, Some(service));
             self.flash(
                 NoteKind::Info,
-                format!("{host} is {}", service.pick_label()),
+                format!("{host} is {}", provider_label(service)),
             );
         }
         Task::none()
@@ -531,6 +594,9 @@ impl App {
         if self.dialog.is_some() || self.code_dialog.is_some() || self.rebase_editor().is_some() {
             return Task::none();
         }
+        if self.settings_page.changing_login {
+            return self.show_failure(label, error);
+        }
         let server = crate::git_actions::auth_server(error);
         let reason = match &server {
             Some(s) => format!("{} failed: {s} wants a login.", label),
@@ -544,8 +610,7 @@ impl App {
         })
     }
 
-    /// HTTPS servers of the open tabs' remotes, the active tab's first.
-    /// One already logged in to is shown, but not offered.
+    /// HTTP(S) servers of the open tabs' remotes, the active tab's first.
     fn remote_servers(&self) -> Vec<Suggestion> {
         let mut found: Vec<Suggestion> = Vec::new();
         let tabs = self
@@ -560,27 +625,18 @@ impl App {
             for remote in &snapshot.remotes {
                 let urls = [Some(remote.fetch_url.as_str()), remote.push_url.as_deref()];
                 // Only real URLs: a bare word in a remote is a local path.
-                let servers = urls
-                    .into_iter()
-                    .flatten()
-                    .filter(|url| url.contains("://"))
-                    .filter_map(credential::server_of);
+                let servers = urls.into_iter().flatten().filter_map(login_server);
                 for (protocol, host) in servers {
-                    let value = server_label(&protocol, &host);
+                    let value = format!("{protocol}://{host}");
                     if found.iter().any(|s| s.value == value) {
                         continue;
                     }
-                    let logged_in = self
-                        .settings
-                        .accounts
-                        .iter()
-                        .find(|a| a.protocol == protocol && a.host == host);
-                    let hint = match logged_in {
-                        Some(a) => format!("logged in as {}", a.username),
-                        None if i == 0 => format!("this tab · {}", remote.name),
-                        None => format!("{} · {}", tab.name(), remote.name),
+                    let hint = if i == 0 {
+                        format!("this tab · {}", remote.name)
+                    } else {
+                        format!("{} · {}", tab.name(), remote.name)
                     };
-                    found.push(Suggestion::new(value, hint).disabled(logged_in.is_some()));
+                    found.push(Suggestion::new(value, hint));
                 }
             }
         }
@@ -602,8 +658,16 @@ impl App {
             let Some(snapshot) = tab.snapshot.as_ref() else {
                 continue;
             };
+            let common_dir = tab.repo.common_dir();
+            let name = if common_dir.ends_with(".git") {
+                common_dir
+                    .parent()
+                    .and_then(std::path::Path::file_name)
+                    .map_or_else(|| tab.name(), |name| name.to_string_lossy().into_owned())
+            } else {
+                tab.name()
+            };
             for remote in &snapshot.remotes {
-                let used_by = format!("{} · {}", tab.name(), remote.name);
                 let urls = [Some(remote.fetch_url.as_str()), remote.push_url.as_deref()];
                 for url in urls.into_iter().flatten() {
                     let (list, protocol, host) = if url.contains("://")
@@ -615,21 +679,22 @@ impl App {
                     } else {
                         continue;
                     };
-                    match list
-                        .iter_mut()
-                        .find(|s| s.protocol == protocol && s.host == host)
+                    let index = match list
+                        .iter()
+                        .position(|s| s.protocol == protocol && s.host == host)
                     {
-                        Some(server) if !server.used_by.contains(&used_by) => {
-                            server.used_by.push(used_by.clone());
+                        Some(index) => index,
+                        None => {
+                            list.push(ServerUse {
+                                protocol,
+                                host,
+                                url: without_user(url),
+                                repositories: Default::default(),
+                            });
+                            list.len() - 1
                         }
-                        Some(_) => {}
-                        None => list.push(ServerUse {
-                            protocol,
-                            host,
-                            url: without_user(url),
-                            used_by: vec![used_by.clone()],
-                        }),
-                    }
+                    };
+                    list[index].repositories.add(common_dir, &name);
                 }
             }
         }
@@ -637,7 +702,7 @@ impl App {
     }
 
     pub(super) fn log_in(&mut self, values: &[String], retry: Option<Box<Retry>>) -> Task<Message> {
-        let Some((protocol, host)) = values.first().and_then(|v| credential::server_of(v)) else {
+        let Some((protocol, host)) = values.first().and_then(|v| login_server(v)) else {
             return Task::none();
         };
         let value = |i: usize| values.get(i).cloned().unwrap_or_default();
@@ -665,6 +730,7 @@ impl App {
             token: value(2),
         };
         let runner = self.runner.clone();
+        self.settings_page.changing_login = true;
         Task::perform(
             async move { save_and_check(&runner, &login, check_url).await },
             move |result| Message::LoggedIn(account.clone(), result, retry.clone()),
@@ -674,30 +740,38 @@ impl App {
     pub(super) fn logged_in(
         &mut self,
         account: Account,
-        result: Result<LoginSaved, String>,
+        result: Result<LoginCheck, String>,
         retry: Option<Box<Retry>>,
     ) -> Task<Message> {
+        self.settings_page.changing_login = false;
         match result {
-            Ok(saved) => {
-                let (kind, text) = match &saved.check {
+            Ok(check) => {
+                let (kind, text) = match &check {
                     LoginCheck::Verified => (
                         NoteKind::Info,
                         format!(
-                            "✓ logged in to {} as {} — the server took the token",
+                            "Login verified for {} as {}.",
+                            account.host, account.username
+                        ),
+                    ),
+                    LoginCheck::Reachable => (
+                        NoteKind::Info,
+                        format!(
+                            "Saved login for {} as {}. Repository reachable.",
                             account.host, account.username
                         ),
                     ),
                     LoginCheck::NotChecked => (
                         NoteKind::Info,
                         format!(
-                            "logged in to {} as {} — kept by git's `{}` helper",
-                            account.host, account.username, saved.helper
+                            "Saved login for {} as {}. Repository access unchecked.",
+                            account.host, account.username
                         ),
                     ),
                     LoginCheck::Unreachable(e) => (
                         NoteKind::Error,
                         format!(
-                            "logged in to {}, but could not reach it to check the token: {e}",
+                            "Saved login for {}. Could not confirm repository access: {e}",
                             account.host
                         ),
                     ),
@@ -706,7 +780,7 @@ impl App {
                 self.settings.remember_account(account);
                 self.save_settings();
                 let refresh = if self.settings_open {
-                    self.refresh_settings_page()
+                    self.refresh_settings_page(false)
                 } else {
                     Task::none()
                 };
@@ -717,7 +791,8 @@ impl App {
                 Task::batch([refresh, again])
             }
             Err(error) => self.login_dialog(LoginAsk {
-                server: Some(server_label(&account.protocol, &account.host)),
+                updating: retry.is_none() && self.settings.accounts.contains(&account),
+                server: Some(format!("{}://{}", account.protocol, account.host)),
                 user: Some(account.username),
                 error: Some(error),
                 retry,
@@ -727,6 +802,7 @@ impl App {
     }
 
     pub(super) fn log_out(&mut self, account: Account) -> Task<Message> {
+        self.settings_page.changing_login = true;
         let runner = self.runner.clone();
         let (protocol, host, user) = (
             account.protocol.clone(),
@@ -748,16 +824,29 @@ impl App {
         account: Account,
         result: Result<(), String>,
     ) -> Task<Message> {
+        self.settings_page.changing_login = false;
         match result {
             Ok(()) => {
                 self.settings.accounts.retain(|a| *a != account);
                 self.settings_page.tokens.retain(|(a, _)| *a != account);
                 self.save_settings();
-                self.flash(NoteKind::Info, format!("logged out of {}", account.host));
+                self.flash(
+                    NoteKind::Info,
+                    format!(
+                        "Removed saved login for {} on {}",
+                        account.username, account.host
+                    ),
+                );
+                if self.settings_open {
+                    return self.refresh_settings_page(false);
+                }
             }
             Err(error) => self.flash(
                 NoteKind::Error,
-                format!("could not log out of {}: {error}", account.host),
+                format!(
+                    "Could not remove the saved login for {} on {}: {error}",
+                    account.username, account.host
+                ),
             ),
         }
         Task::none()
@@ -779,31 +868,44 @@ impl App {
     }
 }
 
-/// Saves the login with git's credential helper, then checks it against
-/// `check_url` if given. A token the server refuses is not kept.
+async fn probe_account(
+    runner: &gf_git::GitRunner,
+    account: &Account,
+    url: Option<&str>,
+) -> gf_core::Result<AccountStatus> {
+    let Some(login) =
+        credential::saved_login(runner, &account.protocol, &account.host, &account.username)
+            .await?
+    else {
+        return Ok(AccountStatus::Missing);
+    };
+    let Some(url) = url else {
+        return Ok(AccountStatus::Saved);
+    };
+    match credential::check_remote_access(runner, url, &login).await {
+        Ok(true) => Ok(AccountStatus::Verified),
+        Ok(false) => Ok(AccountStatus::Saved),
+        Err(error) if crate::git_actions::needs_login(&error.to_string()) => {
+            Ok(AccountStatus::Rejected)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Checks the candidate before replacing anything in Git's credential helper.
 async fn save_and_check(
     runner: &gf_git::GitRunner,
     login: &Login,
     check_url: Option<String>,
-) -> Result<LoginSaved, String> {
-    let helper = credential::store_login(runner, login)
-        .await
-        .map_err(|e| e.to_string())?;
+) -> Result<LoginCheck, String> {
     let check = match check_url {
         None => LoginCheck::NotChecked,
-        Some(url) => match credential::verify_login(runner, &url).await {
-            Ok(()) => LoginCheck::Verified,
+        Some(url) => match credential::check_remote_access(runner, &url, login).await {
+            Ok(true) => LoginCheck::Verified,
+            Ok(false) => LoginCheck::Reachable,
             Err(e) => {
                 let e = e.to_string();
                 if crate::git_actions::needs_login(&e) {
-                    // git usually erases it already; make sure.
-                    let _ = credential::forget_login(
-                        runner,
-                        &login.protocol,
-                        &login.host,
-                        &login.username,
-                    )
-                    .await;
                     return Err(format!(
                         "{} refused this user name and token. Check both and try again.",
                         login.host
@@ -813,7 +915,10 @@ async fn save_and_check(
             }
         },
     };
-    Ok(LoginSaved { helper, check })
+    credential::store_login(runner, login)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(check)
 }
 
 fn first_line(text: &str) -> String {
@@ -863,27 +968,22 @@ fn ssh_host(url: &str) -> Option<String> {
 /// What the settings screen read in the background.
 #[derive(Debug, Clone)]
 pub enum Probed {
-    Helper(Probe<Option<String>>),
-    Token(Account, Probe<bool>),
+    Helper(u64, Probe<Option<String>>),
+    Token(u64, Account, Probe<AccountStatus>),
+    /// All probes from an explicit refresh have completed.
+    Refreshed(u64),
     /// `credential.helper` was set (to the value), or not.
     HelperSet(Result<String, String>),
 }
 
-/// A login git's credential helper took.
-#[derive(Debug, Clone)]
-pub struct LoginSaved {
-    /// The helper's name.
-    pub helper: String,
-    pub check: LoginCheck,
-}
-
-/// Whether the server took a login when gf tried it.
+/// The result of trying to read a remote before saving a login.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginCheck {
-    /// It listed a repository's branches with it.
+    /// Git approved the token after an authenticated read.
     Verified,
-    /// No open repository is on that server (or an operation to run again
-    /// will try it).
+    /// A remote returned its refs. It might be public.
+    Reachable,
+    /// No open repository is on that server, or the retried operation will check access.
     NotChecked,
     /// The server could not be reached (the error's last line).
     Unreachable(String),
@@ -894,6 +994,7 @@ pub enum LoginCheck {
 pub enum Tool {
     Editor,
     Terminal,
+    CloneRoot,
     WorktreeRoot,
 }
 
@@ -901,6 +1002,12 @@ pub enum Tool {
 pub(super) fn check_tool(tool: Tool, value: &str) -> Option<String> {
     match tool {
         Tool::Editor if value.trim().is_empty() => Some("an editor command is required".into()),
+        Tool::CloneRoot
+            if !value.trim().is_empty()
+                && !crate::widgets::format::expand_tilde(value.trim()).is_absolute() =>
+        {
+            Some("enter an absolute path or a path starting with ~/".into())
+        }
         _ => None,
     }
 }
@@ -910,6 +1017,8 @@ pub(super) fn check_tool(tool: Tool, value: &str) -> Option<String> {
 pub(super) struct LoginAsk {
     pub server: Option<String>,
     pub user: Option<String>,
+    /// An existing account's token is being replaced.
+    pub updating: bool,
     /// Why it is asked (said first).
     pub reason: Option<String>,
     /// Why the last attempt failed.
@@ -974,7 +1083,7 @@ pub(super) fn retry_after_login(kind: &OpKind, label: &str, repo: RepoId) -> Opt
     })
 }
 
-/// How a server reads in the dialog: `https` is left out.
+/// Compact server label for notices in settings.
 fn server_label(protocol: &str, host: &str) -> String {
     if protocol == "https" {
         host.to_owned()
@@ -984,11 +1093,11 @@ fn server_label(protocol: &str, host: &str) -> String {
 }
 
 /// Where `provider` sits among the log-in dialog's options.
-fn service_index(provider: Provider) -> usize {
-    Provider::ALL
+fn service_index(provider: ProviderKind) -> usize {
+    ProviderKind::ALL
         .iter()
         .position(|p| *p == provider)
-        .unwrap_or(Provider::ALL.len() - 1)
+        .unwrap_or(ProviderKind::ALL.len() - 1)
 }
 
 /// The log-in dialog's service row, asked only for a server whose name
@@ -996,50 +1105,50 @@ fn service_index(provider: Provider) -> usize {
 /// like need no pick. `provider` is the one selected.
 fn service_row(
     server: Option<&(String, String)>,
-    provider: Provider,
+    provider: ProviderKind,
 ) -> Option<(String, Vec<Opt>, usize)> {
     server
-        .filter(|(_, host)| Provider::of(host) == Provider::Other)
+        .filter(|(_, host)| PROVIDERS.guess(host) == ProviderKind::Other)
         .map(|_| {
-            let options = Provider::ALL
+            let options = ProviderKind::ALL
                 .iter()
-                .map(|p| Opt::new(p.pick_label()))
+                .map(|p| Opt::new(provider_label(*p)))
                 .collect();
-            ("service".to_owned(), options, service_index(provider))
+            ("Service".to_owned(), options, service_index(provider))
         })
 }
 
 /// The log-in dialog's token line: what to make and, for a known service,
 /// a button to the page that makes it. It names the service, as the row
 /// to pick one is left out where the name tells it.
-fn token_link(server: Option<&(String, String)>, provider: Provider) -> Link {
-    let page = server.and_then(|(protocol, host)| provider.token_page(protocol, host));
-    let hint = provider.token_hint();
+fn token_link((protocol, host): &(String, String), provider: ProviderKind) -> Link {
+    let Some(setup) = PROVIDERS.token_setup(provider, protocol, host) else {
+        return Link {
+            text: "Enter an access token or server password.".to_owned(),
+            open: None,
+        };
+    };
     Link {
-        text: match provider {
-            Provider::Other => format!("Use {hint} as the password."),
-            p => format!("{}: use {hint} as the password.", p.name()),
-        },
-        open: page.map(|page| ("Get token ↗".to_owned(), page)),
+        text: setup.guidance.to_owned(),
+        open: setup.page.map(|page| ("Get token ↗".to_owned(), page)),
     }
+}
+
+/// Login fields require an explicit HTTP(S) URL, including for private hosts.
+fn login_server(input: &str) -> Option<(String, String)> {
+    input.split_once("://")?;
+    credential::server_of(input)
 }
 
 /// What the log-in dialog's fields lack, if anything (server, user name,
 /// token).
 pub(super) fn check_login(values: &[String]) -> Option<String> {
     let value = |i: usize| values.get(i).map(String::as_str).unwrap_or_default();
-    if credential::server_of(value(0)).is_none() {
-        Some(if value(0).is_empty() {
-            "enter a server, e.g. github.com".into()
-        } else {
-            format!(
-                "`{}` is not an HTTPS server (SSH remotes use your SSH keys)",
-                value(0)
-            )
-        })
-    } else if value(1).is_empty() {
+    if login_server(value(0)).is_none() {
+        Some("Enter a server URL like https://github.com. SSH remotes use SSH keys.".into())
+    } else if value(1).trim().is_empty() {
         Some("a user name is required".into())
-    } else if value(2).is_empty() {
+    } else if value(2).trim().is_empty() {
         Some("a token is required".into())
     } else {
         None
@@ -1056,18 +1165,29 @@ mod tests {
 
     #[test]
     fn a_login_needs_an_https_server_a_user_and_a_token() {
-        assert_eq!(check_login(&values(["github.com", "me", "tok"])), None);
+        assert_eq!(
+            check_login(&values(["https://github.com", "me", "tok"])),
+            None
+        );
+        assert_eq!(
+            check_login(&values(["http://gitlab.local:8080", "me", "tok"])),
+            None
+        );
         assert_eq!(
             check_login(&values(["https://gitlab.example.com/a/b.git", "me", "tok"])),
             None
         );
         assert!(check_login(&values(["", "me", "tok"])).is_some());
         assert!(
+            check_login(&values(["github.com", "me", "tok"]))
+                .is_some_and(|e| e.contains("https://github.com"))
+        );
+        assert!(
             check_login(&values(["git@github.com:a/b.git", "me", "tok"]))
                 .is_some_and(|e| e.contains("SSH"))
         );
-        assert!(check_login(&values(["github.com", "", "tok"])).is_some());
-        assert!(check_login(&values(["github.com", "me", ""])).is_some());
+        assert!(check_login(&values(["https://github.com", "", "tok"])).is_some());
+        assert!(check_login(&values(["https://github.com", "me", ""])).is_some());
     }
 
     #[test]

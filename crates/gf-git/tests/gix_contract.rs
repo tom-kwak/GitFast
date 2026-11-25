@@ -976,8 +976,11 @@ async fn worktree_status_matches_the_git_cli() {
     work.git(&["merge", "-q", "--squash", "squashed"]);
     work.git(&["commit", "-q", "-m", "S: squash"]);
 
-    // Changes in the main tree: staged, unstaged, a wholly untracked
-    // folder (one entry with --untracked-files=normal) and loose files.
+    // Fresh edits on a squashed branch still count, even at a path whose
+    // committed change is already in main.
+    std::fs::write(dir("squashed").join("dirty.txt"), "dirty\n").unwrap();
+
+    // Staged, unstaged and individually reported untracked files.
     work.write("a.txt", "changed\n");
     work.write("b.txt", "staged\n");
     work.git(&["add", "b.txt"]);
@@ -1009,6 +1012,29 @@ async fn worktree_status_matches_the_git_cli() {
     }
     let s = at("squashed").await;
     assert!(s.squashed && s.merged() && s.ahead_of_base == 1, "{s:?}");
+    assert_eq!(s.touched, Some(paths(&["dirty.txt"])));
+    in_dir("squashed", &["rm", "s.txt"]);
+    worktree_statuses_match(&repo, &[dir("squashed")], "edited after squash").await;
+    assert_eq!(
+        at("squashed").await.touched,
+        Some(paths(&["dirty.txt", "s.txt"]))
+    );
+
+    let main = repo
+        .worktree_status(work.path(), Some("main"))
+        .await
+        .unwrap();
+    assert_eq!(main.untracked, 3);
+    assert_eq!(
+        main.touched,
+        Some(paths(&[
+            "a.txt",
+            "b.txt",
+            "loose.txt",
+            "new/deep/x.txt",
+            "new/y.txt"
+        ]))
+    );
     let topic_status = repo
         .worktree_status(&dir("topic"), Some("main"))
         .await

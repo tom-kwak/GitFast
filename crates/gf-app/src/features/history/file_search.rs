@@ -129,10 +129,15 @@ pub struct State {
 }
 
 impl State {
+    #[cfg(test)]
     pub fn open(&mut self, oid: Option<Oid>) -> Option<Work> {
+        self.open_with_query(oid, String::new())
+    }
+
+    pub fn open_with_query(&mut self, oid: Option<Oid>, query: String) -> Option<Work> {
         self.open = true;
         self.oid = oid.clone();
-        self.query.clear();
+        self.query = query;
         self.query_generation = self.query_generation.wrapping_add(1);
         self.pending_load = None;
         self.hits = Arc::default();
@@ -237,6 +242,13 @@ impl State {
             accepted,
             result_count,
             next,
+        }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match &self.status {
+            Status::Failed(error) => Some(error),
+            _ => None,
         }
     }
 

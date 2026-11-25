@@ -40,7 +40,7 @@
 ## 3. 워크스페이스
 
 크레이트 역할과 gf-app 내부 구조는 [DEVELOPMENT.md §2](docs/DEVELOPMENT.md)에 있습니다.
-`gf-commands`(M5), `gf-flow`(M6), `gf-hosting`·`gf-hosting-gitlab`·`gf-hosting-github`·`gf-auth`(M7)는 빈 자리만 있습니다. 사용을 시작할 때 루트 `Cargo.toml`의 주석을 풉니다.
+`gf-commands`(M5), `gf-flow`(M6), `gf-auth`(M7)는 빈 자리만 있습니다. 호스팅 계정 모델과 제공자 인터페이스는 `gf-hosting`에, 호스트 판별과 토큰 설정 정책은 제공자별 크레이트에 둡니다.
 
 ---
 
@@ -69,7 +69,8 @@
 - **예외 — 파일 트리 폴더 아이콘**: 글자 한 칸 크기의 선 폴더(열림/닫힘)를 canvas로 그립니다. 글자처럼 테마 토큰(`t.folder()`) 색과 글꼴 크기를 따릅니다(`widgets/file_tree.rs`)
 - **입력**: 하단 프롬프트(`gf ❯ `)가 기본 명령줄. 키보드 우선이지만 마우스도 1급(§4-2)
 - **상태 표시**: 상태줄에 브랜치, ahead/behind, 진행 중 작업
-- **버튼·다이얼로그**: `[ OK ]` `[ Cancel ]` 같은 텍스트 버튼, TUI 박스 스타일 다이얼로그
+- **상단 탭**: 기본 저장소 탭에는 프로젝트 이름을 표시합니다. 연결된 워크트리 탭에는 원본 프로젝트 이름과 현재 브랜치명(`gf ⎇ feature/example`)을 표시하고, detached HEAD 상태에서는 짧은 커밋 ID를 표시합니다.
+- **버튼·다이얼로그**: `[ OK ]` `[ Cancel ]` 같은 텍스트 버튼, TUI 박스 스타일 다이얼로그. Settings와 Open Repository 창은 헤더의 `×` 또는 Esc로 닫습니다.
 - 색·폰트 토큰은 `gf-app/src/theme/`에 모으고, 모든 위젯은 토큰만 참조합니다
 
 ## 4-2. 사용자 상호작용 원칙 (모든 UI 작업에 적용)
@@ -119,11 +120,11 @@
 ## 7. Git 서버 연동 (M7)
 
 ### 7.1 공통 trait
+`HostingProvider`는 현재 제공자 종류, 호스트 판별, 토큰 발급 주소와 요구 권한을 제공합니다. 앱은 제공자 구현을 등록하고 설정의 호스트별 선택을 우선 적용합니다. Git HTTPS 인증과 읽기 접근 확인은 `gf-git`이 수행합니다.
+
+호스팅 API를 추가할 때 저장소, PR·MR, 파이프라인 기능에 필요한 인터페이스를 정의합니다.
+
 ```rust
-trait HostingProvider: RepoApi + MergeRequestApi + PipelineApi {
-    fn kind(&self) -> ProviderKind;           // GitLab, GitHub, (추후) Bitbucket, Gitea
-    fn matches_remote(&self, url: &Url) -> bool;
-}
 trait RepoApi        { list_repos, search_repos, get_repo, clone_urls(ssh/https) }
 trait MergeRequestApi{ list, get, create, update, merge, close, approve/unapprove,
                        diffs, discussions/notes(라인 코멘트 포함), resolve_thread, assign_reviewers }
@@ -134,17 +135,19 @@ trait PipelineApi    { list_for_ref, get, jobs, retry, cancel }
 ### 7.2 계정
 - Personal Access Token(1차), OAuth Device Flow(2차)
 - self-hosted GitLab: base URL, 사내 CA 인증서 옵션
-- ✅ 설정 → ACCOUNTS: 서버·사용자·토큰으로 로그인/로그아웃. 토큰은 git credential helper에 저장하고(`gf_git::ops::credential`), 설정 파일에는 계정 메타데이터(`settings.accounts`)만 둡니다. 서비스(GitHub·GitLab·Bitbucket·Gitea·Azure)는 호스트 이름으로 추측하고, 로그인 다이얼로그의 service 줄은 이름으로 알 수 없는 서버에만 보이고(토큰 안내 줄이 추측한 서비스를 밝힘), 이름이 틀리게 말하면 계정 태그 클릭으로 고릅니다(`settings.services`에 호스트별로 저장). 토큰 페이지 버튼(`Get token ↗`)은 토큰을 입력하는 로그인 다이얼로그에만 둡니다
-  - 계정마다 서비스(호스트로 추정: GitHub·GitLab·Bitbucket·Gitea·Azure), helper에 토큰이 남아 있는지(`git credential fill`, 만료·폐기로 git이 지웠으면 ⚠와 [ Log in again ]), 그 서버를 쓰는 열린 저장소를 보여 줍니다
-  - 열린 저장소가 쓰지만 로그인하지 않은 HTTPS 서버는 NOT LOGGED IN에 [ Log in ]으로, SSH 서버는 따로 보여 줍니다. [ Get token ↗ ]은 서비스의 토큰 생성 페이지를 필요한 scope와 함께 엽니다
-  - 설정에서 로그인하면 열린 저장소의 그 서버 remote에 `git ls-remote`로 토큰을 확인하고, 서버가 거절하면 저장하지 않고 다이얼로그에 이유를 보입니다
-  - git에 credential helper가 없으면 플랫폼 helper(macOS Keychain, Git Credential Manager)를 확인 후 `--global`로 설정하는 버튼을 보입니다
-- ✅ 설정 화면: 왼쪽 섹션 목록(ACCOUNTS·APPEARANCE·TOOLS·CONFIRMATIONS, ↑/↓·⌘1–⌘4). git을 못 찾으면 모든 섹션 위에 경고를 보입니다. APPEARANCE는 테마(←/→)·글꼴 크기, TOOLS는 worktree용 편집기·터미널·새 worktree 폴더, CONFIRMATIONS는 "다시 묻지 않기"로 건너뛴 확인을 항목별로 되돌립니다
+- ✅ 설정 → ACCOUNTS: 서버·사용자·토큰으로 HTTPS 로그인을 저장합니다. 같은 서버에서 사용자명이 다른 계정을 각각 관리합니다. 토큰은 Git credential helper가 보관하며, 설정 파일에는 서버와 사용자명만 남깁니다. Git은 원격 URL과 credential 설정에 따라 사용할 자격 증명을 결정합니다. 특정 계정이 필요한 저장소는 Git의 URL별 `credential.username`이나 원격 URL의 사용자명으로 지정할 수 있습니다.
+  - 계정별로 저장된 토큰의 유무를 표시합니다. [ Refresh ]를 누르면 같은 서버에 열린 저장소를 읽어 보고 토큰으로 인증된 경우에만 Connected를 표시합니다. 인증 없이 접근 가능한 공개 저장소와 확인할 원격이 없는 서버는 Token saved로 표시합니다. 토큰 갱신과 삭제는 사용자명별로 합니다. 삭제 확인에는 터미널의 Git에도 영향을 줄 수 있고 서버의 토큰은 계속 활성 상태라는 점을 표시합니다.
+  - 서버별로 열린 저장소를 표시합니다. 두 곳부터는 첫 저장소와 나머지 개수만 표시하고 툴팁에 하나씩 줄을 나눠 표시합니다. 여러 원격이나 워크트리가 있는 저장소는 한 번만 셉니다. SSH 원격과 gf에 등록된 계정이 없는 HTTP(S) 원격은 각각 표시합니다. 서비스(GitHub·GitLab·Bitbucket·Gitea·Azure)는 호스트로 추측하며 설정의 계정 태그에서 바꿀 수 있습니다. [ Get token ↗ ]은 로그인 입력창에서 토큰 생성 페이지를 엽니다.
+  - 로그인 창의 Server URL에는 `https://github.com`처럼 스킴부터 입력합니다. 열린 원격과 주요 서비스 주소를 고를 수 있으며, 직접 입력한 서버의 서비스를 추측할 수 없으면 주소 아래에서 고릅니다. 주소가 정해지면 토큰 입력 안내를 표시합니다. 인증 대상 서버를 바꾸면 입력했던 토큰을 지웁니다.
+  - 설정에서 로그인할 때 같은 서버의 열린 원격이 있으면 `git ls-remote --heads`로 읽기 접근을 시도합니다. 후보 토큰만 받는 일회용 helper를 사용하므로 거절되면 기존 토큰이 보존됩니다. 공개 저장소는 토큰 없이 도달할 수 있으므로 성공 시 저장소 도달 여부만 표시합니다. 다른 서버 오류가 나면 토큰을 저장하고 접근을 확인하지 못했다고 표시합니다.
+  - 확인 대상 서버에 Git credential helper가 없으면 플랫폼 helper(macOS Keychain, Git Credential Manager)를 `--global`로 설정하는 버튼을 표시합니다. 적용 전에 확인합니다.
+- ✅ 설정 화면: 왼쪽 섹션 목록(ACCOUNTS·APPEARANCE·TOOLS·CONFIRMATIONS, ↑/↓·⌘1–⌘4). git을 못 찾으면 모든 섹션 위에 경고를 보입니다. APPEARANCE는 테마(←/→)·글꼴 크기, TOOLS는 기본 clone 폴더와 worktree용 편집기·터미널·새 worktree 폴더, CONFIRMATIONS는 "다시 묻지 않기"로 건너뛴 확인을 항목별로 되돌립니다
 - ✅ 서버에 접속하는 작업이 HTTPS 인증 실패로 끝나면 실패 알림 대신 그 서버로 채운 로그인 다이얼로그를 띄우고, 로그인하면 같은 작업을 다시 실행합니다: fetch·pull·push(publish·force push 포함)·태그 push·submodule update·LFS pull·프롬프트의 git 명령·clone. 브랜치 삭제(원격 포함)는 로그인만 받고 다시 실행하지 않습니다. SSH 키 거부는 기존 실패 알림
 - 남음: 호스팅 API로 토큰 확인(열린 저장소가 없는 서버), OAuth Device Flow
 
 ### 7.3 Clone
 - ✅ open 창(⌘O)에 URL(`https://…`, `git@host:path`)을 입력하면 clone 항목이 뜨고, 폴더를 물은 뒤 백그라운드에서 clone해서 탭으로 엽니다(`app/clone.rs`). 진행률은 상태 줄에 보이고 Esc·`[ cancel ]`로 취소하며, 실패·취소 시 clone이 만든 폴더를 지웁니다. 남음: 연결된 계정의 저장소 검색, 브랜치·depth·submodule 옵션
+- Settings → TOOLS → CLONE의 Default workspace에서 기본 경로를 설정합니다. clone 창은 이 경로 아래에 URL에서 가져온 저장소 이름을 붙여 제안합니다. 설정을 비워 두면 `~/gf-workspace/<저장소 이름>`을 사용합니다. 주소를 편집하면 제안 경로가 갱신되고, 직접 입력한 경로는 유지합니다.
 - URL 입력 또는 연결된 계정의 저장소 검색 → 선택
 - SSH/HTTPS, 대상 경로, 브랜치, depth, 재귀 submodule, LFS
 - 진행률(`--progress`) 표시, 취소 가능

@@ -223,8 +223,15 @@ pub struct State {
 pub struct Loaded {
     request: u64,
     base: Option<String>,
-    /// Each tree's status and its resolved folder.
-    statuses: Vec<(PathBuf, Result<WorktreeStatus, String>, Option<PathBuf>)>,
+    statuses: Vec<LoadedStatus>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedStatus {
+    path: PathBuf,
+    status: Result<WorktreeStatus, String>,
+    real: Option<PathBuf>,
+    overlap: Option<Overlap>,
 }
 
 #[derive(Debug, Clone)]
@@ -346,6 +353,7 @@ impl State {
     /// Takes the repository's worktree list (from a refresh), keeping what
     /// was read about trees that are still there.
     pub fn set_worktrees(&mut self, list: &[Worktree]) {
+        let mut changed = self.cards.len() != list.len();
         let mut old: std::collections::HashMap<PathBuf, Card> = self
             .cards
             .drain(..)
@@ -355,19 +363,28 @@ impl State {
             .iter()
             .enumerate()
             .map(|(i, w)| {
-                let prev = old.remove(&w.path);
+                let mut prev = old.remove(&w.path);
+                changed |= prev.as_ref().is_none_or(|c| c.tree != *w);
                 Card {
                     tree: w.clone(),
                     main: i == 0,
-                    status: prev.as_ref().and_then(|c| c.status.clone()),
-                    error: prev.as_ref().and_then(|c| c.error.clone()),
-                    overlap: prev.as_ref().and_then(|c| c.overlap.clone()),
+                    status: prev.as_mut().and_then(|c| c.status.take()),
+                    error: prev.as_mut().and_then(|c| c.error.take()),
+                    overlap: prev.as_mut().and_then(|c| c.overlap.take()),
                     real: prev.and_then(|c| c.real),
                     in_tab: false,
                     current: false,
                 }
             })
             .collect();
+        if changed {
+            // A pending result may still name a removed or renamed worktree.
+            self.request += 1;
+            self.loading = false;
+            for card in &mut self.cards {
+                card.overlap = None;
+            }
+        }
         self.cards.sort_by(|a, b| {
             b.main
                 .cmp(&a.main)
@@ -423,12 +440,12 @@ impl State {
         if self.loading {
             return Task::none();
         }
-        let paths: Vec<PathBuf> = self
+        let (paths, names): (Vec<_>, Vec<_>) = self
             .cards
             .iter()
             .filter(|c| c.readable())
-            .map(|c| c.tree.path.clone())
-            .collect();
+            .map(|c| (c.tree.path.clone(), c.name()))
+            .unzip();
         if paths.is_empty() {
             return Task::none();
         }
@@ -461,12 +478,27 @@ impl State {
                 Loaded {
                     request,
                     base,
-                    statuses: paths
-                        .into_iter()
-                        .zip(statuses)
-                        .enumerate()
-                        .map(|(i, (p, s))| (p, s, real.get(i).cloned().flatten()))
-                        .collect(),
+                    statuses: tokio::task::spawn_blocking(move || {
+                        let touched: Vec<_> = statuses
+                            .iter()
+                            .map(|s| s.as_ref().ok().and_then(|s| s.touched.as_deref()))
+                            .collect();
+                        let overlaps = overlaps(&touched, &names);
+                        paths
+                            .into_iter()
+                            .zip(statuses)
+                            .zip(overlaps)
+                            .enumerate()
+                            .map(|(i, ((path, status), overlap))| LoadedStatus {
+                                path,
+                                status,
+                                real: real.get(i).cloned().flatten(),
+                                overlap,
+                            })
+                            .collect()
+                    })
+                    .await
+                    .unwrap_or_default(),
                 }
             },
             |l| Message::Loaded(Box::new(l)),
@@ -479,29 +511,23 @@ impl State {
         }
         self.loading = false;
         self.base = l.base;
-        for (path, status, real) in l.statuses {
-            if let Some(c) = self.cards.iter_mut().find(|c| c.tree.path == path) {
-                match status {
+        for loaded in l.statuses {
+            if let Some(c) = self.cards.iter_mut().find(|c| c.tree.path == loaded.path) {
+                match loaded.status {
                     Ok(s) => {
                         c.status = Some(s);
                         c.error = None;
                     }
-                    Err(e) => c.error = Some(e),
+                    Err(e) => {
+                        c.status = None;
+                        c.error = Some(e);
+                    }
                 }
-                if real.is_some() {
-                    c.real = real;
+                c.overlap = loaded.overlap;
+                if loaded.real.is_some() {
+                    c.real = loaded.real;
                 }
             }
-        }
-        let touched: Vec<Option<&[PathBuf]>> = self
-            .cards
-            .iter()
-            .map(|c| c.status.as_ref().and_then(|s| s.touched.as_deref()))
-            .collect();
-        let names: Vec<String> = self.cards.iter().map(Card::name).collect();
-        let found = overlaps(&touched, &names);
-        for (c, o) in self.cards.iter_mut().zip(found) {
-            c.overlap = o;
         }
         self.mark_tabs();
     }
@@ -1453,15 +1479,14 @@ impl Feature for State {
 const OVERLAP_SHOWN: usize = 3;
 
 /// For each tree (`touched`: its sorted files, `None` when unknown), the
-/// files other trees touch too, by tree. An untracked folder (`dir/`)
-/// covers what is under it.
+/// exact paths other trees touch too, by tree.
 fn overlaps(touched: &[Option<&[PathBuf]>], names: &[String]) -> Vec<Option<Overlap>> {
     touched
         .iter()
         .enumerate()
         .map(|(i, mine)| {
             let mine = (*mine)?;
-            let mut all: Vec<&Path> = Vec::new();
+            let mut all = std::collections::HashSet::new();
             let mut lines = Vec::new();
             for (j, theirs) in touched.iter().enumerate() {
                 let Some(theirs) = theirs.filter(|_| j != i) else {
@@ -1474,7 +1499,7 @@ fn overlaps(touched: &[Option<&[PathBuf]>], names: &[String]) -> Vec<Option<Over
                 let shown: Vec<String> = shared
                     .iter()
                     .take(OVERLAP_SHOWN)
-                    .map(|p| p.display().to_string())
+                    .map(|p| format::repo_path(p))
                     .collect();
                 let more = match shared.len().saturating_sub(OVERLAP_SHOWN) {
                     0 => String::new(),
@@ -1483,8 +1508,6 @@ fn overlaps(touched: &[Option<&[PathBuf]>], names: &[String]) -> Vec<Option<Over
                 lines.push(format!("{}: {}{more}", names[j], shown.join(", ")));
                 all.extend(shared);
             }
-            all.sort_unstable();
-            all.dedup();
             (!all.is_empty()).then(|| {
                 lines.insert(0, "other worktrees change these files too".into());
                 lines.push("merging both may conflict".into());
@@ -1497,39 +1520,18 @@ fn overlaps(touched: &[Option<&[PathBuf]>], names: &[String]) -> Vec<Option<Over
         .collect()
 }
 
-/// Files of `mine` that `theirs` has too (both sorted); a folder entry
-/// (`dir/`) on either side matches the files under it.
+/// Intersects two sorted file lists, scanning the smaller one.
 fn shared_files<'a>(mine: &'a [PathBuf], theirs: &'a [PathBuf]) -> Vec<&'a Path> {
-    let is_dir = |p: &Path| p.as_os_str().to_string_lossy().ends_with('/');
-    // The entries of `list` that are `dir` or under it.
-    let under = |list: &'a [PathBuf], dir: &Path| -> &'a [PathBuf] {
-        let start = list.partition_point(|p| p.as_path() < dir);
-        let len = list[start..]
-            .iter()
-            .take_while(|p| p.starts_with(dir))
-            .count();
-        &list[start..start + len]
+    let (smaller, larger) = if mine.len() <= theirs.len() {
+        (mine, theirs)
+    } else {
+        (theirs, mine)
     };
-    // Untracked folders are few: gathered once, not per file.
-    let their_dirs: Vec<&Path> = theirs
+    smaller
         .iter()
+        .filter(|path| larger.binary_search(path).is_ok())
         .map(PathBuf::as_path)
-        .filter(|p| is_dir(p))
-        .collect();
-    let mut out: Vec<&Path> = Vec::new();
-    for p in mine {
-        let hit = if is_dir(p) {
-            !under(theirs, p).is_empty()
-        } else {
-            theirs.binary_search(p).is_ok()
-                || (!their_dirs.is_empty()
-                    && p.ancestors().skip(1).any(|a| their_dirs.contains(&a)))
-        };
-        if hit {
-            out.push(p.as_path());
-        }
-    }
-    out
+        .collect()
 }
 
 #[cfg(test)]
@@ -1572,7 +1574,12 @@ mod tests {
             base: Some("main".into()),
             statuses: statuses
                 .into_iter()
-                .map(|(p, st)| (PathBuf::from(p), Ok(st), None))
+                .map(|(p, st)| LoadedStatus {
+                    path: p.into(),
+                    status: Ok(st),
+                    real: None,
+                    overlap: None,
+                })
                 .collect(),
         })));
     }
@@ -1607,7 +1614,12 @@ mod tests {
         let old = Loaded {
             request: s.request - 1,
             base: None,
-            statuses: vec![("/b".into(), Ok(status(9)), None)],
+            statuses: vec![LoadedStatus {
+                path: "/b".into(),
+                status: Ok(status(9)),
+                real: None,
+                overlap: None,
+            }],
         };
         let _ = s.update(Message::Loaded(Box::new(old)));
         assert!(
@@ -1621,6 +1633,33 @@ mod tests {
             s.cards().iter().any(|c| c.status.is_some()),
             "kept /a's status"
         );
+    }
+
+    #[test]
+    fn removing_a_worktree_invalidates_its_badge_and_pending_results() {
+        let mut s = state();
+        let a = s.cards.iter_mut().find(|c| c.name() == "a").expect("a");
+        let overlap = Overlap {
+            files: 1,
+            tip: "b: file.txt".into(),
+        };
+        a.overlap = Some(overlap.clone());
+        s.loading = true;
+        let pending = Loaded {
+            request: s.request,
+            base: None,
+            statuses: vec![LoadedStatus {
+                path: "/a".into(),
+                status: Ok(status(1)),
+                real: None,
+                overlap: Some(overlap),
+            }],
+        };
+
+        s.set_worktrees(&[tree("/r", "main"), tree("/a", "a")]);
+        let _ = s.update(Message::Loaded(Box::new(pending)));
+        assert!(!s.loading);
+        assert!(s.cards.iter().all(|c| c.overlap.is_none()));
     }
 
     #[test]
@@ -1899,20 +1938,11 @@ mod tests {
     }
 
     #[test]
-    fn shared_files_match_exactly_or_under_an_untracked_folder() {
-        let a = paths(&["new/", "src/a.rs", "src/b.rs", "z.rs"]);
-        let b = paths(&["new/x.rs", "other/", "src/a.rs", "src/c.rs"]);
-        let c = paths(&["other/deep/y.rs", "z.rs"]);
-        assert_eq!(
-            shared_files(&a, &b),
-            [Path::new("new/"), Path::new("src/a.rs")]
-        );
-        assert_eq!(
-            shared_files(&b, &a),
-            [Path::new("new/x.rs"), Path::new("src/a.rs")]
-        );
-        assert_eq!(shared_files(&c, &b), [Path::new("other/deep/y.rs")]);
-        assert!(shared_files(&paths(&["src"]), &paths(&["src-x/a"])).is_empty());
+    fn only_identical_paths_are_shared() {
+        let a = paths(&["new/left.rs", "src/a.rs", "src/b.rs"]);
+        let b = paths(&["new/right.rs", "src/a.rs"]);
+        assert_eq!(shared_files(&a, &b), [Path::new("src/a.rs")]);
+        assert_eq!(shared_files(&b, &a), [Path::new("src/a.rs")]);
     }
 
     #[test]
@@ -1960,7 +1990,12 @@ mod tests {
         let _ = s.update(Message::Loaded(Box::new(Loaded {
             request,
             base: None,
-            statuses: vec![("/a".into(), Ok(status(1)), Some("/real/a".into()))],
+            statuses: vec![LoadedStatus {
+                path: "/a".into(),
+                status: Ok(status(1)),
+                real: Some("/real/a".into()),
+                overlap: None,
+            }],
         })));
         assert!(s.cards().iter().any(|c| c.in_tab && c.name() == "a"));
     }

@@ -50,12 +50,13 @@ gf-git/src/
 | | log: 경로 필터, `--follow`, `--author`, `--grep`, `-S`, `a...b` | CLI | gix가 `Unsupported` 반환 |
 | | head_exists | **gix** ✅ | |
 | RefOps / RemoteOps | branches(upstream·ahead/behind·gone 포함), tags, remotes, unpushed_count, unpushed | **gix** ✅ | gix-ref·config 안정화 후보. 서명된 태그, `insteadOf`, URL이 여러 개인 remote는 CLI |
+| | 히스토리 커밋 검색(메시지·해시) | CLI | 메시지는 대소문자 무시 고정 문자열 grep, 해시는 같은 범위의 rev-list에서 접두어를 비교합니다. 해시 일치를 먼저 보여주고 중복을 제거합니다 |
 | ReflogOps | reflog, head_oid | **gix** ✅ | |
 | | reset, undo_to | CLI | 고수준 reset 없음 |
 | StashOps | stashes(목록) | **gix** ✅ | `refs/stash` reflog |
 | | push/apply/pop/drop | CLI | |
 | WorktreeOps | 목록 | **gix** ✅ | unborn 브랜치의 worktree는 CLI. 연결된 트리에서 읽어도 main 트리가 맨 앞(git과 같음) |
-| | worktree_status, default_base | **gix** ✅ | 그 트리를 gix로 따로 엽니다. CLI는 트리 하나에 git을 6~12번 실행했습니다(status·log·reflog·config·rev-list·merge-base). status는 `--untracked-files=normal`처럼 폴더를 한 항목으로 셉니다. `diff.ignoreSubmodules` 설정, unborn 브랜치, intent-to-add 항목은 CLI. `touched`(겹침 경고)는 merge_base 트리 ↔ HEAD 트리 diff(이름 바꾸기 추적 없음) + status 항목이고, CLI는 `diff --name-only --no-renames`를 하나 더 실행합니다(base보다 앞선 커밋이 있을 때만). 2000개를 넘으면 `None`. `ahead_of_base`는 머지 커밋을 빼고 셉니다(CLI: `rev-list --count --no-merges`, 앞선 커밋이 있을 때만). `work_in_base`는 브랜치 reflog에서 이 브랜치가 직접 만든 커밋(commit·cherry-pick·revert, 커밋을 싣고 간 rebase) 중 하나라도 base에 들어갔는지 봅니다(최근 64개, CLI: 커밋마다 `merge-base --is-ancestor`). `squashed`는 base가 앞서 있고 앞선 커밋도 있을 때, 그 커밋들이 바꾼 파일이 base와 HEAD에서 모두 같은지 봅니다(gix: 두 트리에서 경로별 항목 비교, CLI: `diff --name-only --no-renames <base> HEAD`) |
+| | worktree_status, default_base | **gix** ✅ | 그 트리를 gix로 따로 엽니다. CLI는 트리 하나에 git을 6~12번 실행했습니다(status·log·reflog·config·rev-list·merge-base). status는 `--untracked-files=all`처럼 미추적 파일을 개별 경로로 읽습니다. `diff.ignoreSubmodules` 설정, unborn 브랜치, intent-to-add 항목은 CLI. `touched`(겹침 경고)는 merge_base 트리 ↔ HEAD 트리의 미반영 변경 경로와 현재 status의 파일 경로를 합칩니다. CLI는 base보다 앞선 커밋이 있을 때 `diff --name-only --no-renames`로 커밋의 변경 경로를 읽습니다. `squashed`인 경우에는 현재 status의 변경만 비교합니다. 앱은 경로가 일치하는 파일을 백그라운드에서 세고, 조회에 실패한 워크트리는 해당 비교에서 제외합니다. 파일 개수 상한을 두지 않고 CLI 출력은 32 MiB로 제한합니다. `ahead_of_base`는 머지 커밋을 빼고 셉니다(CLI: `rev-list --count --no-merges`, 앞선 커밋이 있을 때만). `work_in_base`는 브랜치 reflog에서 이 브랜치가 직접 만든 커밋(commit·cherry-pick·revert, 커밋을 싣고 간 rebase) 중 하나라도 base에 들어갔는지 봅니다(최근 64개, CLI: 커밋마다 `merge-base --is-ancestor`). `squashed`는 base가 앞서 있고 앞선 커밋도 있을 때, 그 커밋들이 바꾼 파일이 base와 HEAD에서 모두 같은지 봅니다(gix: 두 트리에서 경로별 항목 비교, CLI: `diff --name-only --no-renames <base> HEAD`) |
 | | pull_rebases | **gix** ✅ | 그 트리를 열어 `branch.<b>.rebase`, 없으면 `pull.rebase`를 읽습니다. git의 false 값(`false`·`no`·`off`·`0`)만 merge이고 `merges`·`interactive`는 rebase입니다. worktree의 "update from base" 기본값에만 씁니다 |
 | | work_base (`Repository` 조합) | **gix** ✅ | default_base + 현재 트리의 worktree_status를 그대로 씁니다. 추측한 base(`base_guessed`)는 돌려주지 않습니다. linked 트리에서 base로 switch할 때만 읽습니다 |
 | | add, remove, prune, lock/unlock | CLI | |
@@ -85,7 +86,7 @@ gf-git/src/
 | BisectOps / LfsOps | 전부 | CLI | 미구현 |
 | MaintenanceOps | commit-graph 작성(없을 때만) | CLI | 저장소 파일을 쓰는 작업이라 git이 만든 것과 같아야 함 |
 | (Repository::run) | 프롬프트의 임의 git 명령 | CLI | "모든 git 명령" 경로 |
-| (ops::credential) | 로그인 저장·삭제(`credential approve`/`reject`), 토큰 유무(`credential fill`, 프롬프트 없이), 토큰 확인(`ls-remote --heads`), helper 확인·설정(`config --get-urlmatch`/`--global credential.helper`) | CLI | 저장소 없이 실행. 토큰은 사용자의 credential helper가 보관하므로 git이 해야 함 |
+| (ops::credential) | 로그인 저장·삭제(`credential approve`/`reject`), 저장 토큰 조회(`credential fill`, 프롬프트 없이), 후보·저장 토큰으로 읽기 접근 시도(`ls-remote --heads`, 일회용 helper), helper 확인·설정(`config --get-urlmatch`/`--global credential.helper`) | CLI | 저장소 없이 실행. 계정 상태 확인은 일회용 helper의 인증 승인 여부를 보고, 사용자의 credential helper에 있는 토큰은 그대로 둠 |
 
 ## 3. 단계
 

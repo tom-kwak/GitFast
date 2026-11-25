@@ -16,8 +16,8 @@ use super::gix_backend::{count, err, head_id, oid, resolve, text, unsupported};
 use super::gix_status::status_with;
 use crate::cli::parse::log::split_message;
 use crate::ops::worktree::{
-    ACTIVITY_SAMPLE, LastCommit, MADE_HERE_CHECKED, TOUCHED_CAP, USUAL_BASES, WorktreeStatus,
-    made_here, parse_created_from, status_counts, touched,
+    ACTIVITY_SAMPLE, LastCommit, MADE_HERE_CHECKED, USUAL_BASES, WorktreeStatus, made_here,
+    parse_created_from, status_counts, touched,
 };
 
 /// `git config --get <section>.<sub>.<key>`: the last value, trimmed;
@@ -156,7 +156,6 @@ pub(super) fn worktree_status(path: &Path, base: Option<&str>) -> Result<Worktre
     }
     let report = status_with(
         &repo,
-        gix::status::UntrackedFiles::Collapsed,
         gix::status::Submodule::AsConfigured { check_dirty: true },
     )?;
     let mut s = status_counts(&report);
@@ -210,7 +209,7 @@ pub(super) fn worktree_status(path: &Path, base: Option<&str>) -> Result<Worktre
         s.base_guessed = guessed;
         base_id = Some(other);
     }
-    let committed = match (&s.merge_base, head, s.ahead_of_base) {
+    let mut committed = match (&s.merge_base, head, s.ahead_of_base) {
         (Some(fork), Some(head), 1..) => committed_paths(&repo, fork, head)?,
         _ => Vec::new(),
     };
@@ -219,11 +218,13 @@ pub(super) fn worktree_status(path: &Path, base: Option<&str>) -> Result<Worktre
     if let (Some(other), Some(head)) = (base_id, head)
         && s.behind_base > 0
         && !committed.is_empty()
-        && committed.len() <= TOUCHED_CAP
     {
         s.squashed = same_in_both(&repo, &committed, other, head)?;
     }
-    s.touched = touched(&report, committed);
+    if s.squashed {
+        committed.clear();
+    }
+    s.touched = Some(touched(&report, committed));
     let mut newest: Option<SystemTime> = None;
     for e in report
         .entries

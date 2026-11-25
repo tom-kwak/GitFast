@@ -157,10 +157,10 @@ pub enum Purpose {
     /// Save the hosting service picked for `host` (the option chosen).
     SetService {
         host: String,
-        service: Option<crate::features::settings_view::Provider>,
+        service: Option<gf_hosting::ProviderKind>,
     },
     /// Forget the login (`settings.accounts`) in git's credential helper.
-    LogOut(gf_config::Account),
+    LogOut(gf_hosting::Account),
     /// Set git's global `credential.helper` so logins can be kept.
     UseCredentialHelper(String),
     /// Field: one of the TOOLS settings (Settings → TOOLS).
@@ -183,6 +183,13 @@ pub enum Purpose {
     RevealCommit {
         oid: gf_core::model::Oid,
         at: super::reveal::Located,
+    },
+    /// Reveal a search result after confirming the longer load.
+    RevealSearchCommit {
+        id: gf_core::model::RepoId,
+        generation: u64,
+        oid: gf_core::model::Oid,
+        rows: usize,
     },
     MarkResolved(PathBuf),
     /// Fields: branch, folder (empty: `root/<branch>`). Choice: start a
@@ -614,19 +621,12 @@ impl App {
                     },
                     Purpose::SetService { host, .. } => Purpose::SetService {
                         host,
-                        service: choice.and_then(|i| {
-                            crate::features::settings_view::Provider::ALL
-                                .get(i)
-                                .copied()
-                        }),
+                        service: choice.and_then(|i| gf_hosting::ProviderKind::ALL.get(i).copied()),
                     },
                     // The service picked beside the server is kept for it.
                     Purpose::LogIn(retry) => {
-                        let picked = choice.and_then(|i| {
-                            crate::features::settings_view::Provider::ALL
-                                .get(i)
-                                .copied()
-                        });
+                        let picked =
+                            choice.and_then(|i| gf_hosting::ProviderKind::ALL.get(i).copied());
                         if let Some(server) = values.first() {
                             self.remember_service(server, picked);
                         }
@@ -1156,6 +1156,12 @@ impl App {
                 choices,
             } => self.run_resolve(path, segments, choices),
             Purpose::RevealCommit { oid, at } => self.show_located(oid, at),
+            Purpose::RevealSearchCommit {
+                id,
+                generation,
+                oid,
+                rows,
+            } => self.load_search_commit(id, generation, oid, rows),
             Purpose::TakeSide(path, side) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.conflict = None;
