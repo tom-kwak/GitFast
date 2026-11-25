@@ -346,6 +346,63 @@ async fn worktrees() {
 }
 
 #[tokio::test]
+async fn a_new_worktree_gets_the_ignored_files_worktreeinclude_lists() {
+    let repo = TestRepo::new();
+    repo.write(".gitignore", ".env\nsecret/\nbuild/\n");
+    repo.write(
+        ".worktreeinclude",
+        "# local files\n.env\nsecret/**\n!secret/skip.txt\nREADME.md\nnotes.txt\n",
+    );
+    repo.write("README.md", "hi\n");
+    repo.commit_all("a");
+    repo.write(".env", "A=1\n");
+    repo.write("secret/keys/a.pem", "key\n");
+    repo.write("secret/skip.txt", "no\n");
+    repo.write("build/out.bin", "ignored, not listed\n");
+    repo.write("notes.txt", "listed, not ignored\n");
+    let r = open(&repo).await;
+    let extra = tempfile::tempdir().unwrap();
+    let path = extra.path().join("wt");
+    r.add_worktree(&path, "side", true, None).await.unwrap();
+
+    let copy = r.copy_included(&path).await.unwrap();
+    assert!(copy.listed);
+    let mut copied = copy.copied.clone();
+    copied.sort();
+    assert_eq!(
+        copied,
+        vec![
+            std::path::PathBuf::from(".env"),
+            std::path::PathBuf::from("secret/keys/a.pem")
+        ]
+    );
+    assert!(copy.failed.is_empty());
+    assert_eq!(std::fs::read_to_string(path.join(".env")).unwrap(), "A=1\n");
+    for absent in ["secret/skip.txt", "build/out.bin", "notes.txt"] {
+        assert!(!path.join(absent).exists(), "{absent} is not copied");
+    }
+
+    // Again: what is there stays.
+    let again = r.copy_included(&path).await.unwrap();
+    assert!(again.copied.is_empty());
+    assert_eq!(again.kept.len(), 2);
+
+    // Without the file, nothing is read or copied.
+    let bare = TestRepo::new();
+    bare.write(".gitignore", ".env\n");
+    bare.commit_all("a");
+    bare.write(".env", "A=1\n");
+    let b = open(&bare).await;
+    let other = extra.path().join("wt2");
+    b.add_worktree(&other, "side", true, None).await.unwrap();
+    assert_eq!(
+        b.copy_included(&other).await.unwrap(),
+        gf_git::IncludedCopy::default()
+    );
+    assert!(!other.join(".env").exists());
+}
+
+#[tokio::test]
 async fn work_base_is_only_the_one_known_for_sure() {
     let repo = TestRepo::new();
     repo.write("a.txt", "a\n");

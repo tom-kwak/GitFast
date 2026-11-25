@@ -43,6 +43,6 @@ pub use ops::state::RepoState;
 pub use ops::submodule::{Submodule, SubmoduleStatus};
 pub use ops::sync::{CONFIGURED_PUSH_REWRITES, PullMode, PushOptions};
 pub use ops::undo::{Capture, FileContent, Head, HeadMode, Scope, UNDO_REF};
-pub use ops::worktree::{LastCommit, Worktree, WorktreeStatus};
+pub use ops::worktree::{INCLUDE_FILE, IncludedCopy, LastCommit, Worktree, WorktreeStatus};
 pub use repository::Repository;
 pub use tokio_util::sync::CancellationToken;

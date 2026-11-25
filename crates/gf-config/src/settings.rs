@@ -155,6 +155,10 @@ pub struct WorktreeSettings {
     /// Seconds between status reads of the other trees while the view is
     /// shown (their files are not watched).
     pub poll_secs: u64,
+    /// Copy the git-ignored files a repository's `.worktreeinclude` lists
+    /// (`.env` …) into each new worktree, as Claude Code, Conductor and
+    /// other worktree tools do.
+    pub copy_included: bool,
 }
 
 impl Default for WorktreeSettings {
@@ -164,6 +168,7 @@ impl Default for WorktreeSettings {
             terminal: None,
             root: None,
             poll_secs: 5,
+            copy_included: true,
         }
     }
 }
@@ -248,6 +253,7 @@ mod tests {
         s.repos.active = Some(1);
         s.worktrees.editor = "cursor".into();
         s.worktrees.root = Some("/w".into());
+        s.worktrees.copy_included = false;
         s.accounts = vec![Account {
             protocol: "https".into(),
             host: "git.example.com:8443".into(),
@@ -271,6 +277,8 @@ mod tests {
         assert!(s.appearance.show_history);
         assert!(!s.appearance.show_command_log);
         assert_eq!(s.appearance.theme, "gf-dark");
+        // Files from before the setting existed copy included files.
+        assert!(s.worktrees.copy_included);
     }
 
     #[test]

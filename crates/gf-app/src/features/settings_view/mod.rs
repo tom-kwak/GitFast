@@ -164,6 +164,8 @@ pub enum Message {
     EditEditor,
     EditTerminal,
     EditWorktreeRoot,
+    /// Turn copying `.worktreeinclude` files into new worktrees on or off.
+    ToggleCopyIncluded,
     /// Ask again before `settings.confirm.skip[i]`.
     AskAgain(usize),
     AskAgainAll,
@@ -614,6 +616,39 @@ fn tools<'a>(t: &'a Tokens, p: &Props<'a>) -> Element<'a, Message> {
             "where `worktree add` puts new trees".into(),
             Message::EditWorktreeRoot,
         ),
+        column![
+            labeled(
+                t,
+                "local files",
+                row![
+                    if wt.copy_included {
+                        mono(t, "copy what .worktreeinclude lists")
+                    } else {
+                        dim(t, "not copied")
+                    },
+                    space().width(Length::Fill),
+                    widgets::text_button(
+                        t,
+                        if wt.copy_included {
+                            "Turn off"
+                        } else {
+                            "Turn on"
+                        },
+                        None,
+                        Some(Message::ToggleCopyIncluded),
+                    ),
+                ]
+            ),
+            row![
+                space().width(t.cols(15)),
+                dim(
+                    t,
+                    "ignored files (.env …) the repository's .worktreeinclude lists"
+                ),
+            ]
+            .spacing(8),
+        ]
+        .spacing(2),
     ]
     .spacing(10)
     .into()
