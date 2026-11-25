@@ -45,7 +45,9 @@ runs is shown, and anything it does not cover can be typed on its `gf ❯` line.
 
 - **History**: a commit graph drawn in text, with branch and tag labels.
   Lines to parents more than 50 rows below are cut into arrows (`↓`, `↑N`),
-  so the graph stays narrow. `⌘F` lists only the commits that changed a file.
+  so the graph stays narrow. `⌘F` opens Find. Choose **Files** to see a
+  file's history or **Commits** to jump to a commit by message or hash
+  within the current history scope, including older commits.
   Drag the divider under the commit list to resize it; double-click resets it.
   All branches leaves stash commits, notes and prefetch refs out of the graph.
 - **Working tree**: stage files, hunks or single lines; stage, stash or
@@ -82,17 +84,23 @@ runs is shown, and anything it does not cover can be typed on its `gf ❯` line.
 ### Several repositories and trees
 
 - **Tabs**: one per repository or worktree, restored at start. Drag a tab to
-  reorder it; `⌘1`–`⌘9`, `⌃⇥` and `⌘P` switch between them.
+  reorder it; `⌘1`–`⌘9`, `⌃⇥` and `⌘P` switch between them. Linked
+  worktree tabs show the project name alongside the current branch. A
+  detached HEAD shows a short commit hash beside the project name.
 - **Worktrees panel** (`⌘⇧B`) for several working trees at once, for example
   one per AI agent; see [Worktrees](#worktrees).
 
 ### Remotes and logins
 
-- **Clone by URL**: `⌘O` accepts a URL and clones it in the background; Esc
-  cancels.
-- **Logins**: Settings keeps your HTTPS git logins in git's own credential
-  helper, shared with terminal git. A fetch, pull or push that fails on
-  authentication asks for a login and retries.
+- **Clone by URL**: `⌘O` suggests a destination in `~/gf-workspace` and
+  clones in the background. Set a different default in Settings > Tools
+  or edit the destination for a single clone. Esc cancels the clone.
+- **HTTPS accounts**: Settings > Accounts manages multiple logins per host
+  and can check saved credentials against open repositories. Token setup
+  guidance covers GitHub, GitLab, Bitbucket, Gitea and Azure DevOps. Git's
+  credential helper stores the tokens, so terminal git can use them too.
+  A fetch, pull or push that fails on authentication asks for a login
+  and retries.
 
 ### Look
 
@@ -155,7 +163,8 @@ main ← 3 to merge · 3 new
   alone does not count.
 - Below it: uncommitted files, `⚠ n shared` when other worktrees change the
   same files, and the upstream distance (`↑2 ↓1`, `⊘` when never pushed) with
-  the last commit.
+  the last commit. Shared counts match individual paths, including files in
+  untracked directories.
 - `+` adds a worktree; the branch menu's "new worktree…" (`w`) starts one for
   that branch.
 - A new worktree gets the git-ignored files (`.env` …) that the repository's
@@ -202,7 +211,7 @@ On Windows, `⌘` is `Ctrl` (`⌘⇧Z` is `Ctrl+Shift+Z`).
 | `⌘⇧H` | Show or hide the history |
 | `⌘J` | Show or hide the command log |
 | `⌘L` | Go to the `gf ❯` command line |
-| `⌘F` | Find a file in the history; find text in a diff or blame |
+| `⌘F` | Find a file or commit in History, or find text in a diff or blame |
 | `⌘G` / `⌘⇧G` | Next / previous match |
 | `⌘C` / `⌘A` | Copy the selected diff lines / select all |
 | `⌘,` | Settings |
@@ -210,13 +219,19 @@ On Windows, `⌘` is `Ctrl` (`⌘⇧Z` is `Ctrl+Shift+Z`).
 
 ## Releasing
 
+Update the workspace version in `Cargo.toml` and `Cargo.lock`, add
+`docs/release-notes/<version>.md`, and merge the release changes from
+`develop` into `main`. Tag the merge commit with the workspace version and
+push `main` and the tag together.
+
 ```bash
-git tag release-0.0.10 && git push origin release-0.0.10   # version from Cargo.toml
+git tag release-0.0.13 main
+git push --atomic origin main release-0.0.13
 ```
 
-The [release workflow](.github/workflows/release.yml) checks, builds and publishes
-the macOS and Windows packages with `docs/release-notes/<version>.md`.
-`0.0.10-rc.1` style versions become pre-releases, each with its own `install.sh`.
+The [release workflow](.github/workflows/release.yml) verifies the tagged
+commit and publishes the macOS and Windows packages with the release notes.
+An `-rc.1` suffix marks a pre-release with its own install scripts.
 
 ## Development
 
