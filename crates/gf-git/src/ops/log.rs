@@ -19,13 +19,41 @@ pub enum LogOrder {
     Date,
 }
 
+/// Refs `all_refs` leaves out, as `git log --exclude` patterns (`*` also
+/// matches `/`). None is a line of work, and each adds commits of its own to
+/// the graph: a stash is two or three (`WIP on`, `index on`), and it keeps
+/// commits a reset or rebase dropped in sight. Stashes have their own list;
+/// `git maintenance` prefetch refs shadow the remotes; `refs/original/`
+/// holds what filter-branch rewrote; notes are a history of notes.
+pub const HIDDEN_REFS: &[&str] = &[
+    "refs/stash",
+    "refs/prefetch/*",
+    "refs/original/*",
+    "refs/notes/*",
+];
+
+/// True when `all_refs` leaves the ref `name` (`refs/stash`) out.
+pub fn hidden_ref(name: &str) -> bool {
+    HIDDEN_REFS.iter().any(|p| match p.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == *p,
+    })
+}
+
+/// `--all` without [`HIDDEN_REFS`]: each `--exclude` applies to the next
+/// `--all`.
+fn push_all_refs(args: &mut Vec<String>) {
+    args.extend(HIDDEN_REFS.iter().map(|p| format!("--exclude={p}")));
+    args.push("--all".into());
+}
+
 /// What `git log` should list. The default lists everything reachable from
 /// HEAD.
 #[derive(Debug, Clone, Default)]
 pub struct LogQuery {
     /// Revisions/ranges to start from (`main`, `v1..v2`). Empty means HEAD.
     pub revisions: Vec<String>,
-    /// `--all`: start from every ref.
+    /// `--all`: start from HEAD and every ref but [`HIDDEN_REFS`].
     pub all_refs: bool,
     pub max_count: Option<usize>,
     pub skip: usize,
@@ -98,7 +126,7 @@ impl LogQuery {
             args.push(format!("-S{s}"));
         }
         if self.all_refs {
-            args.push("--all".into());
+            push_all_refs(&mut args);
         }
         // `--end-of-options` stops a revision like `-x` from being read as a flag.
         args.push("--end-of-options".into());
@@ -121,7 +149,7 @@ impl LogQuery {
             args.push("--first-parent".into());
         }
         if self.all_refs {
-            args.push("--all".into());
+            push_all_refs(&mut args);
         }
         args.push("--end-of-options".into());
         if self.revisions.is_empty() && !self.all_refs {
@@ -287,6 +315,30 @@ mod tests {
             paths[1],
             PathBuf::from(OsStr::from_bytes(b"non-utf8-\xff.txt"))
         );
+    }
+
+    #[test]
+    fn all_refs_excludes_internal_refs() {
+        let q = LogQuery {
+            all_refs: true,
+            ..LogQuery::default()
+        };
+        let args = q.to_args();
+        let all = args.iter().position(|a| a == "--all").expect("--all");
+        assert_eq!(
+            &args[all - HIDDEN_REFS.len()..all],
+            [
+                "--exclude=refs/stash",
+                "--exclude=refs/prefetch/*",
+                "--exclude=refs/original/*",
+                "--exclude=refs/notes/*",
+            ]
+        );
+        assert!(hidden_ref("refs/stash"));
+        assert!(hidden_ref("refs/prefetch/remotes/origin/main"));
+        assert!(!hidden_ref("refs/stashes"));
+        assert!(!hidden_ref("refs/heads/refs/notes/x"));
+        assert!(!hidden_ref("refs/heads/main"));
     }
 
     #[test]

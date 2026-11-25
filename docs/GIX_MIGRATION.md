@@ -45,7 +45,7 @@ gf-git/src/
 
 | 영역(trait) | 명령 | 백엔드 | 근거 |
 |---|---|---|---|
-| LogOps | log: 기본 순서, `--first-parent`, 범위(`a..b`, `^a`), `--all`, skip/max-count | **gix** ✅ | |
+| LogOps | log: 기본 순서, `--first-parent`, 범위(`a..b`, `^a`), `--all`, skip/max-count | **gix** ✅ | `--all`은 `HIDDEN_REFS`(`refs/stash`, `refs/prefetch/`, `refs/original/`, `refs/notes/`)를 뺍니다. CLI는 `--exclude`로, gix는 ref 목록에서 거릅니다 |
 | | log: `--topo-order`·`--date-order` | **gix** ✅ (commit-graph가 있을 때만) | commit-graph가 있으면 gix가 빠르고(3배), 없으면 git이 3배 빠릅니다. shallow 저장소는 CLI |
 | | log: 경로 필터, `--follow`, `--author`, `--grep`, `-S`, `a...b` | CLI | gix가 `Unsupported` 반환 |
 | | head_exists | **gix** ✅ | |
