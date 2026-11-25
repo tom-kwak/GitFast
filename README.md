@@ -47,6 +47,7 @@ runs is shown, and anything it does not cover can be typed on its `gf ❯` line.
   Lines to parents more than 50 rows below are cut into arrows (`↓`, `↑N`),
   so the graph stays narrow. `⌘F` lists only the commits that changed a file.
   Drag the divider under the commit list to resize it; double-click resets it.
+  All branches leaves stash commits, notes and prefetch refs out of the graph.
 - **Working tree**: stage files, hunks or single lines; stage, stash or
   discard several files at once. `⌘↩` commits, and the commit box can amend
   the last commit.
@@ -157,6 +158,9 @@ main ← 3 to merge · 3 new
   the last commit.
 - `+` adds a worktree; the branch menu's "new worktree…" (`w`) starts one for
   that branch.
+- A new worktree gets the git-ignored files (`.env` …) that the repository's
+  `.worktreeinclude` lists, copied after the tree opens. Settings > Tools >
+  New worktrees turns this off.
 - On a card: open it in a tab, IDE (`e`) or terminal (`t`), compare it with
   its base (`c`), bring in its base's new commits (`u`), or merge it into its
   base (`m`) and then remove the worktree and its branch.

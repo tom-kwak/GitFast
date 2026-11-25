@@ -636,6 +636,29 @@ impl App {
         Self::recorded_task(tab.repo.clone(), label, kind, record, f)
     }
 
+    /// Copies the files the `.worktreeinclude` of the tree `from` lists into
+    /// the new tree at `to`, in the background. A file that could not be
+    /// copied fails the step, so it is reported, not only logged.
+    fn copy_included(&self, from: RepoId, to: PathBuf) -> Task<Message> {
+        let Some(tab) = self.tabs.iter().find(|t| t.repo.id() == from) else {
+            return Task::none();
+        };
+        Self::recorded_task(
+            tab.repo.clone(),
+            format!("copy {} files", gf_git::INCLUDE_FILE),
+            OpKind::CopyIncluded,
+            None,
+            move |r| async move {
+                let copy = r.copy_included(&to).await?;
+                if copy.failed.is_empty() {
+                    Ok(())
+                } else {
+                    Err(gf_core::GfError::Other(copy.failure_lines().join("\n")))
+                }
+            },
+        )
+    }
+
     fn recorded_task<F, Fut>(
         repo: Repository,
         label: impl Into<String>,
@@ -939,6 +962,9 @@ impl App {
             next
         } else if matches!(kind, OpKind::Stage { .. }) {
             self.request_parts(id, Parts::STATUS)
+        } else if kind == OpKind::CopyIncluded {
+            // Only ignored files changed: nothing any view shows.
+            Task::none()
         } else if let OpKind::DeleteBranches(git_dir) = &kind {
             self.deleting_branches.remove(git_dir);
             self.request_touched(
@@ -997,12 +1023,22 @@ impl App {
         }
         match result {
             Ok(()) => {
-                if active && !matches!(kind, OpKind::Undo { .. }) {
+                if active && !matches!(kind, OpKind::Undo { .. } | OpKind::CopyIncluded) {
                     let hint = if recorded { " · ⌘Z undo" } else { "" };
                     self.flash(NoteKind::Info, format!("✓ {}{hint}", truncate(&label, 60)));
                 }
-                if let OpKind::AddWorktree { path, open: true } = &kind {
-                    tasks.push(self.update(Message::Open(path.clone())));
+                if let OpKind::AddWorktree {
+                    path,
+                    open,
+                    include,
+                } = &kind
+                {
+                    if *include {
+                        tasks.push(self.copy_included(id, path.clone()));
+                    }
+                    if *open {
+                        tasks.push(self.update(Message::Open(path.clone())));
+                    }
                 }
                 if let Some(tab) = self.tab_mut(id)
                     && kind == OpKind::Commit

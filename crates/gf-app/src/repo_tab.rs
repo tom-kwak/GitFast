@@ -454,14 +454,9 @@ fn count_bytes(len: u64, path: &Path) -> Option<LineCounts> {
 /// Everything the history list depends on but its length: when it is the
 /// same as last time, the commits and their graph are reused instead of
 /// read again, and a longer history only reads the commits past them.
-/// `git log --all` also walks `refs/stash`, hence the stashes.
-fn history_key(
-    head: Option<&Oid>,
-    branches: &[Branch],
-    tags: &[Tag],
-    stashes: &[StashEntry],
-    all_branches: bool,
-) -> u64 {
+/// Stashes are not in it: the history leaves `refs/stash` out
+/// (`gf_git::HIDDEN_REFS`).
+fn history_key(head: Option<&Oid>, branches: &[Branch], tags: &[Tag], all_branches: bool) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (head, all_branches).hash(&mut h);
@@ -470,9 +465,6 @@ fn history_key(
     }
     for t in tags {
         (t.name.as_str(), &t.target).hash(&mut h);
-    }
-    for s in stashes {
-        s.id.hash(&mut h);
     }
     h.finish()
 }
@@ -697,7 +689,6 @@ impl Snapshot {
                 snap.status.head.oid.as_ref(),
                 &snap.branches,
                 &snap.tags,
-                &snap.stashes,
                 all_branches,
             )
         } else {

@@ -221,6 +221,62 @@ async fn reads_match_the_git_cli() {
     .await;
 }
 
+/// `all_refs` leaves stashes, notes, prefetch refs and `refs/original/`
+/// out, and with them the commits only they reach.
+#[tokio::test]
+async fn all_refs_leaves_internal_refs_out() {
+    let work = TestRepo::new();
+    work.write("a.txt", "a\n");
+    work.commit_all("A");
+    work.write("b.txt", "b\n");
+    let dropped = work.commit_all("B: reset away");
+    work.write("b.txt", "stashed\n");
+    work.git(&["stash", "-q"]);
+    work.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    work.git(&["notes", "add", "-m", "a note", "HEAD"]);
+    work.write("p.txt", "p\n");
+    work.git(&["add", "p.txt"]);
+    let tree = work.git(&["write-tree"]);
+    let side = work.git(&["commit-tree", tree.trim(), "-m", "P: elsewhere"]);
+    for r in [
+        "refs/prefetch/remotes/origin/main",
+        "refs/original/refs/heads/main",
+    ] {
+        work.git(&["update-ref", r, side.trim()]);
+    }
+    let repo = open(&work).await;
+    // Default order: gix leaves topo order without a commit-graph to git.
+    let query = LogQuery {
+        all_refs: true,
+        ..LogQuery::default()
+    };
+    same(&repo, "log --all", |b| {
+        let query = &query;
+        async move { call!(b, LogOps::log(query)) }
+    })
+    .await;
+    let (cli, gix) = repo.backends();
+    let summaries = |commits: Vec<gf_core::model::Commit>| -> Vec<String> {
+        commits.into_iter().map(|c| c.summary).collect()
+    };
+    assert_eq!(
+        summaries(LogOps::log(gix.unwrap(), &query).await.unwrap()),
+        ["A"],
+        "gix walked a hidden ref"
+    );
+    let cli_summaries: Vec<String> = LogOps::log(cli, &query)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.summary)
+        .collect();
+    assert_eq!(
+        cli_summaries,
+        ["A"],
+        "git walked a hidden ref (dropped {dropped})"
+    );
+}
+
 #[tokio::test]
 async fn log_walks_match_the_git_cli() {
     let (_origin, work, _linked) = fixture();

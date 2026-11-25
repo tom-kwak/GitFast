@@ -206,6 +206,20 @@ impl App {
             M::EditEditor => self.tool_dialog(Tool::Editor),
             M::EditTerminal => self.tool_dialog(Tool::Terminal),
             M::EditWorktreeRoot => self.tool_dialog(Tool::WorktreeRoot),
+            M::ToggleCopyIncluded => {
+                let on = !self.settings.worktrees.copy_included;
+                self.settings.worktrees.copy_included = on;
+                self.save_settings();
+                self.flash(
+                    NoteKind::Info,
+                    if on {
+                        "new worktrees get the files .worktreeinclude lists"
+                    } else {
+                        "new worktrees no longer get .worktreeinclude files"
+                    },
+                );
+                Task::none()
+            }
             M::AskAgain(i) => {
                 if i < self.settings.confirm.skip.len() {
                     let key = self.settings.confirm.skip.remove(i);

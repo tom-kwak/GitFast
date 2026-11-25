@@ -32,7 +32,7 @@ use crate::ops::state::RepoState;
 use crate::ops::submodule::Submodule;
 use crate::ops::sync::{PullMode, PushOptions};
 use crate::ops::undo::{Capture, HeadMode, Scope};
-use crate::ops::worktree::{Worktree, WorktreeStatus};
+use crate::ops::worktree::{IncludedCopy, Worktree, WorktreeStatus};
 
 /// Calls `Trait::method(args)` on gix when it is available, else (or when
 /// gix answers `Unsupported` or fails) on the git CLI.
@@ -601,6 +601,11 @@ impl Repository {
     /// has uncommitted changes.
     pub async fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
         WorktreeOps::remove_worktree(&self.cli, path, force).await
+    }
+    /// Copies into the new tree at `dest` the ignored files this tree's
+    /// `.worktreeinclude` lists (see `WorktreeOps::copy_included`).
+    pub async fn copy_included(&self, dest: &Path) -> Result<IncludedCopy> {
+        WorktreeOps::copy_included(&self.cli, dest).await
     }
     pub async fn prune_worktrees(&self) -> Result<()> {
         WorktreeOps::prune_worktrees(&self.cli).await

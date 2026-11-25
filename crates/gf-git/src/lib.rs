@@ -32,7 +32,7 @@ pub use ops::conflict::Side;
 pub use ops::diff::{DIFF_LIMIT, DiffOptions, DiffTarget, FILE_PREVIEW_LIMIT, FileVersion};
 pub use ops::integrate::{Integration, MergeStyle};
 pub use ops::lfs::LfsFile;
-pub use ops::log::{LogOrder, LogQuery};
+pub use ops::log::{HIDDEN_REFS, LogOrder, LogQuery};
 pub use ops::rebase_interactive::{
     SquashPreview, TodoAction, TodoItem, melds_into_nothing, squash_plan, squash_range,
 };
@@ -43,6 +43,6 @@ pub use ops::state::RepoState;
 pub use ops::submodule::{Submodule, SubmoduleStatus};
 pub use ops::sync::{CONFIGURED_PUSH_REWRITES, PullMode, PushOptions};
 pub use ops::undo::{Capture, FileContent, Head, HeadMode, Scope, UNDO_REF};
-pub use ops::worktree::{LastCommit, Worktree, WorktreeStatus};
+pub use ops::worktree::{INCLUDE_FILE, IncludedCopy, LastCommit, Worktree, WorktreeStatus};
 pub use repository::Repository;
 pub use tokio_util::sync::CancellationToken;

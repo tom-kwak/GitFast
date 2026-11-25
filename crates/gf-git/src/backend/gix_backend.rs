@@ -27,7 +27,7 @@ use super::{LogOps, RebaseOps, RefOps, ReflogOps, RemoteOps, StashOps, Submodule
 use crate::cli::GitRunner;
 use crate::cli::parse::log::split_message;
 use crate::ops::integrate::Integration;
-use crate::ops::log::{LogOrder, LogQuery};
+use crate::ops::log::{LogOrder, LogQuery, hidden_ref};
 use crate::ops::rebase_interactive::{self, SquashPreview, TodoItem};
 use crate::ops::reflog::{ReflogEntry, ResetMode};
 use crate::ops::stash::StashOptions;
@@ -174,8 +174,8 @@ pub(super) fn resolve(repo: &gix::Repository, rev: &str) -> Result<ObjectId> {
     Ok(id.object().map_err(err)?.peel_to_commit().map_err(err)?.id)
 }
 
-/// Commit ids every ref under `prefix` (and HEAD, with `head`) points to.
-/// Symbolic refs and refs to non-commits are skipped.
+/// Commit ids every ref under `prefix` points to. Symbolic refs, refs to
+/// non-commits and the refs a history leaves out ([`hidden_ref`]) are skipped.
 fn ref_tips(repo: &gix::Repository, prefix: Option<&str>) -> Result<Vec<ObjectId>> {
     let platform = repo.references().map_err(err)?;
     let iter = match prefix {
@@ -185,7 +185,9 @@ fn ref_tips(repo: &gix::Repository, prefix: Option<&str>) -> Result<Vec<ObjectId
     let mut tips = Vec::new();
     for r in iter {
         let mut r = r.map_err(err)?;
-        if matches!(r.target(), TargetRef::Symbolic(_)) {
+        if matches!(r.target(), TargetRef::Symbolic(_))
+            || hidden_ref(&r.name().as_bstr().to_str_lossy())
+        {
             continue;
         }
         let id = r.peel_to_id().map_err(err)?.detach();
@@ -759,6 +761,13 @@ impl WorktreeOps for GixBackend {
 
     async fn prune_worktrees(&self) -> Result<()> {
         unsupported("worktree prune")
+    }
+
+    async fn copy_included(
+        &self,
+        _: &std::path::Path,
+    ) -> Result<crate::ops::worktree::IncludedCopy> {
+        unsupported("worktreeinclude")
     }
 }
 

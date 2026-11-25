@@ -386,6 +386,89 @@ impl CliBackend {
     }
 }
 
+/// The file at a repository's root that lists, in `.gitignore` syntax, the
+/// git-ignored files each new worktree gets a copy of (`.env` …). The same
+/// file Claude Code, Conductor and `git-worktreeinclude` read.
+pub const INCLUDE_FILE: &str = ".worktreeinclude";
+
+/// What [`WorktreeOps::copy_included`] did. Paths are relative to the trees.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncludedCopy {
+    /// The source tree has an [`INCLUDE_FILE`]; without one nothing is read.
+    pub listed: bool,
+    pub copied: Vec<PathBuf>,
+    /// Already in the new tree: left as they are.
+    pub kept: Vec<PathBuf>,
+    /// With the reason.
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+impl IncludedCopy {
+    /// The files that are there, one line each, for the command log.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .copied
+            .iter()
+            .map(|p| format!("copied {}", p.display()))
+            .chain(
+                self.kept
+                    .iter()
+                    .map(|p| format!("kept {}: already in the worktree", p.display())),
+            )
+            .collect();
+        if lines.is_empty() && self.failed.is_empty() && self.listed {
+            lines.push(format!("{INCLUDE_FILE} matched no ignored file"));
+        }
+        lines
+    }
+
+    /// The files that could not be copied, one line each with the reason.
+    pub fn failure_lines(&self) -> Vec<String> {
+        self.failed
+            .iter()
+            .map(|(p, e)| format!("could not copy {}: {e}", p.display()))
+            .collect()
+    }
+}
+
+/// Copies the files at `paths` (relative) from the tree at `source` into the
+/// one at `dest`, making their folders. Only regular files, and never over
+/// something already in `dest` or through a link on the way there.
+pub fn copy_included(source: &Path, dest: &Path, paths: &[PathBuf]) -> IncludedCopy {
+    let mut copy = IncludedCopy::default();
+    for rel in paths {
+        let from = source.join(rel);
+        if !std::fs::symlink_metadata(&from).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        let to = dest.join(rel);
+        if std::fs::symlink_metadata(&to).is_ok() {
+            copy.kept.push(rel.clone());
+            continue;
+        }
+        // A linked folder in the new tree would put the file somewhere else.
+        let linked = rel
+            .ancestors()
+            .skip(1)
+            .filter(|a| !a.as_os_str().is_empty())
+            .any(|a| std::fs::symlink_metadata(dest.join(a)).is_ok_and(|m| m.is_symlink()));
+        if linked {
+            copy.failed
+                .push((rel.clone(), "a folder on the way is a link".into()));
+            continue;
+        }
+        let made = to
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::copy(&from, &to).map(drop));
+        match made {
+            Ok(()) => copy.copied.push(rel.clone()),
+            Err(e) => copy.failed.push((rel.clone(), e.to_string())),
+        }
+    }
+    copy
+}
+
 impl WorktreeOps for CliBackend {
     async fn worktrees(&self) -> Result<Vec<Worktree>> {
         parse_worktrees(
@@ -668,6 +751,79 @@ impl WorktreeOps for CliBackend {
         self.exec(self.command(["worktree", "prune"])).await?;
         Ok(())
     }
+
+    async fn copy_included(&self, dest: &Path) -> Result<IncludedCopy> {
+        let source = self.cwd().to_path_buf();
+        let include = source.join(INCLUDE_FILE);
+        if !tokio::fs::metadata(&include)
+            .await
+            .is_ok_and(|m| m.is_file())
+        {
+            return Ok(IncludedCopy::default());
+        }
+        let started = std::time::Instant::now();
+        // git's own matcher reads the patterns: the untracked files they
+        // select…
+        let mut exclude_from = std::ffi::OsString::from("--exclude-from=");
+        exclude_from.push(&include);
+        let selected = self
+            .read(
+                self.command(["ls-files", "-z", "--others", "--ignored"])
+                    .arg(exclude_from),
+            )
+            .await?;
+        // …that git ignores too, so a pattern never copies a file meant to
+        // be committed.
+        let paths = if selected.is_empty() {
+            Vec::new()
+        } else {
+            let cmd = self
+                .command(["check-ignore", "-z", "--stdin"])
+                .stdin(selected)
+                .read_only()
+                .allow_failure();
+            let out = self.runner().run(&cmd).await?;
+            match out.exit_code {
+                Some(0) => crate::ops::log::parse_tree_paths(&out.stdout),
+                // None of them is ignored.
+                Some(1) => Vec::new(),
+                _ => {
+                    return Err(GfError::Other(format!(
+                        "git check-ignore: {}",
+                        out.stderr.trim()
+                    )));
+                }
+            }
+        };
+        let to = dest.to_path_buf();
+        let mut copy = tokio::task::spawn_blocking(move || copy_included(&source, &to, &paths))
+            .await
+            .map_err(|e| GfError::Other(format!("copying {INCLUDE_FILE} files: {e}")))?;
+        copy.listed = true;
+        // Two entries, so the files that are there do not read as errors
+        // next to the ones that failed.
+        let argv = || vec!["gf".into(), INCLUDE_FILE.into(), dest.display().to_string()];
+        let (lines, failures) = (copy.lines(), copy.failure_lines());
+        if !lines.is_empty() {
+            self.runner().report_in_process(
+                Some(self.handle().id),
+                argv(),
+                &lines,
+                0,
+                started.elapsed(),
+            );
+        }
+        if !failures.is_empty() {
+            self.runner().report_in_process(
+                Some(self.handle().id),
+                argv(),
+                &failures,
+                1,
+                started.elapsed(),
+            );
+        }
+        Ok(copy)
+    }
 }
 
 /// A `pull.rebase` / `branch.<b>.rebase` value asks for a rebase: any but
@@ -681,6 +837,75 @@ pub(crate) fn rebases(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn included_files_are_copied_once_and_never_over_others() {
+        use super::copy_included;
+        use std::path::PathBuf;
+        let source = tempfile::tempdir().expect("source");
+        let dest = tempfile::tempdir().expect("dest");
+        let write = |root: &std::path::Path, rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(path, text).expect("write");
+        };
+        write(source.path(), ".env", "A=1\n");
+        write(source.path(), "config/local/db.toml", "url = 1\n");
+        write(source.path(), "taken", "mine\n");
+        write(dest.path(), "taken", "theirs\n");
+        std::fs::create_dir_all(source.path().join("a-folder")).expect("folder");
+        let paths: Vec<PathBuf> = [".env", "config/local/db.toml", "taken", "gone", "a-folder"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+
+        let copy = copy_included(source.path(), dest.path(), &paths);
+        assert_eq!(
+            copy.copied,
+            vec![PathBuf::from(".env"), PathBuf::from("config/local/db.toml")]
+        );
+        assert_eq!(copy.kept, vec![PathBuf::from("taken")]);
+        assert!(copy.failed.is_empty());
+        let read = |rel: &str| std::fs::read_to_string(dest.path().join(rel)).expect("read");
+        assert_eq!(read("config/local/db.toml"), "url = 1\n");
+        assert_eq!(read("taken"), "theirs\n", "never copied over");
+
+        // Again: everything is there already.
+        let again = copy_included(source.path(), dest.path(), &paths);
+        assert!(again.copied.is_empty());
+        assert_eq!(again.kept.len(), 3);
+    }
+
+    #[test]
+    fn included_copy_lines_say_what_happened() {
+        use super::IncludedCopy;
+        let copy = IncludedCopy {
+            listed: true,
+            copied: vec![".env".into()],
+            kept: vec!["b".into()],
+            failed: vec![("c".into(), "denied".into())],
+        };
+        assert_eq!(
+            copy.lines(),
+            vec!["copied .env", "kept b: already in the worktree"]
+        );
+        assert_eq!(copy.failure_lines(), vec!["could not copy c: denied"]);
+        let only_failed = IncludedCopy {
+            listed: true,
+            failed: vec![("c".into(), "denied".into())],
+            ..IncludedCopy::default()
+        };
+        assert!(only_failed.lines().is_empty(), "not 'matched nothing'");
+        let none = IncludedCopy {
+            listed: true,
+            ..IncludedCopy::default()
+        };
+        assert_eq!(
+            none.lines(),
+            vec![".worktreeinclude matched no ignored file"]
+        );
+        assert!(IncludedCopy::default().lines().is_empty());
+    }
+
     #[test]
     fn touched_joins_commits_and_changes_up_to_the_cap() {
         use gf_core::model::{StatusEntry, StatusReport};
