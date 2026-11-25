@@ -1379,6 +1379,12 @@ dependencies = [
  "gf-config",
  "gf-core",
  "gf-git",
+ "gf-hosting",
+ "gf-hosting-azure",
+ "gf-hosting-bitbucket",
+ "gf-hosting-gitea",
+ "gf-hosting-github",
+ "gf-hosting-gitlab",
  "gf-test-support",
  "gf-watch",
  "iced",
@@ -1413,6 +1419,7 @@ version = "0.0.12"
 dependencies = [
  "directories",
  "gf-core",
+ "gf-hosting",
  "serde",
  "tempfile",
  "toml",
@@ -1450,14 +1457,44 @@ dependencies = [
 [[package]]
 name = "gf-hosting"
 version = "0.0.12"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "gf-hosting-azure"
+version = "0.0.12"
+dependencies = [
+ "gf-hosting",
+]
+
+[[package]]
+name = "gf-hosting-bitbucket"
+version = "0.0.12"
+dependencies = [
+ "gf-hosting",
+]
+
+[[package]]
+name = "gf-hosting-gitea"
+version = "0.0.12"
+dependencies = [
+ "gf-hosting",
+]
 
 [[package]]
 name = "gf-hosting-github"
 version = "0.0.12"
+dependencies = [
+ "gf-hosting",
+]
 
 [[package]]
 name = "gf-hosting-gitlab"
 version = "0.0.12"
+dependencies = [
+ "gf-hosting",
+]
 
 [[package]]
 name = "gf-test-support"

@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use gf_config::DEFAULT_CLONE_ROOT;
 use gf_git::{CancellationToken, GitCommand, Progress, RunOptions};
 use iced::Task;
 
@@ -66,36 +67,40 @@ pub struct CloneDone {
 }
 
 impl App {
-    /// Where to clone `url`: beside the active repository (else beside
-    /// the last one opened, else in the home folder).
+    /// Prefills the clone destination from the configured clone folder and the URL.
     pub(super) fn clone_dialog(&mut self, url: String) -> Task<Message> {
-        let parent = self
-            .active_tab()
-            .map(|tab| tab.repo.cwd().to_path_buf())
-            .or_else(|| self.settings.repos.recent.first().cloned())
-            .and_then(|repo| repo.parent().map(std::path::Path::to_path_buf))
-            .or_else(crate::platform::home_dir)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let name = git_actions::humanish_name(url.trim()).unwrap_or_else(|| "repository".into());
-        let folder = format::tilde(&parent.join(name));
-        let how = if is_https(&url) {
-            "A server that wants a login asks for one (Settings → ACCOUNTS keeps it)."
-        } else {
-            "SSH: git uses your SSH keys."
-        };
+        let folder = suggested_clone_folder(self.settings.repos.clone_root.as_deref(), &url);
         self.open_dialog(
             Dialog::confirm(
                 "Clone repository",
-                vec![
-                    "Copies the repository from the server, then opens it in a tab.".into(),
-                    how.into(),
-                ],
+                vec!["Copies the repository from the server, then opens it in a tab.".into()],
                 "Clone",
                 Purpose::Clone,
             )
             .field("URL", url.trim(), "https://github.com/team/app.git")
-            .field("into folder", folder, "~/work/app"),
+            .field("into folder", folder, format!("{DEFAULT_CLONE_ROOT}/app")),
         )
+    }
+
+    /// Updates the suggestion while the user leaves the destination at its default.
+    pub(super) fn sync_clone_destination(&mut self, previous_url: Option<&str>) {
+        let Some(dialog) = self
+            .dialog
+            .as_mut()
+            .filter(|d| matches!(d.purpose, Purpose::Clone))
+        else {
+            return;
+        };
+        let [url, folder] = dialog.fields.as_mut_slice() else {
+            return;
+        };
+        let Some(previous_url) = previous_url.filter(|previous| *previous != url.value) else {
+            return;
+        };
+        let root = self.settings.repos.clone_root.as_deref();
+        if folder.value.is_empty() || folder.value == suggested_clone_folder(root, previous_url) {
+            folder.value = suggested_clone_folder(root, &url.value);
+        }
     }
 
     /// Clones `url` into `folder` in the background, with progress.
@@ -228,9 +233,26 @@ fn discard_partial_clone(dest: &Path, existed: bool) {
     }
 }
 
-fn is_https(url: &str) -> bool {
-    let url = url.trim().to_ascii_lowercase();
-    url.starts_with("https://") || url.starts_with("http://")
+fn suggested_clone_folder(root: Option<&Path>, url: &str) -> String {
+    let default_root;
+    let root = match root {
+        Some(root) => root,
+        None => {
+            default_root = format::expand_tilde(DEFAULT_CLONE_ROOT);
+            &default_root
+        }
+    };
+    let url = url.trim();
+    let name = git_actions::is_clone_url(url)
+        .then(|| git_actions::humanish_name(url))
+        .flatten()
+        .filter(|name| {
+            Path::new(name)
+                .file_name()
+                .is_some_and(|part| part == name.as_str())
+        })
+        .unwrap_or_else(|| "repository".into());
+    format::tilde(&root.join(name))
 }
 
 /// What the clone dialog's fields (URL, folder) lack, if anything.

@@ -9,6 +9,7 @@ mod feature;
 mod features;
 mod git_actions;
 mod highlight;
+mod hosting;
 mod logging;
 mod nav;
 mod platform;

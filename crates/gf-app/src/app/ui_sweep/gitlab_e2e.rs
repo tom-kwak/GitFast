@@ -37,17 +37,13 @@ impl Server {
     /// How the login dialog writes the server.
     fn label(&self) -> String {
         let (protocol, host) = gf_git::ops::credential::server_of(&self.url).expect("server url");
-        if protocol == "https" {
-            host
-        } else {
-            format!("{protocol}://{host}")
-        }
+        format!("{protocol}://{host}")
     }
 }
 
 fn login_dialog(ui: &Ui) -> &Dialog<Purpose> {
     let dialog = ui.app.dialog.as_ref().expect("a dialog");
-    assert_eq!(dialog.title, "Log in to a git server", "{:?}", dialog.body);
+    assert_eq!(dialog.title, "Log in to a Git server", "{:?}", dialog.body);
     dialog
 }
 
@@ -147,8 +143,9 @@ async fn gitlab_login_clone_push_logout_fetch() {
 
     // Log out: the helper forgets the token, and the next fetch asks.
     let _ = ui.send(Message::Key(Shortcut::Settings)).await;
+    let account = ui.app.settings.accounts[0].clone();
     let _ = ui
-        .send(Message::Settings(settings_view::Message::LogOut(0)))
+        .send(Message::Settings(settings_view::Message::LogOut(account)))
         .await;
     let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
     assert!(ui.app.settings.accounts.is_empty());
@@ -156,7 +153,7 @@ async fn gitlab_login_clone_push_logout_fetch() {
 
     // The open clone's server is offered; a wrong token is tried on it
     // and refused before it is kept.
-    assert!(ui.shows("─ NOT LOGGED IN"));
+    assert!(ui.shows("─ OTHER HTTPS REMOTES"));
     let _ = ui
         .send(Message::Settings(settings_view::Message::LogInTo(
             server.label(),

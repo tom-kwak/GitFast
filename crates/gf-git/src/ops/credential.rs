@@ -132,9 +132,7 @@ pub async fn credential_helper(
 /// approve`). Fails when git has no helper set, since nothing would keep it.
 /// Returns the helper's name.
 pub async fn store_login(runner: &GitRunner, login: &Login) -> Result<String> {
-    check_value("the server", &login.host)?;
-    check_value("the user name", &login.username)?;
-    check_value("the token", &login.token)?;
+    check_login_values(login)?;
     let Some(helper) = credential_helper(runner, &login.protocol, &login.host).await? else {
         return Err(GfError::Other(NO_HELPER.into()));
     };
@@ -148,6 +146,12 @@ pub async fn store_login(runner: &GitRunner, login: &Login) -> Result<String> {
         .run(&global(&["credential", "approve"]).stdin(input))
         .await?;
     Ok(helper)
+}
+
+fn check_login_values(login: &Login) -> Result<()> {
+    check_value("the server", &login.host)?;
+    check_value("the user name", &login.username)?;
+    check_value("the token", &login.token)
 }
 
 /// Said when git has no credential helper to keep a login in.
@@ -191,6 +195,18 @@ pub async fn has_login(
     host: &str,
     username: &str,
 ) -> Result<bool> {
+    Ok(saved_login(runner, protocol, host, username)
+        .await?
+        .is_some())
+}
+
+/// Retrieves a matching saved login without prompting or logging the token.
+pub async fn saved_login(
+    runner: &GitRunner,
+    protocol: &str,
+    host: &str,
+    username: &str,
+) -> Result<Option<Login>> {
     check_value("the server", host)?;
     check_value("the user name", username)?;
     let out = runner
@@ -206,21 +222,78 @@ pub async fn has_login(
             .allow_failure(),
         )
         .await?;
-    Ok(out.success()
-        && out
-            .stdout_str()
+    let stdout = out.stdout_str();
+    let matched = out.success()
+        && stdout
             .lines()
-            .any(|l| l.strip_prefix("password=").is_some_and(|p| !p.is_empty())))
+            .any(|line| line.strip_prefix("username=") == Some(username));
+    if !matched {
+        return Ok(None);
+    }
+    Ok(stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("password="))
+        .find(|password| !password.is_empty())
+        .map(|token| Login {
+            protocol: protocol.to_owned(),
+            host: host.to_owned(),
+            username: username.to_owned(),
+            token: token.to_owned(),
+        }))
 }
 
-/// Checks a saved login against the server by listing `url`'s branches
-/// (`git ls-remote --heads`). git erases the login itself when the server
-/// refuses it.
-pub async fn verify_login(runner: &GitRunner, url: &str) -> Result<()> {
+// Git invokes shell credential helpers with an operation argument. Supply
+// the candidate only to its own origin, even after a redirect or URL rewrite.
+const CANDIDATE_HELPER: &str = r#"!f() {
+    case "$1" in get|store) ;; *) return 0 ;; esac
+    protocol= host=
+    while IFS= read -r line && [ -n "$line" ]; do
+        case "$line" in
+            protocol=*) protocol=${line#protocol=} ;;
+            host=*) host=${line#host=} ;;
+        esac
+    done
+    if [ "$protocol" = "$GF_LOGIN_PROTOCOL" ] &&
+        [ "$(printf '%s' "$host" | LC_ALL=C tr 'A-Z' 'a-z')" = "$GF_LOGIN_HOST" ]; then
+        if [ "$1" = get ]; then
+            printf 'username=%s\npassword=%s\n\n' "$GF_LOGIN_USERNAME" "$GF_LOGIN_TOKEN"
+        else
+            : > "$GF_LOGIN_ACCEPTED"
+        fi
+    fi
+}; f"#;
+
+/// Checks read access to a remote with only the candidate login available.
+/// Returns whether Git approved the candidate after authentication. A
+/// public remote can succeed anonymously. The check leaves the user's
+/// configured helpers and saved logins untouched.
+pub async fn check_remote_access(runner: &GitRunner, url: &str, login: &Login) -> Result<bool> {
+    check_login_values(login)?;
+    let marker_dir = tempfile::tempdir()?;
+    let accepted = marker_dir.path().join("accepted");
     runner
-        .run(&quiet(global(&["ls-remote", "--heads", "--", url])).read_only())
+        .run(
+            &quiet(global(&[
+                "-c",
+                "credential.interactive=true",
+                "-c",
+                "credential.helper=",
+                "--config-env=credential.helper=GF_LOGIN_HELPER",
+                "ls-remote",
+                "--heads",
+                "--",
+                url,
+            ]))
+            .env("GF_LOGIN_PROTOCOL", &login.protocol)
+            .env("GF_LOGIN_HELPER", CANDIDATE_HELPER)
+            .env("GF_LOGIN_HOST", &login.host)
+            .env("GF_LOGIN_USERNAME", &login.username)
+            .env("GF_LOGIN_TOKEN", &login.token)
+            .env("GF_LOGIN_ACCEPTED", &accepted)
+            .read_only(),
+        )
         .await?;
-    Ok(())
+    Ok(tokio::fs::try_exists(accepted).await?)
 }
 
 /// Sets git's credential helper for every repository of this user
