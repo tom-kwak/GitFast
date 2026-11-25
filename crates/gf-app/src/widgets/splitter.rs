@@ -1,7 +1,9 @@
-//! A vertical divider that resizes the panes on either side by dragging.
+//! A divider that resizes the panes on either side by dragging: vertical
+//! between side-by-side panes, or horizontal (`horizontal()`) between
+//! stacked ones.
 //!
-//! It only reports movement — `on_drag(dx)` with the horizontal distance in
-//! pixels from where the drag started, `on_release` when it ends and
+//! It only reports movement — `on_drag(d)` with the distance along the
+//! drag axis in pixels from where the drag started, `on_release` when it ends and
 //! `on_reset` on double-click — so the app keeps one width and every view
 //! that shows the split uses it. The app applies `dx` to the width it had
 //! when the drag started, so the divider stays under the cursor even after
@@ -14,7 +16,7 @@ use iced::advanced::widget::{Tree, tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, renderer};
 use iced::{Background, Border, Color, Element, Event, Length, Rectangle, Size};
 
-/// Width of the bar (and of the gap it takes between the panes).
+/// Thickness of the bar (and of the gap it takes between the panes).
 pub const WIDTH: f32 = 6.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -25,6 +27,8 @@ pub struct Splitter<M> {
     on_reset: Option<M>,
     line: Color,
     active: Color,
+    /// Between stacked panes: a full-width bar dragged up and down.
+    horizontal: bool,
 }
 
 impl<M> std::fmt::Debug for Splitter<M> {
@@ -35,7 +39,7 @@ impl<M> std::fmt::Debug for Splitter<M> {
 
 #[derive(Debug, Default)]
 struct State {
-    /// Cursor x where the drag started.
+    /// Cursor x (or y when horizontal) where the drag started.
     dragging: Option<f32>,
     /// Last distance reported, to skip repeats.
     reported: f32,
@@ -51,7 +55,18 @@ impl<M> Splitter<M> {
             on_reset: None,
             line,
             active,
+            horizontal: false,
         }
+    }
+
+    /// A bar between stacked panes: `on_drag` reports vertical distances.
+    pub fn horizontal(mut self) -> Self {
+        self.horizontal = true;
+        self
+    }
+
+    fn along(&self, p: iced::Point) -> f32 {
+        if self.horizontal { p.y } else { p.x }
     }
 
     /// A drag starts: the app notes the width `on_drag` distances apply to.
@@ -81,7 +96,11 @@ impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Splitter<M> {
     }
 
     fn size(&self) -> Size<Length> {
-        Size::new(Length::Fixed(WIDTH), Length::Fill)
+        if self.horizontal {
+            Size::new(Length::Fill, Length::Fixed(WIDTH))
+        } else {
+            Size::new(Length::Fixed(WIDTH), Length::Fill)
+        }
     }
 
     fn layout(
@@ -90,7 +109,11 @@ impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Splitter<M> {
         _renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        layout::atomic(limits, WIDTH, Length::Fill)
+        if self.horizontal {
+            layout::atomic(limits, Length::Fill, WIDTH)
+        } else {
+            layout::atomic(limits, WIDTH, Length::Fill)
+        }
     }
 
     fn update(
@@ -121,7 +144,7 @@ impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Splitter<M> {
                         shell.publish(m.clone());
                     }
                 } else {
-                    state.dragging = Some(p.x);
+                    state.dragging = Some(self.along(p));
                     state.reported = 0.0;
                     if let Some(m) = &self.on_press {
                         shell.publish(m.clone());
@@ -132,7 +155,7 @@ impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Splitter<M> {
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 if let Some(start) = state.dragging {
-                    let dx = (position.x - start).round();
+                    let dx = (self.along(*position) - start).round();
                     if (dx - state.reported).abs() >= 1.0 {
                         state.reported = dx;
                         shell.publish((self.on_drag)(dx));
@@ -164,7 +187,11 @@ impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Splitter<M> {
     ) -> mouse::Interaction {
         let dragging = tree.state.downcast_ref::<State>().dragging.is_some();
         if dragging || cursor.is_over(layout.bounds()) {
-            mouse::Interaction::ResizingHorizontally
+            if self.horizontal {
+                mouse::Interaction::ResizingVertically
+            } else {
+                mouse::Interaction::ResizingHorizontally
+            }
         } else {
             mouse::Interaction::default()
         }
@@ -189,10 +216,18 @@ impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Splitter<M> {
         } else {
             (self.line, 1.0)
         };
-        let line = Rectangle {
-            x: bounds.center_x() - width / 2.0,
-            width,
-            ..bounds
+        let line = if self.horizontal {
+            Rectangle {
+                y: bounds.center_y() - width / 2.0,
+                height: width,
+                ..bounds
+            }
+        } else {
+            Rectangle {
+                x: bounds.center_x() - width / 2.0,
+                width,
+                ..bounds
+            }
         };
         renderer.fill_quad(
             renderer::Quad {

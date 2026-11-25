@@ -403,6 +403,15 @@ pub enum Message {
     ResizeRefsDone,
     /// Double-click on the refs panel divider: back to the default width.
     ResizeRefsReset,
+    /// The divider under HISTORY is pressed: a drag starts.
+    ResizeHistoryStart,
+    /// The divider under HISTORY moved: the distance from where the drag
+    /// started, as a share of the height HISTORY and CHANGES split.
+    ResizeHistory(f32),
+    /// The divider under HISTORY is released: remember the height.
+    ResizeHistoryDone,
+    /// Double-click on the divider under HISTORY: back to the default.
+    ResizeHistoryReset,
     GitFinished {
         repo: Option<RepoId>,
         args: Vec<String>,
@@ -420,6 +429,8 @@ pub struct App {
     list_drag_start: Option<f32>,
     /// Refs panel width when the divider drag started (see `ResizeRefs`).
     refs_drag_start: Option<f32>,
+    /// HISTORY's share when its divider drag started (see `ResizeHistory`).
+    history_drag_start: Option<f32>,
     bus: EventBus,
     runner: GitRunner,
     tabs: Vec<RepoTab>,
@@ -539,6 +550,7 @@ impl App {
             tokens,
             list_drag_start: None,
             refs_drag_start: None,
+            history_drag_start: None,
             bus,
             runner,
             tabs: Vec::new(),
@@ -1390,6 +1402,27 @@ impl App {
             }
             Message::ResizeRefsReset => {
                 self.settings.appearance.refs_cols = gf_config::DEFAULT_REFS_COLS;
+                self.save_settings();
+                Task::none()
+            }
+            Message::ResizeHistoryStart => {
+                self.history_drag_start = Some(self.settings.appearance.history_share);
+                Task::none()
+            }
+            Message::ResizeHistory(dy) => {
+                let start = *self
+                    .history_drag_start
+                    .get_or_insert(self.settings.appearance.history_share);
+                self.settings.appearance.history_share = resized_share(start, dy);
+                Task::none()
+            }
+            Message::ResizeHistoryDone => {
+                self.history_drag_start = None;
+                self.save_settings();
+                Task::none()
+            }
+            Message::ResizeHistoryReset => {
+                self.settings.appearance.history_share = gf_config::DEFAULT_HISTORY_SHARE;
                 self.save_settings();
                 Task::none()
             }
@@ -2288,6 +2321,23 @@ fn resized_cols(start: f32, dx: f32, col_px: f32, min: f32, max: f32) -> f32 {
     (start + dx / col_px).clamp(min, max)
 }
 
+/// Least and most of the HISTORY mode's height the commit list can be
+/// dragged to, so neither it nor the commit's changes disappear.
+const MIN_HISTORY_SHARE: f32 = 0.1;
+const MAX_HISTORY_SHARE: f32 = 0.9;
+
+/// HISTORY's share after dragging its divider by `d` (a share of the
+/// height) from a drag that started at `start`.
+fn resized_share(start: f32, d: f32) -> f32 {
+    (start + d).clamp(MIN_HISTORY_SHARE, MAX_HISTORY_SHARE)
+}
+
+/// `FillPortion`s for the commit list and the changes under it.
+fn history_portions(share: f32) -> (u16, u16) {
+    let top = (share.clamp(MIN_HISTORY_SHARE, MAX_HISTORY_SHARE) * 1000.0).round() as u16;
+    (top, 1000 - top)
+}
+
 /// The file list beside the diff, the divider to resize it and the diff:
 /// one width for HISTORY and WORKING TREE.
 fn list_split<'a>(
@@ -2358,8 +2408,9 @@ fn main_area<'a>(
     appearance: &gf_config::AppearanceSettings,
 ) -> Element<'a, Message> {
     let list_cols = appearance.list_cols;
-    let frame =
-        |pane: Pane, content: Element<'a, Message>| focus::pane_frame(t, pane, active, content);
+    let frame = move |pane: Pane, content: Element<'a, Message>| {
+        focus::pane_frame(t, pane, active, content)
+    };
     use diff_view::Role;
     let changed = cx.snapshot.map_or(0, |s| s.change_files.changed_count());
     let mode_tab = |role: Role, label: String, hint: &str| {
@@ -2401,44 +2452,69 @@ fn main_area<'a>(
 
     match tab.code_view {
         Role::Commit => {
-            let top = if appearance.show_history {
-                container(frame(
-                    Pane::History,
-                    tab.history.view(cx).map(Message::History),
-                ))
-                .height(Length::FillPortion(2))
-            } else {
-                container(widgets::collapsed_bar(
-                    t,
-                    widgets::colored(t, "▾ HISTORY", t.accent()),
-                    "show history ⌘⇧H",
-                    Message::Key(Shortcut::ToggleHistory),
-                ))
-            };
-            let changes: Element<'a, Message> = match &tab.blame {
-                Some(b) => frame(Pane::Diff, b.view(t).map(Message::Blame)),
-                None => list_split(
-                    t,
-                    list_cols,
-                    frame(
-                        Pane::Files,
-                        tab.commit_diff
-                            .files_view(Cx {
-                                file_tree: appearance.history_file_dirs,
-                                ..cx
-                            })
-                            .map(Message::CommitDiff),
+            let file_tree = appearance.history_file_dirs;
+            // Built where the split is laid out (see below), so `Fn`.
+            let changes = move || -> Element<'a, Message> {
+                match &tab.blame {
+                    Some(b) => frame(Pane::Diff, b.view(t).map(Message::Blame)),
+                    None => list_split(
+                        t,
+                        list_cols,
+                        frame(
+                            Pane::Files,
+                            tab.commit_diff
+                                .files_view(Cx { file_tree, ..cx })
+                                .map(Message::CommitDiff),
+                        ),
+                        frame(
+                            Pane::Diff,
+                            tab.commit_diff.view(cx).map(Message::CommitDiff),
+                        ),
                     ),
-                    frame(
-                        Pane::Diff,
-                        tab.commit_diff.view(cx).map(Message::CommitDiff),
-                    ),
-                ),
+                }
             };
-            column![tabs, top, container(changes).height(Length::FillPortion(3)),]
-                .spacing(4)
-                .width(Length::Fill)
+            let split: Element<'a, Message> = if appearance.show_history {
+                let (top_part, bottom_part) = history_portions(appearance.history_share);
+                // The drag is turned into a share of the height the two
+                // split, which only the layout knows.
+                iced::widget::responsive(move |size| {
+                    let height = size.height.max(1.0);
+                    let divider = widgets::splitter::Splitter::new(
+                        move |dy| Message::ResizeHistory(dy / height),
+                        t.border,
+                        t.accent(),
+                    )
+                    .horizontal()
+                    .on_press(Message::ResizeHistoryStart)
+                    .on_release(Message::ResizeHistoryDone)
+                    .on_reset(Message::ResizeHistoryReset);
+                    column![
+                        container(frame(
+                            Pane::History,
+                            tab.history.view(cx).map(Message::History),
+                        ))
+                        .height(Length::FillPortion(top_part)),
+                        divider,
+                        container(changes()).height(Length::FillPortion(bottom_part)),
+                    ]
+                    .height(Length::Fill)
+                    .into()
+                })
                 .into()
+            } else {
+                column![
+                    widgets::collapsed_bar(
+                        t,
+                        widgets::colored(t, "▾ HISTORY", t.accent()),
+                        "show history ⌘⇧H",
+                        Message::Key(Shortcut::ToggleHistory),
+                    ),
+                    container(changes()).height(Length::Fill),
+                ]
+                .spacing(4)
+                .into()
+            };
+            column![tabs, split].spacing(4).width(Length::Fill).into()
         }
         // WORKING TREE: changed files over the commit box on the left, the
         // selected file's changes on the right.
@@ -2660,6 +2736,17 @@ fn shortcut(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragging_the_history_divider_moves_its_share_within_limits() {
+        assert!((resized_share(0.4, 0.1) - 0.5).abs() < 1e-6);
+        assert!((resized_share(0.4, -5.0) - MIN_HISTORY_SHARE).abs() < f32::EPSILON);
+        assert!((resized_share(0.4, 5.0) - MAX_HISTORY_SHARE).abs() < f32::EPSILON);
+        assert_eq!(history_portions(0.4), (400, 600));
+        // A hand-edited setting past the limits still leaves both visible.
+        assert_eq!(history_portions(0.0), (100, 900));
+        assert_eq!(history_portions(2.0), (900, 100));
+    }
 
     #[test]
     fn dragging_the_divider_follows_the_cursor_within_limits() {
