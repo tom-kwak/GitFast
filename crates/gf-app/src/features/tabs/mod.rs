@@ -56,15 +56,48 @@ pub const BAR_ID: &str = "gf-tab-bar";
 /// Tabs from this many on are drawn compact (inactive names shortened).
 const COMPACT_FROM: usize = 5;
 
+fn title(tab: &RepoTab, compact: bool) -> String {
+    let shorten = |text: &str| {
+        if compact {
+            format::truncate(text, 16)
+        } else {
+            text.to_owned()
+        }
+    };
+    if !tab.repo.is_linked_worktree() {
+        return shorten(&tab.name());
+    }
+
+    // Both backends put the main worktree (or bare repository) first.
+    let common = tab.repo.common_dir();
+    let project = tab
+        .snapshot
+        .as_ref()
+        .and_then(|snap| snap.worktrees.first())
+        .map(|worktree| worktree.path.as_path())
+        .unwrap_or_else(|| {
+            if common.ends_with(".git") {
+                common.parent().unwrap_or(common)
+            } else {
+                common
+            }
+        });
+    let name = project
+        .file_name()
+        .map(|name| shorten(&name.to_string_lossy()))
+        .unwrap_or_else(|| shorten(&tab.name()));
+    match tab.head_label() {
+        Some(head) => format!("{name} ⎇ {}", shorten(&head)),
+        None => name,
+    }
+}
+
 pub fn view<'a>(
     t: &'a Tokens,
     tabs: &'a [RepoTab],
     active: usize,
     list_open: bool,
 ) -> Element<'a, Message> {
-    // Tabs show the repository name only (the branch is in the toolbar,
-    // the status line and the tooltip); with many tabs the inactive names
-    // are shortened so a dozen services still fit on one line.
     let compact = tabs.len() >= COMPACT_FROM;
     let mut items = Vec::with_capacity(tabs.len());
     for (i, tab) in tabs.iter().enumerate() {
@@ -74,11 +107,7 @@ pub fn view<'a>(
         } else {
             String::new()
         };
-        let name = if compact && !is_active {
-            format::truncate(&tab.name(), 16)
-        } else {
-            tab.name()
-        };
+        let name = title(tab, compact && !is_active);
         let label = button(widgets::mono(t, format!("{shortcut}{name}")))
             .padding(Padding::from([2, 8]))
             .style(style::tab(t, is_active))

@@ -2838,6 +2838,8 @@ async fn linked_from_feature(folder: &std::path::Path) -> Ui {
 async fn a_linked_worktree_looks_at_its_base_detached_instead_of_taking_it() {
     let folder = tempfile::tempdir().expect("worktree parent");
     let mut ui = linked_from_feature(folder.path()).await;
+    let project = ui.app.tabs[0].name();
+    assert!(ui.shows(&format!("2:{project} ⎇ work")));
     let _ = ui
         .send(Message::Sidebar(sidebar::Message::Select(
             sidebar::Selection::Ref("refs/heads/feature".into()),
@@ -2863,6 +2865,7 @@ async fn a_linked_worktree_looks_at_its_base_detached_instead_of_taking_it() {
         head(&["rev-parse", "HEAD"]),
         head(&["rev-parse", "feature"])
     );
+    assert!(ui.shows(&format!("2:{project} ⎇ HEAD@")));
     // `feature` stays free for the main tree.
     let _ = ui.fixture.repo.git(&["switch", "-q", "feature"]);
 }
@@ -2922,6 +2925,8 @@ async fn a_linked_worktree_switches_to_other_branches_as_usual() {
             .trim(),
         "other"
     );
+    let project = ui.app.tabs[0].name();
+    assert!(ui.shows(&format!("2:{project} ⎇ other")));
 }
 
 async fn checkout_fixture() -> Ui {
@@ -3341,6 +3346,8 @@ async fn new_worktree_goes_beside_the_repository_and_opens_in_a_tab() {
         .join("agent-one");
     assert!(expected.exists(), "{} was created", expected.display());
     assert_eq!(ui.app.tabs.len(), 2, "and opened in a tab");
+    assert!(ui.shows(&format!("1:{name}")));
+    assert!(ui.shows(&format!("2:{name} ⎇ agent/one")));
     let _ = std::fs::remove_dir_all(expected.parent().expect("root"));
 }
 
