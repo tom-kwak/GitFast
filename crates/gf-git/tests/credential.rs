@@ -35,7 +35,7 @@ impl Home {
     }
 
     fn runner(&self) -> GitRunner {
-        GitRunner::new().with_cleared_env().with_env([
+        let runner = GitRunner::new().with_cleared_env().with_env([
             ("PATH", std::env::var_os("PATH").unwrap_or_default()),
             ("HOME", self.root.clone().into_os_string()),
             ("GIT_CONFIG_NOSYSTEM", "1".into()),
@@ -44,7 +44,12 @@ impl Home {
                 self.root.join("gitconfig").into_os_string(),
             ),
             ("GIT_TERMINAL_PROMPT", "0".into()),
-        ])
+        ]);
+        // Winsock needs SystemRoot to load its provider DLL in the child.
+        #[cfg(windows)]
+        let runner =
+            runner.with_env(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)));
+        runner
     }
 
     fn stored(&self) -> String {
