@@ -27,9 +27,9 @@
 //!   ([`Phase`]: `CONFLICT`, `EDITING` when files changed in the last 2
 //!   minutes, `UNCOMMITTED`, `READY` to merge, `MERGED`, `BEHIND`, `CLEAN`,
 //!   or `MISSING` / `ERROR`). After the `└`, `●` marks the tree this tab
-//!   shows and `◉` one open in another tab. That tree is also the selected
-//!   card until another is picked, and again whenever the tab is opened
-//!   from another tree.
+//!   shows and a dim `◉` marks one open in another tab. The current tab's
+//!   tree is also the selected card until another is picked, and again
+//!   whenever the tab is opened from another tree.
 //! - Changes: conflicts and uncommitted entries, and `⚠ N shared` when
 //!   other trees change the same files (merging both may conflict).
 //! - Upstream: commits to push / pull as `↑2 ↓1` (nothing when in sync,
@@ -864,7 +864,7 @@ impl State {
         } else if c.in_tab {
             widgets::tip(
                 t,
-                row![elbow(), colored(t, "◉", t.accent())],
+                row![elbow(), colored(t, "◉", t.dim)],
                 "open in another tab".into(),
             )
         } else if on_base {

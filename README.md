@@ -156,6 +156,8 @@ main ← 3 to merge · 3 new
 - Each card hangs from a title naming the branch it merges into and how it
   stands: commits not there yet (`to merge`), commits the base got since
   (`new`), or `all merged`.
+- The current worktree has a highlighted `●`. A dim `◉` marks a worktree
+  open in another tab.
 - One word gives the tree's state: `EDITING` (files changed in the last
   2 minutes), `UNCOMMITTED`, `READY`, `MERGED`, `BEHIND`, `CLEAN`, or
   `CONFLICT` / `MISSING`. `MERGED` means commits made on the branch reached
