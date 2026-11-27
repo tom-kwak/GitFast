@@ -1387,6 +1387,7 @@ dependencies = [
  "gf-hosting-gitlab",
  "gf-test-support",
  "gf-watch",
+ "gix-imara-diff",
  "iced",
  "iced_test",
  "memory-stats",

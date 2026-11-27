@@ -20,7 +20,7 @@ use crate::conflict::{Choice, Segment};
 use crate::ops::bisect::{BisectProgress, Verdict};
 use crate::ops::blame::BlameLine;
 use crate::ops::commit::CommitOptions;
-use crate::ops::conflict::Side;
+use crate::ops::conflict::{ConflictDocument, Side};
 use crate::ops::diff::{DiffOptions, DiffTarget, FileVersion};
 use crate::ops::integrate::{Integration, MergeStyle};
 use crate::ops::lfs::LfsFile;
@@ -249,6 +249,26 @@ impl Repository {
     }
 
     // ---- ConflictOps
+    /// Reads the worktree draft and its unmerged index versions.
+    pub async fn conflict_document(&self, path: &Path) -> Result<ConflictDocument> {
+        ConflictOps::conflict_document(&self.cli, path).await
+    }
+
+    /// Writes and stages the prepared result while its inputs still match.
+    pub async fn save_conflict_result(
+        &self,
+        path: &Path,
+        original: &ConflictDocument,
+        result: &str,
+    ) -> Result<()> {
+        ConflictOps::save_conflict_result(&self.cli, path, original, result).await
+    }
+
+    /// Stages the current working-tree version after an external resolution.
+    pub async fn mark_conflict_resolved(&self, path: &Path) -> Result<()> {
+        ConflictOps::mark_conflict_resolved(&self.cli, path).await
+    }
+
     /// The conflicted file split into common text and conflict blocks.
     /// `None` when the file has no parseable markers (binary, or edited).
     pub async fn conflict_segments(&self, path: &Path) -> Result<Option<Vec<Segment>>> {

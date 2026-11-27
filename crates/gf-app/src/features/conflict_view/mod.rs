@@ -1,49 +1,96 @@
-//! Conflict resolver for one file: each conflict block shows "ours" and
-//! "theirs" (and the base with diff3) with buttons to keep one side, both,
-//! or whole-file shortcuts. Applying writes the file and stages it once no
-//! conflict is left. Writing is a change, so the app confirms it.
+//! Three-pane conflict resolver. The center is the worktree draft and changes
+//! reach Git only when the user saves and stages the file.
+
+mod model;
+mod view;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use gf_git::Side;
-use gf_git::conflict::{Block, Choice, Segment};
-use iced::widget::text::Wrapping;
-use iced::widget::{Column, column, container, row, space};
-use iced::{Background, Border, Color, Element, Length, Padding};
+use gf_git::conflict::{self, Choice};
+use gf_git::{ConflictDocument, Side};
+use iced::Task;
+use iced::widget::text_editor;
 
-use crate::theme::{Tokens, style};
-use crate::widgets::{self, colored, dim};
+pub use model::Prepared;
+use model::{AlignedResult, Layout, Resolution};
 
-/// Unchanged lines shown around conflicts; longer runs are folded.
-const CONTEXT_LINES: usize = 3;
+use crate::nav;
+use crate::theme::Tokens;
+use crate::widgets::virtual_list::ScrollPos;
 
-#[derive(Debug, Clone)]
+const LIST: &str = "conflict-aligned-rows";
+const EDITOR: &str = "conflict-result-editor";
+
+#[derive(Debug)]
 pub struct State {
     pub path: PathBuf,
-    segments: Option<Vec<Segment>>,
-    choices: Vec<Option<Choice>>,
+    pub request: u64,
+    file: Option<Arc<Prepared>>,
+    resolutions: Vec<Option<Resolution>>,
+    remaining: usize,
+    history: Vec<Vec<Option<Resolution>>>,
+    result: Vec<Vec<String>>,
+    aligned: Vec<Vec<AlignedResult>>,
+    layout: Layout,
+    active: usize,
+    difference: Option<usize>,
+    scroll: ScrollPos,
+    base_scroll: ScrollPos,
+    file_scroll: ScrollPos,
+    edit: Option<text_editor::Content>,
     loading: bool,
     error: Option<String>,
+    changed: bool,
+    saving: bool,
+    resolved_on_disk: bool,
+    refresh_error: Option<String>,
+    show_files: bool,
+    file_actions: bool,
+    block_actions: bool,
+    show_base: bool,
+    expanded: bool,
+    narrow_side: Side,
+    focused_row: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Choose(usize, Choice),
+    ReplaceChoice(usize, Choice),
+    Undo,
     Apply,
+    Edit,
+    EditAction(text_editor::Action),
+    AcceptEdit,
+    CancelEdit,
+    SelectBlock(usize),
+    Difference(bool),
+    NextUnresolved,
+    Scrolled(ScrollPos),
+    BaseScrolled(ScrollPos),
+    FilesScrolled(ScrollPos),
+    ToggleFiles,
+    ToggleFileActions,
+    ToggleBlockActions,
+    ToggleBase,
+    ToggleContext,
+    SwitchSource,
+    OpenFile(PathBuf),
+    Reload,
     TakeFile(Side),
     MarkResolved,
     Close,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Output {
-    Apply {
-        path: PathBuf,
-        segments: Vec<Segment>,
-        choices: Vec<Option<Choice>>,
-    },
+    Apply(PathBuf, Arc<ConflictDocument>, String),
+    OpenFile(PathBuf),
+    NextFile,
+    ReplaceChoice(usize, Choice),
+    Reload(PathBuf),
     TakeFile(PathBuf, Side),
-    /// Stage the file as it is (resolved by hand in an editor).
     MarkResolved(PathBuf),
     Close,
 }
@@ -52,337 +99,483 @@ impl State {
     pub fn loading(path: PathBuf) -> Self {
         Self {
             path,
-            segments: None,
-            choices: Vec::new(),
+            request: 0,
+            file: None,
+            resolutions: Vec::new(),
+            remaining: 0,
+            history: Vec::new(),
+            result: Vec::new(),
+            aligned: Vec::new(),
+            layout: Layout::default(),
+            active: 0,
+            difference: None,
+            scroll: ScrollPos::default(),
+            base_scroll: ScrollPos::default(),
+            file_scroll: ScrollPos::default(),
+            edit: None,
             loading: true,
             error: None,
+            changed: false,
+            saving: false,
+            resolved_on_disk: false,
+            refresh_error: None,
+            show_files: true,
+            file_actions: false,
+            block_actions: false,
+            show_base: false,
+            expanded: false,
+            narrow_side: Side::Ours,
+            focused_row: None,
         }
     }
 
-    /// Keep choices for comparison with the new content once it arrives.
-    pub fn reload(&mut self) {
-        self.loading = true;
+    pub fn reload(&mut self, request: u64, waiting: bool) {
+        self.request = request;
+        self.loading = waiting || self.file.is_none();
     }
 
-    pub fn loaded(&mut self, path: &PathBuf, result: Result<Option<Vec<Segment>>, String>) {
-        if &self.path != path {
-            return;
-        }
+    pub fn loaded(&mut self, incoming: Result<Arc<Prepared>, String>) -> bool {
         self.loading = false;
-        match result {
-            Ok(Some(segments)) => {
-                // Refreshes reload the file (the watcher fires often); the
-                // choices made so far stay unless the file really changed.
-                if self.segments.as_ref() != Some(&segments) {
-                    let n = gf_git::conflict::conflict_count(&segments);
-                    self.choices = vec![None; n];
-                    self.segments = Some(segments);
-                }
-                self.error = None;
+        let file = match incoming {
+            Ok(file) => file,
+            Err(error) => {
+                self.error = Some(error);
+                return false;
             }
-            Ok(None) => {
-                self.segments = None;
-                self.error = Some("no conflict markers found (binary file, or already edited) — take a side or mark it resolved".into());
-            }
-            Err(e) => self.error = Some(e),
+        };
+        self.error = None;
+        if self.resolved_on_disk {
+            self.file = None;
+            self.edit = None;
+            self.resolutions.clear();
+            self.resolved_on_disk = false;
+        }
+        if self
+            .file
+            .as_ref()
+            .is_some_and(|old| old.original == file.original)
+        {
+            self.changed = false;
+            return false;
+        }
+        if self
+            .file
+            .as_ref()
+            .is_some_and(|old| old.original.same_index(&file.original))
+            && self
+                .candidate()
+                .as_deref()
+                .is_some_and(|text| file.original.worktree.as_deref() == Some(text))
+        {
+            // A failed git add can leave the prepared result on disk. Keep
+            // the draft and allow the same operation to retry staging it.
+            return false;
+        }
+        if self.file.is_some() && self.has_draft() {
+            self.changed = true;
+            return false;
+        }
+        self.resolutions = vec![None; file.blocks.len()];
+        self.remaining = file.blocks.len();
+        self.history = vec![Vec::new(); file.blocks.len()];
+        self.result = vec![Vec::new(); file.blocks.len()];
+        self.aligned = file
+            .blocks
+            .iter()
+            .map(|block| block.align_result(&[], None))
+            .collect();
+        self.file = Some(file);
+        self.changed = false;
+        self.active = 0;
+        self.rebuild();
+        true
+    }
+
+    pub fn has_draft(&self) -> bool {
+        !self.resolved_on_disk
+            && (self.edit.is_some() || self.resolutions.iter().any(Option::is_some))
+    }
+
+    pub fn unresolved(&self) -> Option<usize> {
+        if self.resolved_on_disk {
+            return Some(0);
+        }
+        let file = self.file.as_ref()?;
+        file.segments.as_ref()?;
+        Some(self.remaining)
+    }
+
+    pub fn saving(&mut self, saving: bool) {
+        self.saving = saving;
+        if saving {
+            self.refresh_error = None;
         }
     }
 
-    fn chosen(&self) -> usize {
-        self.choices.iter().filter(|c| c.is_some()).count()
+    pub fn editing(&self) -> bool {
+        self.edit.is_some()
+    }
+
+    pub fn resolved_on_disk(&mut self) {
+        self.resolved_on_disk = true;
+        self.loading = false;
+        self.error = None;
+        self.refresh_error = None;
+        self.edit = None;
+        self.changed = false;
+    }
+
+    pub fn resolved_outside_app(&mut self) {
+        if self.has_draft() {
+            self.changed = true;
+        } else {
+            self.resolved_on_disk();
+        }
+    }
+
+    pub fn operation_failed(&mut self, error: &str) {
+        self.refresh_error = Some(error.into());
+    }
+
+    pub fn restore_scroll(&self) -> Task<Message> {
+        nav::scroll_y(LIST, self.scroll.offset)
+    }
+
+    pub fn key(&self, key: nav::Key) -> Option<Message> {
+        if self.editing() {
+            return None;
+        }
+        match key {
+            nav::Key::Char('p') => Some(Message::Difference(true)),
+            nav::Key::Char('n') => Some(Message::Difference(false)),
+            nav::Key::Char('j') => Some(Message::NextUnresolved),
+            nav::Key::Char('e') => Some(Message::Edit),
+            _ => None,
+        }
+    }
+
+    fn candidate(&self) -> Option<String> {
+        model::candidate(self.file.as_ref()?, &self.resolutions)
     }
 
     fn can_apply(&self) -> bool {
-        !self.loading && self.error.is_none() && self.chosen() > 0
+        !self.loading
+            && !self.saving
+            && !self.resolved_on_disk
+            && !self.changed
+            && self.error.is_none()
+            && self.edit.is_none()
+            && !self.resolutions.is_empty()
+            && self.unresolved() == Some(0)
     }
 
-    pub fn update(&mut self, message: Message) -> Option<Output> {
-        match message {
-            Message::Choose(i, c) => {
-                if let Some(slot) = self.choices.get_mut(i) {
-                    // Clicking the active choice again clears it.
-                    *slot = if *slot == Some(c) { None } else { Some(c) };
+    fn rebuild(&mut self) {
+        if let Some(file) = &self.file {
+            self.layout = Layout::new(file, self.expanded, &self.aligned);
+        }
+    }
+
+    fn record(&mut self, block: usize, choice: Option<Resolution>) {
+        if let Some(slot) = self.resolutions.get_mut(block)
+            && *slot != choice
+        {
+            self.remaining += usize::from(choice.is_none());
+            self.remaining -= usize::from(slot.is_none());
+            self.history[block].push(slot.take());
+            *slot = choice;
+            self.refresh_result(block);
+        }
+    }
+
+    fn refresh_result(&mut self, block: usize) {
+        let text = self
+            .file
+            .as_ref()
+            .zip(self.resolutions[block].as_ref())
+            .and_then(|(file, choice)| file.resolved_text(block, choice))
+            .unwrap_or_default();
+        self.result[block] = text.lines().map(str::to_owned).collect();
+        if let Some(source) = self.file.as_ref().and_then(|file| file.blocks.get(block)) {
+            self.aligned[block] =
+                source.align_result(&self.result[block], self.resolutions[block].as_ref());
+        }
+        self.rebuild();
+    }
+
+    fn jump(&mut self, row: usize, t: &Tokens) -> Task<Message> {
+        let line = self.edit_line(row);
+        if let Some(editor) = self.edit.as_mut()
+            && let Some(line) = line
+        {
+            editor.move_to(text_editor::Cursor {
+                position: text_editor::Position {
+                    line: line.min(editor.line_count().saturating_sub(1)),
+                    column: 0,
+                },
+                selection: None,
+            });
+        }
+        self.focused_row = Some(row);
+        #[allow(clippy::cast_precision_loss)]
+        let offset = row.saturating_sub(2) as f32 * view::row_height(t);
+        self.scroll.offset = offset;
+        nav::scroll_y(LIST, offset)
+    }
+
+    fn edit_line(&self, row: usize) -> Option<usize> {
+        let model::Row::Code { block, index } = *self.layout.rows.get(row)? else {
+            return None;
+        };
+        let active = self.aligned.get(block)?.get(index)?;
+        if self.resolutions.get(block)?.is_some() {
+            active.result
+        } else {
+            let source = self
+                .file
+                .as_ref()?
+                .blocks
+                .get(block)?
+                .pairs
+                .get(active.source?)?;
+            source.ours.or(source.theirs)
+        }
+    }
+
+    pub fn reveal(&mut self, t: &Tokens) -> Task<Message> {
+        if let Some(row) = self.layout.headings.get(self.active).copied() {
+            self.jump(row, t)
+        } else {
+            self.scroll.offset = 0.0;
+            nav::scroll_y(LIST, 0.0)
+        }
+    }
+
+    fn select(&mut self, block: usize, t: &Tokens) -> Task<Message> {
+        if block >= self.resolutions.len() || self.edit.is_some() {
+            return Task::none();
+        }
+        self.active = block;
+        self.difference = None;
+        self.reveal(t)
+    }
+
+    pub fn update(&mut self, m: Message, t: &Tokens) -> (Task<Message>, Option<Output>) {
+        let output = match m {
+            Message::Choose(block, choice)
+                if !self.resolved_on_disk
+                    && !self.changed
+                    && self.edit.is_none()
+                    && !self.saving =>
+            {
+                if matches!(
+                    self.resolutions.get(block),
+                    Some(Some(Resolution::Edited(_)))
+                ) {
+                    Some(Output::ReplaceChoice(block, choice))
+                } else {
+                    self.record(block, Some(Resolution::Side(choice)));
+                    None
+                }
+            }
+            Message::ReplaceChoice(block, choice)
+                if !self.resolved_on_disk
+                    && !self.changed
+                    && self.edit.is_none()
+                    && !self.saving =>
+            {
+                self.record(block, Some(Resolution::Side(choice)));
+                None
+            }
+            Message::Undo if self.edit.is_none() && !self.saving => {
+                if let Some(previous) = self.history.get_mut(self.active).and_then(Vec::pop) {
+                    let slot = &mut self.resolutions[self.active];
+                    self.remaining += usize::from(previous.is_none());
+                    self.remaining -= usize::from(slot.is_none());
+                    *slot = previous;
+                    self.refresh_result(self.active);
                 }
                 None
             }
-            Message::Apply if self.can_apply() => {
-                self.segments.clone().map(|segments| Output::Apply {
-                    path: self.path.clone(),
-                    segments,
-                    choices: self.choices.clone(),
-                })
+            Message::Apply if self.can_apply() => self
+                .file
+                .as_ref()
+                .zip(self.candidate())
+                .map(|(file, text)| Output::Apply(self.path.clone(), file.original.clone(), text)),
+            Message::Edit if !self.resolved_on_disk && !self.changed && !self.saving => {
+                if let Some(file) = &self.file
+                    && let Some(block) = file.block(self.active)
+                {
+                    let text = self.resolutions[self.active]
+                        .as_ref()
+                        .and_then(|choice| file.resolved_text(self.active, choice))
+                        .unwrap_or_else(|| block.ours.clone());
+                    self.edit = Some(text_editor::Content::with_text(&text));
+                    self.refresh_error = None;
+                    let mut tasks = vec![iced::widget::operation::focus(EDITOR)];
+                    if let Some(row) = self.focused_row {
+                        tasks.push(self.jump(row, t));
+                    }
+                    return (Task::batch(tasks), None);
+                }
+                None
             }
-            Message::Apply => None,
-            Message::TakeFile(side) => Some(Output::TakeFile(self.path.clone(), side)),
-            Message::MarkResolved => Some(Output::MarkResolved(self.path.clone())),
-            Message::Close => Some(Output::Close),
-        }
-    }
-
-    fn block_view<'a>(&'a self, t: &'a Tokens, n: usize, b: &'a Block) -> Element<'a, Message> {
-        let choice = self.choices.get(n).copied().flatten();
-        let side = |label: String, text: &'a str, color: Color, picked: bool| {
-            let mut col = Column::new().push(colored(t, label, color));
-            for line in text.lines() {
-                col = col.push(
-                    widgets::mono(t, format!("  {}", widgets::format::code_line(line)))
-                        .wrapping(Wrapping::None),
-                );
+            Message::EditAction(action) => {
+                if let Some(edit) = &mut self.edit {
+                    let scroll = if let text_editor::Action::Scroll { lines } = action {
+                        Some(lines)
+                    } else {
+                        None
+                    };
+                    edit.perform(action);
+                    if let Some(lines) = scroll {
+                        #[allow(clippy::cast_precision_loss)]
+                        let offset = self.scroll.offset + lines as f32 * view::row_height(t);
+                        self.scroll.offset = offset.max(0.0);
+                        return (nav::scroll_y(LIST, self.scroll.offset), None);
+                    }
+                }
+                None
             }
-            if text.is_empty() {
-                col = col.push(dim(t, "  (nothing)"));
+            Message::AcceptEdit if !self.saving => {
+                if let Some(edit) = self.edit.take() {
+                    let mut text = edit.text();
+                    if self.file.as_ref().is_some_and(|file| {
+                        conflict::has_markers(&text, file.original.marker_width)
+                    }) {
+                        self.edit = Some(edit);
+                        self.refresh_error =
+                            Some("remove the remaining conflict markers from this block".into());
+                        return (Task::none(), None);
+                    }
+                    self.refresh_error = None;
+                    // A manually edited block must not consume the next
+                    // unchanged line. Preserve the user's empty deletion.
+                    let followed = self
+                        .file
+                        .as_ref()
+                        .is_some_and(|file| file.has_following_content(self.active));
+                    if followed && !text.is_empty() && !text.ends_with('\n') {
+                        let crlf = self
+                            .file
+                            .as_ref()
+                            .and_then(|file| file.original.worktree.as_deref())
+                            .and_then(|worktree| worktree.split_inclusive('\n').next())
+                            .is_some_and(|line| line.ends_with("\r\n"));
+                        text.push_str(if crlf { "\r\n" } else { "\n" });
+                    }
+                    self.record(self.active, Some(Resolution::Edited(text)));
+                }
+                None
             }
-            container(col)
-                .padding(Padding::from([2, 6]))
-                .width(Length::Fill)
-                .style(move |_| container::Style {
-                    background: Some(Background::Color(style::tint(
-                        t.bg,
-                        color,
-                        if picked { 0.25 } else { 0.08 },
-                    ))),
-                    border: Border {
-                        color: if picked { color } else { Color::TRANSPARENT },
-                        width: 1.0,
-                        radius: 0.0.into(),
-                    },
-                    ..container::Style::default()
-                })
-        };
-        let ours_picked = matches!(
-            choice,
-            Some(Choice::Ours | Choice::Both | Choice::BothTheirsFirst)
-        );
-        let theirs_picked = matches!(
-            choice,
-            Some(Choice::Theirs | Choice::Both | Choice::BothTheirsFirst)
-        );
-        let mut sides = row![
-            side(
-                format!("◀ ours · {}", b.ours_label),
-                &b.ours,
-                t.added(),
-                ours_picked
-            ),
-            side(
-                format!("theirs · {} ▶", b.theirs_label),
-                &b.theirs,
-                t.remote(),
-                theirs_picked
-            ),
-        ]
-        .spacing(4);
-        if let Some(base) = &b.base {
-            sides = sides.push(side(
-                "base (before both)".into(),
-                base,
-                t.dim,
-                choice == Some(Choice::Base),
-            ));
-        }
-        let pick = |label: &str, c: Choice| {
-            let active = choice == Some(c);
-            widgets::text_button(
-                t,
-                &if active {
-                    format!("■ {label}")
-                } else {
-                    label.to_owned()
-                },
-                None,
-                Some(Message::Choose(n, c)),
-            )
-        };
-        let mut buttons = row![
-            colored(t, format!("conflict {}", n + 1), t.warning()),
-            space().width(Length::Fill),
-            pick("ours", Choice::Ours),
-            pick("theirs", Choice::Theirs),
-            pick("both", Choice::Both),
-            pick("both (theirs first)", Choice::BothTheirsFirst),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center);
-        if b.base.is_some() {
-            buttons = buttons.push(pick("base", Choice::Base));
-        }
-        column![buttons, sides].spacing(2).into()
-    }
-
-    pub fn view<'a>(&'a self, t: &'a Tokens) -> Element<'a, Message> {
-        let accent = t.warning();
-        let total = self.choices.len();
-        let header = row![
-            colored(
-                t,
-                format!(
-                    "{} · {}/{} chosen",
-                    self.path.display(),
-                    self.chosen(),
-                    total
-                ),
-                t.fg
-            )
-            .wrapping(Wrapping::None)
-            .width(Length::Fill),
-            widgets::tip(
-                t,
-                widgets::text_button(
-                    t,
-                    "whole file: ours",
-                    None,
-                    Some(Message::TakeFile(Side::Ours))
-                ),
-                "keep your version of the entire file".into()
-            ),
-            widgets::tip(
-                t,
-                widgets::text_button(
-                    t,
-                    "whole file: theirs",
-                    None,
-                    Some(Message::TakeFile(Side::Theirs))
-                ),
-                "keep the incoming version of the entire file".into()
-            ),
-            widgets::tip(
-                t,
-                widgets::text_button(t, "mark resolved", None, Some(Message::MarkResolved)),
-                "stage the file as it is now (after editing it yourself)".into()
-            ),
-            widgets::icon_button(t, "✕", t.dim, "close", Message::Close),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center);
-
-        let body: Element<'a, Message> = if self.loading {
-            widgets::empty_hint(t, "reading conflicts…")
-        } else if let Some(e) = &self.error {
-            colored(t, format!("  {e}"), t.warning()).into()
-        } else if let Some(segments) = &self.segments {
-            let mut col = Column::new().spacing(6);
-            let mut n = 0;
-            for s in segments {
-                match s {
-                    Segment::Common(text) => {
-                        let lines: Vec<&str> = text.lines().collect();
-                        let fold = lines.len() > CONTEXT_LINES * 2 + 1;
-                        let mut c = Column::new();
-                        let shown: Vec<&str> = if fold {
-                            lines[..CONTEXT_LINES]
-                                .iter()
-                                .chain(lines[lines.len() - CONTEXT_LINES..].iter())
-                                .copied()
-                                .collect()
-                        } else {
-                            lines.clone()
-                        };
-                        for (i, line) in shown.iter().enumerate() {
-                            if fold && i == CONTEXT_LINES {
-                                c = c.push(dim(
-                                    t,
-                                    format!(
-                                        "  … {} unchanged lines",
-                                        lines.len() - CONTEXT_LINES * 2
-                                    ),
-                                ));
+            Message::CancelEdit => {
+                self.edit = None;
+                None
+            }
+            Message::SelectBlock(block) => return (self.select(block, t), None),
+            Message::Difference(back) => {
+                if let Some(rows) = self
+                    .layout
+                    .differences
+                    .get(self.active)
+                    .filter(|r| !r.is_empty())
+                {
+                    let next = self.difference.map_or_else(
+                        || if back { rows.len() - 1 } else { 0 },
+                        |i| {
+                            if back {
+                                i.saturating_sub(1).min(rows.len() - 1)
+                            } else {
+                                (i + 1).min(rows.len() - 1)
                             }
-                            c = c.push(dim(t, format!("  {line}")).wrapping(Wrapping::None));
-                        }
-                        col = col.push(c);
-                    }
-                    Segment::Conflict(b) => {
-                        col = col.push(self.block_view(t, n, b));
-                        n += 1;
-                    }
+                        },
+                    );
+                    self.difference = Some(next);
+                    return (self.jump(rows[next], t), None);
                 }
+                None
             }
-            widgets::scroll(col)
-        } else {
-            widgets::empty_hint(t, "nothing to show")
-        };
-
-        let footer = row![
-            dim(
-                t,
-                if self.chosen() == total && total > 0 {
-                    "all conflicts chosen — apply writes the file and stages it"
-                } else {
-                    "unchosen conflicts keep their markers when applied"
+            Message::NextUnresolved if self.edit.is_none() => {
+                let next = self
+                    .resolutions
+                    .iter()
+                    .enumerate()
+                    .skip(self.active + 1)
+                    .chain(self.resolutions.iter().enumerate().take(self.active))
+                    .find_map(|(i, choice)| choice.is_none().then_some(i));
+                if let Some(next) = next {
+                    return (self.select(next, t), None);
                 }
-            )
-            .width(Length::Fill),
-            widgets::text_button(
-                t,
-                "apply choices",
-                None,
-                self.can_apply().then_some(Message::Apply)
-            ),
-        ]
-        .align_y(iced::Alignment::Center);
-
-        widgets::accent_panel(
-            t,
-            "RESOLVE CONFLICT".into(),
-            accent,
-            column![header, body, footer].spacing(4),
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn state() -> State {
-        let text = "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> topic\nb\n";
-        let mut s = State::loading("f.txt".into());
-        s.loaded(&"f.txt".into(), Ok(gf_git::conflict::parse(text)));
-        s
-    }
-
-    #[test]
-    fn choose_toggles_and_apply_carries_choices() {
-        let mut s = state();
-        assert_eq!(s.choices, vec![None]);
-        let _ = s.update(Message::Choose(0, Choice::Theirs));
-        assert_eq!(s.chosen(), 1);
-        match s.update(Message::Apply) {
-            Some(Output::Apply { choices, .. }) => assert_eq!(choices, vec![Some(Choice::Theirs)]),
-            other => panic!("unexpected {other:?}"),
-        }
-        let _ = s.update(Message::Choose(0, Choice::Theirs));
-        assert_eq!(s.chosen(), 0, "clicking again clears");
-    }
-
-    #[test]
-    fn reloading_the_same_content_keeps_choices() {
-        let mut s = state();
-        let _ = s.update(Message::Choose(0, Choice::Ours));
-        s.reload();
-        assert!(s.update(Message::Apply).is_none());
-        s.loaded(&"f.txt".into(), Err("read failed".into()));
-        assert!(s.update(Message::Apply).is_none());
-        // A refresh reloads the file: same text, choices stay.
-        s.reload();
-        let same = "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> topic\nb\n";
-        s.loaded(&"f.txt".into(), Ok(gf_git::conflict::parse(same)));
-        assert_eq!(s.choices, vec![Some(Choice::Ours)]);
-        assert!(s.update(Message::Apply).is_some());
-        // The file changed on disk: choices no longer apply.
-        let other = "a\n<<<<<<< HEAD\nx2\n=======\ny\n>>>>>>> topic\nb\n";
-        s.loaded(&"f.txt".into(), Ok(gf_git::conflict::parse(other)));
-        assert_eq!(s.choices, vec![None]);
+                Some(Output::NextFile)
+            }
+            Message::Scrolled(pos) => {
+                self.scroll = pos;
+                None
+            }
+            Message::BaseScrolled(pos) => {
+                self.base_scroll = pos;
+                None
+            }
+            Message::FilesScrolled(pos) => {
+                self.file_scroll = pos;
+                None
+            }
+            Message::ToggleFiles => {
+                self.show_files = !self.show_files;
+                None
+            }
+            Message::ToggleFileActions => {
+                self.file_actions = !self.file_actions;
+                None
+            }
+            Message::ToggleBlockActions => {
+                self.block_actions = !self.block_actions;
+                None
+            }
+            Message::ToggleBase => {
+                self.show_base = !self.show_base;
+                None
+            }
+            Message::ToggleContext => {
+                self.expanded = !self.expanded;
+                self.rebuild();
+                return (self.reveal(t), None);
+            }
+            Message::SwitchSource => {
+                self.narrow_side = match self.narrow_side {
+                    Side::Ours => Side::Theirs,
+                    Side::Theirs => Side::Ours,
+                };
+                None
+            }
+            Message::OpenFile(path) => Some(Output::OpenFile(path)),
+            Message::Reload if self.changed && !self.saving => {
+                Some(Output::Reload(self.path.clone()))
+            }
+            Message::TakeFile(side) if !self.saving => {
+                Some(Output::TakeFile(self.path.clone(), side))
+            }
+            Message::MarkResolved if !self.saving && !self.changed => {
+                Some(Output::MarkResolved(self.path.clone()))
+            }
+            Message::Close => Some(Output::Close),
+            _ => None,
+        };
+        (Task::none(), output)
     }
 
-    #[test]
-    fn unparseable_file_explains_what_to_do() {
-        let mut s = State::loading("bin".into());
-        s.loaded(&"bin".into(), Ok(None));
-        assert!(
-            s.error
+    pub fn can_mark_resolved(&self) -> bool {
+        self.file.as_ref().is_none_or(|f| {
+            f.original
+                .worktree
                 .as_deref()
-                .is_some_and(|e| e.contains("take a side"))
-        );
+                .is_none_or(|text| !conflict::has_markers(text, f.original.marker_width))
+        })
+    }
+
+    pub fn side_missing(&self, side: Side) -> bool {
+        let slot = if side == Side::Ours { 1 } else { 2 };
+        self.file
+            .as_ref()
+            .is_some_and(|file| !file.original.present[slot] && file.original.present[3 - slot])
     }
 }

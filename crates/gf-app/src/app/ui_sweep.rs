@@ -1951,9 +1951,76 @@ async fn reselecting_an_open_conflict_keeps_its_choices() {
             crate::features::conflict_view::Message::Choose(0, gf_git::conflict::Choice::Ours),
         ))
         .await;
-    let selected = ui.click("a.txt").await;
-    assert!(selected.change_reselected);
+    let _ = ui
+        .send(Message::Changes(changes::Message::Select(
+            "a.txt".into(),
+            changes::Group::Conflicts,
+        )))
+        .await;
     assert!(ui.shows("all conflicts chosen"));
+}
+
+#[tokio::test]
+async fn editing_a_conflict_survives_file_switching_and_stages_only_that_file() {
+    use crate::features::conflict_view::Message as Conflict;
+    use iced::widget::text_editor::{Action, Edit};
+    let mut ui = working_tree(
+        Ui::open_with(|r| {
+            diverged(r);
+            r.git(&["switch", "-q", "feature"]);
+            r.write("b.txt", "feature b\n");
+            r.commit_all("feature b");
+            r.git(&["switch", "-q", "main"]);
+            r.write("b.txt", "main b\n");
+            r.commit_all("main b");
+            let _ = r.git_output(&["merge", "feature"]);
+        })
+        .await,
+    )
+    .await;
+    let _ = ui.click("a.txt").await;
+    assert!(ui.shows("Result"));
+    let _ = ui.send(Message::Conflict(Conflict::Edit)).await;
+    let _ = ui
+        .send(Message::Conflict(Conflict::EditAction(Action::SelectAll)))
+        .await;
+    let _ = ui
+        .send(Message::Conflict(Conflict::EditAction(Action::Edit(
+            Edit::Paste(std::sync::Arc::new("a manually combined result\n".into())),
+        ))))
+        .await;
+    let _ = ui
+        .send(Message::Conflict(Conflict::OpenFile("b.txt".into())))
+        .await;
+    assert!(
+        ui.app
+            .active_tab()
+            .and_then(|t| t.conflict.as_ref())
+            .is_some_and(|c| c.path.as_path() == std::path::Path::new("b.txt"))
+    );
+    let _ = ui
+        .send(Message::Conflict(Conflict::OpenFile("a.txt".into())))
+        .await;
+    assert!(
+        ui.app
+            .active_tab()
+            .and_then(|t| t.conflict.as_ref())
+            .is_some_and(|c| c.editing())
+    );
+    let _ = ui.send(Message::Conflict(Conflict::AcceptEdit)).await;
+    let _ = ui.send(Message::Conflict(Conflict::Apply)).await;
+    let _ = ui.send(Message::Dialog(dialog::Message::Submit)).await;
+    assert_eq!(
+        ui.fixture.repo.git(&["show", ":a.txt"]),
+        "a manually combined result"
+    );
+    assert!(
+        !ui.fixture
+            .repo
+            .git(&["ls-files", "--unmerged", "--", "b.txt"])
+            .is_empty()
+    );
+    assert!(ui.shows("file resolved"));
 }
 
 #[tokio::test]

@@ -66,6 +66,10 @@ impl Block {
 /// malformed (e.g. a `<<<<<<<` without `>>>>>>>`), so callers can fall back
 /// to plain editing.
 pub fn parse(text: &str) -> Option<Vec<Segment>> {
+    parse_with_width(text, 7)
+}
+
+pub fn parse_with_width(text: &str, width: usize) -> Option<Vec<Segment>> {
     #[derive(PartialEq)]
     enum In {
         Common,
@@ -77,8 +81,10 @@ pub fn parse(text: &str) -> Option<Vec<Segment>> {
     let mut common = String::new();
     let mut state = In::Common;
     let mut block = Block::empty();
-    let marker = |line: &str, m: &str| {
-        line.strip_prefix(m)
+    let marker = |line: &str, m: u8| {
+        let prefix = line.as_bytes().iter().take_while(|b| **b == m).count();
+        (prefix == width)
+            .then(|| &line[prefix..])
             .filter(|rest| {
                 rest.is_empty()
                     || rest.starts_with(' ')
@@ -94,7 +100,7 @@ pub fn parse(text: &str) -> Option<Vec<Segment>> {
         }
         match state {
             In::Common => {
-                if let Some(label) = marker(line, "<<<<<<<") {
+                if let Some(label) = marker(line, b'<') {
                     if !common.is_empty() {
                         segments.push(Segment::Common(std::mem::take(&mut common)));
                     }
@@ -106,24 +112,24 @@ pub fn parse(text: &str) -> Option<Vec<Segment>> {
                 }
             }
             In::Ours => {
-                if marker(line, "|||||||").is_some() {
+                if marker(line, b'|').is_some() {
                     block.base = Some(String::new());
                     state = In::Base;
-                } else if marker(line, "=======").is_some() {
+                } else if marker(line, b'=').is_some() {
                     state = In::Theirs;
                 } else {
                     block.ours.push_str(line);
                 }
             }
             In::Base => {
-                if marker(line, "=======").is_some() {
+                if marker(line, b'=').is_some() {
                     state = In::Theirs;
                 } else if let Some(b) = block.base.as_mut() {
                     b.push_str(line);
                 }
             }
             In::Theirs => {
-                if let Some(label) = marker(line, ">>>>>>>") {
+                if let Some(label) = marker(line, b'>') {
                     block.theirs_label = label;
                     segments.push(Segment::Conflict(std::mem::replace(
                         &mut block,
@@ -143,6 +149,16 @@ pub fn parse(text: &str) -> Option<Vec<Segment>> {
         segments.push(Segment::Common(common));
     }
     Some(segments)
+}
+
+/// Also detects incomplete marker sections in an edited candidate.
+pub fn has_markers(text: &str, width: usize) -> bool {
+    text.lines().any(|line| {
+        b"<>|".iter().copied().any(|marker| {
+            let len = line.as_bytes().iter().take_while(|b| **b == marker).count();
+            len == width && (line.len() == len || line.as_bytes()[len] == b' ')
+        })
+    })
 }
 
 pub fn conflict_count(segments: &[Segment]) -> usize {

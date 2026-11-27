@@ -76,7 +76,7 @@ gf-git/src/
 | TagOps | 경량 태그 생성·삭제 | **gix** ✅ | `git tag`처럼 대상 객체를 벗기지 않고 가리킴(태그의 태그) |
 | | 주석 태그, push_tag | CLI | |
 | CommitOps | commit, head_message | CLI | hook, 서명 |
-| IndexOps / ConflictOps | stage, unstage, discard, apply_patch, 충돌 해결 | CLI | gix-apply 미구현 |
+| IndexOps / ConflictOps | stage, unstage, discard, apply_patch, 충돌 원본 조회와 해결 | CLI | 해결기는 충돌 인덱스 항목과 blob을 조회합니다. 결과는 워킹 트리와 인덱스 항목을 확인하고 쓴 뒤 해당 경로만 stage합니다. |
 | IntegrateOps | merge, rebase, cherry-pick, revert, continue/skip/abort | CLI | sequencer 없음 |
 | SyncOps | fetch(`--prune`, 한 remote 또는 `--all`) | **gix** ✅ (설정을 켰을 때만, 기본 CLI) | 진행률·취소·명령 로그 지원. 아래 차이 참고 |
 | | ↳ CLI로 보내는 경우 | CLI | shallow 저장소, submodule 있음(git은 필요 시 submodule도 fetch), `src/*:dst/*` 외 refspec, `--all`에서 제외 설정된 remote, 등록되지 않은 URL, `followRemoteHEAD=always`, gix 오류(인증 실패 등) |

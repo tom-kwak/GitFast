@@ -27,6 +27,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 iced = { workspace = true, features = ["tokio", "advanced"] }
+gix-imara-diff = "0.3"
 rfd.workspace = true
 syntect.workspace = true
 two-face.workspace = true
