@@ -35,7 +35,7 @@ use crate::conflict::{Choice, Segment};
 use crate::ops::bisect::{BisectProgress, Verdict};
 use crate::ops::blame::BlameLine;
 use crate::ops::commit::CommitOptions;
-use crate::ops::conflict::Side;
+use crate::ops::conflict::{ConflictDocument, Side};
 use crate::ops::diff::{DiffOptions, DiffTarget, FileVersion};
 use crate::ops::integrate::{Integration, MergeStyle};
 use crate::ops::lfs::LfsFile;
@@ -142,6 +142,20 @@ pub trait CommitOps {
 
 /// Resolving merge conflicts in the working tree.
 pub trait ConflictOps {
+    fn conflict_document(
+        &self,
+        path: &Path,
+    ) -> impl Future<Output = Result<ConflictDocument>> + Send;
+
+    fn save_conflict_result(
+        &self,
+        path: &Path,
+        original: &ConflictDocument,
+        result: &str,
+    ) -> impl Future<Output = Result<()>> + Send;
+
+    fn mark_conflict_resolved(&self, path: &Path) -> impl Future<Output = Result<()>> + Send;
+
     /// The conflicted file split into common text and conflict blocks.
     /// `None` when the file has no parseable markers (binary, or edited).
     fn conflict_segments(

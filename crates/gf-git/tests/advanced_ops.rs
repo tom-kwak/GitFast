@@ -826,3 +826,81 @@ async fn work_that_reached_the_base_is_merged_however_it_got_there() {
     });
     assert_eq!(more_work.await, ("ready", 1), "work after the merge");
 }
+
+#[tokio::test]
+async fn conflict_draft_checks_both_inputs_and_can_retry_staging() {
+    let repo = diverged();
+    let r = open(&repo).await;
+    r.merge("topic", MergeStyle::Default).await.unwrap();
+    let path = Path::new("f.txt");
+    let draft = r.conflict_document(path).await.unwrap();
+    assert_eq!(draft.sources[0].as_deref(), Some("base\nshared\n"));
+    assert_eq!(draft.sources[1].as_deref(), Some("main\nshared\n"));
+    assert_eq!(draft.sources[2].as_deref(), Some("topic\nshared\n"));
+
+    repo.write("f.txt", "external\n");
+    assert!(
+        r.save_conflict_result(path, &draft, "merged\n")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join(path)).unwrap(),
+        "external\n"
+    );
+    repo.write("f.txt", draft.worktree.as_deref().unwrap());
+    assert!(
+        r.save_conflict_result(path, &draft, "<<<<<<< HEAD\n")
+            .await
+            .is_err()
+    );
+
+    let lock = repo.path().join(".git/index.lock");
+    std::fs::write(&lock, b"").unwrap();
+    repo.write("other.txt", "leave this unstaged\n");
+    assert!(
+        r.save_conflict_result(path, &draft, "merged\n")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join(path)).unwrap(),
+        "merged\n"
+    );
+    std::fs::remove_file(lock).unwrap();
+    r.save_conflict_result(path, &draft, "merged\n")
+        .await
+        .unwrap();
+    assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "f.txt");
+    assert_eq!(repo.git(&["ls-files", "--unmerged"]), "");
+    assert!(
+        r.save_conflict_result(path, &draft, "overwrite\n")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn choosing_the_missing_conflict_side_stages_a_deletion() {
+    let repo = TestRepo::new();
+    repo.write("f.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["switch", "-c", "delete-file"]);
+    repo.git(&["rm", "f.txt"]);
+    repo.commit_all("delete file");
+    repo.git(&["switch", "main"]);
+    repo.write("f.txt", "main change\n");
+    repo.commit_all("modify file");
+
+    let r = open(&repo).await;
+    assert_eq!(
+        r.merge("delete-file", MergeStyle::Default).await.unwrap(),
+        Integration::Conflicts(1)
+    );
+    let path = Path::new("f.txt");
+    let draft = r.conflict_document(path).await.unwrap();
+    assert_eq!(draft.present, [true, true, false]);
+    r.take_side(path, Side::Theirs).await.unwrap();
+    assert!(!repo.path().join(path).exists());
+    assert_eq!(repo.git(&["diff", "--cached", "--name-status"]), "D\tf.txt");
+}

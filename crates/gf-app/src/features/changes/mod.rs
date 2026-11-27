@@ -108,6 +108,7 @@ pub enum Output {
     /// Add a line to `.gitignore`.
     Ignore(String),
     TakeSide(PathBuf, gf_git::Side),
+    MarkConflictResolved(PathBuf),
 }
 
 /// `.gitignore` lines offered for an untracked `path`: the file itself,
@@ -216,7 +217,7 @@ fn file_menu(path: &Path, group: Group, in_head: bool) -> Menu<Message> {
                 's',
                 "mark resolved",
                 format!("git add -- {p}"),
-                Message::Stage(pb.clone()),
+                act(Output::MarkConflictResolved(pb.clone())),
             ),
         ],
     };
@@ -534,7 +535,7 @@ impl State {
                 "✓",
                 t.added(),
                 "mark resolved (stage)",
-                (!staging).then(|| Message::Stage(path.clone())),
+                (!staging).then(|| Message::Act(Output::MarkConflictResolved(path.clone()))),
             ),
         };
         // Keep action and status columns outside the indented path.

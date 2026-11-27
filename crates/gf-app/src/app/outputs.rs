@@ -139,7 +139,7 @@ impl App {
             }
             changes::Output::ShowDiff(source) => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.conflict = None;
+                    Self::stash_conflict(tab);
                 }
                 self.show_diff(source)
             }
@@ -204,6 +204,7 @@ impl App {
                 })
             }
             changes::Output::TakeSide(path, side) => self.ask_take_side(path, side),
+            changes::Output::MarkConflictResolved(path) => self.ask_mark_conflict_resolved(path),
         }
     }
 
@@ -1472,6 +1473,7 @@ impl App {
                 lines.push("working tree . then v opens the full file · code view ⌘A select all · ⌘C copy · Esc close".into());
                 lines.push("working tree ⌘-click / ⇧-click / ⇧↑/↓ selects several files · ⌘A all · right-click, Space or d acts on all · Esc clears".into());
                 lines.push("file viewer / blame ⌘F find · Enter / ⌘G next · ⇧Enter / ⌘⇧G previous · Esc closes search".into());
+                lines.push("conflict resolver: p/n previous/next difference · j next unresolved · e edit block · Esc closes".into());
                 lines.push(
                     "click a ref for its history · click diff lines to stage just those".into(),
                 );

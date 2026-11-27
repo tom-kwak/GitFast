@@ -503,15 +503,7 @@ impl App {
                     return Task::none();
                 };
                 tab.code_view = Role::Local;
-                let conflicted: Vec<std::path::PathBuf> = tab
-                    .snapshot
-                    .iter()
-                    .flat_map(|s| &s.status.entries)
-                    .filter_map(|e| match e {
-                        gf_core::model::StatusEntry::Conflicted { path, .. } => Some(path.clone()),
-                        _ => None,
-                    })
-                    .collect();
+                let conflicted = &tab.conflict_files;
                 let open = tab.conflict.as_ref().map(|c| c.path.clone());
                 let next = match open
                     .as_ref()
@@ -870,24 +862,64 @@ impl App {
             return Task::none();
         };
         tab.code_view = Role::Local;
-        // A reload of the same file keeps choices for unchanged conflict blocks.
-        if let Some(conflict) = tab.conflict.as_mut().filter(|c| c.path == path) {
-            conflict.reload();
-        } else {
-            tab.conflict = Some(crate::features::conflict_view::State::loading(path.clone()));
+        if tab
+            .conflict
+            .as_ref()
+            .is_none_or(|conflict| conflict.path != path)
+        {
+            Self::stash_conflict(tab);
+            tab.conflict = Some(
+                tab.conflict_drafts
+                    .remove(&path)
+                    .unwrap_or_else(|| crate::features::conflict_view::State::loading(path)),
+            );
         }
+        let scroll = tab.conflict.as_ref().map_or_else(Task::none, |state| {
+            state.restore_scroll().map(Message::Conflict)
+        });
+        let load = Self::load_conflict(tab, false);
+        self.focus_pane(crate::nav::Pane::Diff);
+        Task::batch([load, scroll])
+    }
+
+    pub(super) fn stash_conflict(tab: &mut crate::repo_tab::RepoTab) {
+        if let Some(state) = tab.conflict.take()
+            && state.has_draft()
+        {
+            tab.conflict_drafts.insert(state.path.clone(), state);
+        }
+    }
+
+    pub(super) fn load_conflict(
+        tab: &mut crate::repo_tab::RepoTab,
+        waiting: bool,
+    ) -> Task<Message> {
+        let Some(conflict) = &mut tab.conflict else {
+            return Task::none();
+        };
+        tab.conflict_request = tab.conflict_request.wrapping_add(1);
+        let request = tab.conflict_request;
+        conflict.reload(request, waiting);
+        let path = conflict.path.clone();
         let repo = tab.repo.clone();
         let id = repo.id();
         Task::perform(
             {
                 let path = path.clone();
                 async move {
-                    repo.conflict_segments(&path)
+                    let document = repo
+                        .conflict_document(&path)
                         .await
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.to_string())?;
+                    tokio::task::spawn_blocking(move || {
+                        crate::features::conflict_view::Prepared::new(document)
+                    })
+                    .await
+                    .map(std::sync::Arc::new)
+                    .map_err(|e| e.to_string())
                 }
             },
-            move |result| Message::ConflictLoaded(id, path.clone(), result),
+            move |result| Message::ConflictLoaded(id, request, path.clone(), result),
         )
     }
 
@@ -897,6 +929,29 @@ impl App {
         path: std::path::PathBuf,
         side: gf_git::Side,
     ) -> Task<Message> {
+        use gf_core::model::{ConflictKind, StatusEntry};
+        use gf_git::Side;
+        let deletion = self.active_tab().is_some_and(|tab| {
+            tab.conflict.as_ref().is_some_and(|conflict| conflict.path == path && conflict.side_missing(side))
+                || tab.snapshot.as_ref().is_some_and(|snapshot| snapshot.status.entries.iter().any(|entry| {
+                    matches!(entry, StatusEntry::Conflicted { path: p, kind } if p == &path && matches!(
+                        (side, kind),
+                        (Side::Ours, ConflictKind::DeletedByUs | ConflictKind::AddedByThem)
+                        | (Side::Theirs, ConflictKind::DeletedByThem | ConflictKind::AddedByUs)
+                    ))
+                }))
+        });
+        if deletion {
+            return self.confirm(Confirm::delete(
+                "Keep deletion",
+                vec![format!(
+                    "Remove {} and stage its deletion?",
+                    crate::widgets::format::repo_path(&path)
+                )],
+                "Keep deletion",
+                Purpose::TakeSide(path, side),
+            ));
+        }
         let (keep, lose) = match side {
             gf_git::Side::Ours => ("your version", "incoming"),
             gf_git::Side::Theirs => ("the incoming version", "your"),
@@ -913,83 +968,106 @@ impl App {
         ))
     }
 
+    pub(super) fn ask_mark_conflict_resolved(&mut self, path: std::path::PathBuf) -> Task<Message> {
+        self.confirm(Confirm::change(
+            "resolve",
+            "Mark resolved",
+            vec![
+                format!(
+                    "Stage {} as it is now?",
+                    crate::widgets::format::repo_path(&path)
+                ),
+                "The file must be free of conflict markers.".into(),
+            ],
+            "Stage",
+            Purpose::MarkResolved(path),
+        ))
+    }
+
     pub(super) fn on_conflict_message(
         &mut self,
         m: crate::features::conflict_view::Message,
     ) -> Task<Message> {
         use crate::features::conflict_view::Output;
-        let Some(out) = self
+        let tokens = self.tokens.clone();
+        let Some((task, output)) = self
             .active_tab_mut()
             .and_then(|t| t.conflict.as_mut())
-            .and_then(|c| c.update(m))
+            .map(|c| c.update(m, &tokens))
         else {
             return Task::none();
         };
-        match out {
-            Output::Close => {
+        let action = match output {
+            None => Task::none(),
+            Some(Output::Close) => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.conflict = None;
+                    Self::stash_conflict(tab);
                 }
+                self.focus_pane(crate::nav::Pane::Changes);
                 Task::none()
             }
-            Output::Apply {
-                path,
-                segments,
-                choices,
-            } => {
-                let n = choices.iter().filter(|c| c.is_some()).count();
-                let left = choices.len() - n;
-                let tail = if left == 0 {
-                    "Every conflict is chosen: the file is written and staged.".to_owned()
-                } else {
-                    format!("{left} unchosen conflict(s) keep their markers.")
-                };
-                self.confirm(Confirm::change(
-                    "resolve",
-                    "Resolve conflicts",
-                    vec![
-                        format!("Write {} with {n} chosen block(s)?", path.display()),
-                        tail,
-                    ],
-                    "Write",
-                    Purpose::ResolveBlocks {
-                        path,
-                        segments,
-                        choices,
-                    },
-                ))
+            Some(Output::OpenFile(path)) => {
+                self.update(Message::Changes(crate::features::changes::Message::Select(
+                    path,
+                    crate::features::changes::Group::Conflicts,
+                )))
             }
-            Output::TakeFile(path, side) => self.ask_take_side(path, side),
-            Output::MarkResolved(path) => self.confirm(Confirm::change(
-                "resolve",
-                "Mark resolved",
-                vec![
-                    format!("Stage {} as it is now?", path.display()),
-                    "Make sure no conflict markers are left in it.".into(),
-                ],
-                "Stage",
-                Purpose::MarkResolved(path),
+            Some(Output::NextFile) => self.on_banner(op_banner::Message::ShowConflicts),
+            Some(Output::ReplaceChoice(block, choice)) => self.confirm(Confirm::change(
+                "replace-conflict-edit",
+                "Replace edited block",
+                vec!["Replace the manual edit with the selected version?".into()],
+                "Replace",
+                Purpose::ReplaceConflictChoice(block, choice),
             )),
-        }
+            Some(Output::Reload(path)) => self.confirm(Confirm::delete(
+                "Discard conflict draft",
+                vec!["Discard the draft for this file and reload its current contents?".into()],
+                "Discard draft",
+                Purpose::DiscardConflictDraft(path),
+            )),
+            Some(Output::Apply(path, original, result)) => self.confirm(Confirm::change(
+                "resolve",
+                "Save and stage resolution",
+                vec![
+                    format!(
+                        "Write and stage {}?",
+                        crate::widgets::format::repo_path(&path)
+                    ),
+                    "Only this file is staged.".into(),
+                ],
+                "Save & stage",
+                Purpose::SaveConflict {
+                    path,
+                    original,
+                    result,
+                },
+            )),
+            Some(Output::TakeFile(path, side)) => self.ask_take_side(path, side),
+            Some(Output::MarkResolved(path)) => self.ask_mark_conflict_resolved(path),
+        };
+        Task::batch([task.map(Message::Conflict), action])
     }
 
     pub(super) fn run_resolve(
         &mut self,
         path: std::path::PathBuf,
-        segments: Vec<gf_git::conflict::Segment>,
-        choices: Vec<Option<gf_git::conflict::Choice>>,
+        original: std::sync::Arc<gf_git::ConflictDocument>,
+        result: String,
     ) -> Task<Message> {
-        // The resolver reloads after the refresh this triggers (see
-        // `on_loaded`), and closes once the file is no longer conflicted.
+        let Some(conflict) = self
+            .active_tab_mut()
+            .and_then(|tab| tab.conflict.as_mut())
+            .filter(|conflict| conflict.path == path)
+        else {
+            return Task::none();
+        };
+        conflict.saving(true);
         self.op_recorded(
             format!("resolve {}", path.display()),
-            super::OpKind::Generic,
+            super::OpKind::ResolveConflict(path.clone()),
             Some(super::ops::Record::new(crate::undo::resolve(path.clone()))),
-            move |r| async move {
-                r.resolve_blocks(&path, &segments, &choices)
-                    .await
-                    .map(|_| ())
-            },
+            move |r| async move { r.save_conflict_result(&path, &original, &result).await },
         )
     }
 

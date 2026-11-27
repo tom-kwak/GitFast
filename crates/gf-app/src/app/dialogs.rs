@@ -173,11 +173,13 @@ pub enum Purpose {
         /// "Undo anyway": overwrite what changed since the step.
         force: bool,
     },
-    ResolveBlocks {
+    SaveConflict {
         path: PathBuf,
-        segments: Vec<gf_git::conflict::Segment>,
-        choices: Vec<Option<gf_git::conflict::Choice>>,
+        original: std::sync::Arc<gf_git::ConflictDocument>,
+        result: String,
     },
+    ReplaceConflictChoice(usize, gf_git::conflict::Choice),
+    DiscardConflictDraft(PathBuf),
     TakeSide(PathBuf, gf_git::Side),
     /// Load the history down to a far commit, then show it.
     RevealCommit {
@@ -1150,11 +1152,21 @@ impl App {
                 OpKind::Remote(super::RemoteOp::LfsPull),
                 |r| async move { r.lfs_pull().await },
             ),
-            Purpose::ResolveBlocks {
+            Purpose::SaveConflict {
                 path,
-                segments,
-                choices,
-            } => self.run_resolve(path, segments, choices),
+                original,
+                result,
+            } => self.run_resolve(path, original, result),
+            Purpose::ReplaceConflictChoice(block, choice) => self.on_conflict_message(
+                crate::features::conflict_view::Message::ReplaceChoice(block, choice),
+            ),
+            Purpose::DiscardConflictDraft(path) => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.conflict = None;
+                    tab.conflict_drafts.remove(&path);
+                }
+                self.open_conflict(path)
+            }
             Purpose::RevealCommit { oid, at } => self.show_located(oid, at),
             Purpose::RevealSearchCommit {
                 id,
@@ -1163,25 +1175,33 @@ impl App {
                 rows,
             } => self.load_search_commit(id, generation, oid, rows),
             Purpose::TakeSide(path, side) => {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.conflict = None;
+                if let Some(conflict) = self
+                    .active_tab_mut()
+                    .and_then(|tab| tab.conflict.as_mut())
+                    .filter(|conflict| conflict.path == path)
+                {
+                    conflict.saving(true);
                 }
                 self.op_recorded(
                     format!("resolve {}", path.display()),
-                    OpKind::Generic,
+                    OpKind::ResolveConflict(path.clone()),
                     Some(Record::new(undo::resolve(path.clone()))),
                     move |r| async move { r.take_side(&path, side).await },
                 )
             }
             Purpose::MarkResolved(path) => {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.conflict = None;
+                if let Some(conflict) = self
+                    .active_tab_mut()
+                    .and_then(|tab| tab.conflict.as_mut())
+                    .filter(|conflict| conflict.path == path)
+                {
+                    conflict.saving(true);
                 }
                 self.op_recorded(
                     format!("mark {} resolved", path.display()),
-                    OpKind::Generic,
+                    OpKind::ResolveConflict(path.clone()),
                     Some(Record::new(undo::resolve(path.clone()))),
-                    move |r| async move { r.stage(&[path]).await },
+                    move |r| async move { r.mark_conflict_resolved(&path).await },
                 )
             }
             Purpose::Amend { message } => {

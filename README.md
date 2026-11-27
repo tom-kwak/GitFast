@@ -66,9 +66,11 @@ runs is shown, and anything it does not cover can be typed on its `gf ❯` line.
 - From a commit's menu: cherry-pick, revert, reset the branch to it, squash
   it into the previous one, check it out without a branch, start
   **interactive rebase** (reorder, squash, reword, drop) or **bisect**.
-- **Merge, rebase and cherry-pick conflicts** open a resolver: take ours,
-  theirs or both, block by block. A banner shows the operation in progress
-  with continue, skip and abort.
+- **Merge, rebase and cherry-pick conflicts** open a three-way editor with
+  both sides aligned around an editable result. Take ours, theirs or both for
+  each block, or edit the result directly. Drafts are kept as you switch
+  between conflicted files. A banner shows the operation in progress with
+  continue, skip and abort.
 - **Submodules** and **Git LFS** (track, untrack, pull) from the refs panel.
 
 ### Safe by default
@@ -227,8 +229,8 @@ Update the workspace version in `Cargo.toml` and `Cargo.lock`, add
 push `main` and the tag together.
 
 ```bash
-git tag release-0.0.14 main
-git push --atomic origin main release-0.0.14
+git tag release-0.0.15 main
+git push --atomic origin main release-0.0.15
 ```
 
 The [release workflow](.github/workflows/release.yml) verifies the tagged

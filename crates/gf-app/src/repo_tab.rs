@@ -927,8 +927,12 @@ pub struct RepoTab {
     pub blame_request: u64,
     pub history_request: u64,
     pub blame: Option<crate::features::blame_view::State>,
-    /// Conflict resolver shown instead of the local diff while open.
+    /// The working tree can be replaced by a full-width conflict resolver.
     pub conflict: Option<crate::features::conflict_view::State>,
+    pub conflict_request: u64,
+    pub conflict_drafts: HashMap<PathBuf, crate::features::conflict_view::State>,
+    pub conflict_files: Vec<PathBuf>,
+    pub conflict_completed: Vec<PathBuf>,
     /// Undo / redo steps of gf's own operations (saved in the git dir).
     pub undo: crate::undo::History,
     /// An undo / redo is being checked or run: further presses wait.
@@ -974,6 +978,10 @@ impl RepoTab {
             history_request: 0,
             blame: None,
             conflict: None,
+            conflict_request: 0,
+            conflict_drafts: HashMap::new(),
+            conflict_files: Vec::new(),
+            conflict_completed: Vec::new(),
             undo,
             undo_busy: false,
             undo_queue: None,

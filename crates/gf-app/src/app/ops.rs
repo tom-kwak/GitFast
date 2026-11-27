@@ -489,33 +489,27 @@ impl App {
                 }
                 // A file that moved between groups keeps its diff visible.
                 let followed = tab.changes.follow(&snap.status.entries);
-                // Keep an open conflict resolver in sync: reload it while the
-                // file is still conflicted, close it once resolved.
-                let conflict_path = tab
-                    .conflict
-                    .as_ref()
-                    .filter(|_| snap.loaded.status)
-                    .map(|c| c.path.clone());
-                if let Some(path) = conflict_path {
-                    let still = snap.status.entries.iter().any(|e| {
-                        matches!(e, gf_core::model::StatusEntry::Conflicted { path: p, .. } if *p == path)
-                    });
-                    if still {
-                        let repo = tab.repo.clone();
-                        let rid = repo.id();
-                        tasks.push(Task::perform(
-                            {
-                                let path = path.clone();
-                                async move {
-                                    repo.conflict_segments(&path)
-                                        .await
-                                        .map_err(|e| e.to_string())
-                                }
-                            },
-                            move |result| Message::ConflictLoaded(rid, path.clone(), result),
-                        ));
-                    } else {
-                        tab.conflict = None;
+                if snap.loaded.status {
+                    tab.conflict_files = snap
+                        .status
+                        .entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            gf_core::model::StatusEntry::Conflicted { path, .. } => {
+                                Some(path.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    tab.conflict_files.sort_unstable();
+                    tab.conflict_completed
+                        .retain(|path| !tab.conflict_files.contains(path));
+                    if let Some(conflict) = &mut tab.conflict {
+                        if !tab.conflict_files.contains(&conflict.path) {
+                            conflict.resolved_outside_app();
+                        } else if touched.includes(&conflict.path) || refreshed {
+                            tasks.push(Self::load_conflict(tab, false));
+                        }
                     }
                 }
                 // A merge / rebase gf started and that stopped on
@@ -940,6 +934,24 @@ impl App {
         result: Result<(), String>,
         recorded: bool,
     ) -> Task<Message> {
+        if let OpKind::ResolveConflict(path) = &kind
+            && let Some(tab) = self.tab_mut(id)
+        {
+            if result.is_ok() && !tab.conflict_completed.contains(path) {
+                tab.conflict_completed.push(path.clone());
+                tab.conflict_files.retain(|file| file != path);
+                tab.conflict_drafts.remove(path);
+            }
+            if let Some(conflict) = tab.conflict.as_mut().filter(|c| c.path == *path) {
+                conflict.saving(false);
+                if result.is_ok() {
+                    conflict.resolved_on_disk();
+                }
+                if let Err(error) = &result {
+                    conflict.operation_failed(error);
+                }
+            }
+        }
         let next_stage = if let OpKind::Stage { git_dir, file } = &kind {
             if result.is_err()
                 && let Some(path) = file

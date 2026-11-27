@@ -129,6 +129,7 @@ pub enum Shortcut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpKind {
     Generic,
+    ResolveConflict(PathBuf),
     Stage {
         git_dir: PathBuf,
         file: Option<PathBuf>,
@@ -342,8 +343,9 @@ pub enum Message {
     ),
     ConflictLoaded(
         RepoId,
+        u64,
         PathBuf,
-        Result<Option<Vec<gf_git::conflict::Segment>>, String>,
+        Result<Arc<crate::features::conflict_view::Prepared>, String>,
     ),
     BisectDone(RepoId, Result<gf_git::BisectProgress, String>),
     /// Plan for the rebase editor; the ids, when given, are preset to squash.
@@ -1390,9 +1392,18 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ConflictLoaded(id, path, result) => {
-                if let Some(c) = self.tab_mut(id).and_then(|t| t.conflict.as_mut()) {
-                    c.loaded(&path, result);
+            Message::ConflictLoaded(id, request, path, result) => {
+                let tokens = self.tokens.clone();
+                let active = self.active_tab().is_some_and(|tab| {
+                    tab.repo.id() == id && tab.code_view == diff_view::Role::Local
+                });
+                if let Some(c) = self.tab_mut(id).and_then(|t| t.conflict.as_mut())
+                    && c.path == path
+                    && c.request == request
+                    && c.loaded(result)
+                    && active
+                {
+                    return c.reveal(&tokens).map(Message::Conflict);
                 }
                 Task::none()
             }
@@ -1596,7 +1607,14 @@ impl App {
             // The worktrees view shows the new tab's trees: read them now.
             let id = self.tabs[i].repo.id();
             let poll = self.request_worktrees(id);
-            return Task::batch([self.reveal_active_tab(), poll]);
+            let scroll = self
+                .active_tab()
+                .filter(|tab| tab.code_view == diff_view::Role::Local)
+                .and_then(|tab| tab.conflict.as_ref())
+                .map_or_else(Task::none, |conflict| {
+                    conflict.restore_scroll().map(Message::Conflict)
+                });
+            return Task::batch([self.reveal_active_tab(), poll, scroll]);
         }
         self.reveal_active_tab()
     }
@@ -2142,7 +2160,9 @@ impl App {
                 }
                 let main: Element<'_, Message> =
                     main.push(main_area(t, tab, cx, active, appearance)).into();
-                if appearance.show_refs {
+                if tab.code_view == diff_view::Role::Local && tab.conflict.is_some() {
+                    main
+                } else if appearance.show_refs {
                     // The divider takes the place of the gap.
                     let divider =
                         widgets::splitter::Splitter::new(Message::ResizeRefs, t.border, t.accent())
@@ -2568,6 +2588,34 @@ fn main_area<'a>(
         // WORKING TREE: changed files over the commit box on the left, the
         // selected file's changes on the right.
         Role::Local => {
+            if let Some(conflict) = &tab.conflict {
+                return column![
+                    tabs,
+                    frame(
+                        Pane::Diff,
+                        conflict
+                            .view(
+                                t,
+                                &tab.conflict_files,
+                                &tab.conflict_drafts,
+                                &tab.conflict_completed,
+                                cx.snapshot
+                                    .and_then(|s| s.status.head.branch.as_deref())
+                                    .or_else(|| cx.snapshot.and_then(|s| s
+                                        .status
+                                        .head
+                                        .oid
+                                        .as_ref()
+                                        .map(|oid| oid.short())))
+                            )
+                            .map(Message::Conflict)
+                    )
+                ]
+                .spacing(4)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+            }
             let left = column![
                 container(frame(
                     Pane::Changes,
@@ -2583,13 +2631,7 @@ fn main_area<'a>(
                 container(tab.commit.view(cx).map(Message::Commit)).height(Length::FillPortion(2)),
             ]
             .spacing(4);
-            let diff = frame(
-                Pane::Diff,
-                match &tab.conflict {
-                    Some(c) => c.view(t).map(Message::Conflict),
-                    None => tab.local_diff.view(cx).map(Message::LocalDiff),
-                },
-            );
+            let diff = frame(Pane::Diff, tab.local_diff.view(cx).map(Message::LocalDiff));
             column![tabs, list_split(t, list_cols, left.into(), diff),]
                 .spacing(4)
                 .width(Length::Fill)

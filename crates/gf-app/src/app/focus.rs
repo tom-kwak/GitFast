@@ -49,6 +49,9 @@ impl App {
         let Some(tab) = self.active_tab() else {
             return Vec::new();
         };
+        if tab.code_view == Role::Local && tab.conflict.is_some() {
+            return vec![Pane::Diff];
+        }
         let mut panes = Vec::new();
         if self.settings.appearance.show_refs {
             panes.push(Pane::Sidebar);
@@ -234,6 +237,26 @@ impl App {
             return run(self, k.shortcut.filter(|s| !text_edit(*s)));
         }
         let field = self.pointer.field_at_key();
+        if let Some(conflict) = self
+            .active_tab()
+            .filter(|tab| tab.code_view == Role::Local)
+            .and_then(|tab| tab.conflict.as_ref())
+        {
+            use crate::features::conflict_view::Message as Conflict;
+            if k.shortcut == Some(Shortcut::Escape) {
+                let action = if conflict.editing() {
+                    Conflict::CancelEdit
+                } else {
+                    Conflict::Close
+                };
+                return self.on_conflict_message(action);
+            }
+            if field == Field::None
+                && let Some(action) = k.nav.and_then(|n| conflict.key(n.key))
+            {
+                return self.on_conflict_message(action);
+            }
+        }
         if let Some(blame) = self
             .active_tab()
             .filter(|tab| tab.code_view == Role::Commit)
