@@ -5,7 +5,8 @@
 <h1 align="center">gf</h1>
 
 <p align="center">
-  <b>Git Fast.</b> A Git GUI for macOS and Windows, written in Rust.
+  <b>Git Fast.</b> An open-source Git GUI for macOS and Windows, written in Rust.
+  Licensed under the <a href="LICENSE">Apache License 2.0</a>.
 </p>
 
 <p align="center">
