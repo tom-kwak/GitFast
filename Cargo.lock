@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "gf-app"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "cap",
@@ -1408,15 +1408,15 @@ dependencies = [
 
 [[package]]
 name = "gf-auth"
-version = "0.0.14"
+version = "0.0.15"
 
 [[package]]
 name = "gf-commands"
-version = "0.0.14"
+version = "0.0.15"
 
 [[package]]
 name = "gf-config"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "directories",
  "gf-core",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "gf-core"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "thiserror 2.0.21",
  "tokio",
@@ -1437,11 +1437,11 @@ dependencies = [
 
 [[package]]
 name = "gf-flow"
-version = "0.0.14"
+version = "0.0.15"
 
 [[package]]
 name = "gf-git"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "gf-core",
  "gf-test-support",
@@ -1457,56 +1457,56 @@ dependencies = [
 
 [[package]]
 name = "gf-hosting"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "gf-hosting-azure"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "gf-hosting",
 ]
 
 [[package]]
 name = "gf-hosting-bitbucket"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "gf-hosting",
 ]
 
 [[package]]
 name = "gf-hosting-gitea"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "gf-hosting",
 ]
 
 [[package]]
 name = "gf-hosting-github"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "gf-hosting",
 ]
 
 [[package]]
 name = "gf-hosting-gitlab"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "gf-hosting",
 ]
 
 [[package]]
 name = "gf-test-support"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "gf-watch"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "gf-core",
  "gf-test-support",
